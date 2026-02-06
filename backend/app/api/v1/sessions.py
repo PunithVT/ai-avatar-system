@@ -143,9 +143,9 @@ async def end_session(
                 detail="Session not found"
             )
         
-        from datetime import datetime
+        from datetime import datetime, timezone
         session.status = "ended"
-        session.ended_at = datetime.utcnow()
+        session.ended_at = datetime.now(timezone.utc)
         
         await db.commit()
         await db.refresh(session)
