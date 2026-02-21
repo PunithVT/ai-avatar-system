@@ -288,5 +288,5 @@ MIT © 2025
 ---
 
 <div align="center">
-  <sub>Inspired by <a href="https://github.com/jamiepine/voicebox">Voicebox</a> · Built with FastAPI + Next.js + SadTalker</sub>
+  <sub>Built with FastAPI + Next.js + SadTalker</sub>
 </div>
