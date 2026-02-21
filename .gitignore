@@ -3,6 +3,7 @@ node_modules/
 frontend/node_modules/
 .venv/
 venv/
+env/
 
 # Environment
 .env
@@ -11,23 +12,39 @@ venv/
 
 # Next.js
 .next/
+frontend/.next/
 out/
+frontend/out/
 
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
+*.pyo
+*.so
+*.dylib
+*.egg
 *.egg-info/
+.eggs/
 
 # Build
 dist/
 build/
 *.tsbuildinfo
 
+# Lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
 # ML models & media
 *.pt
 *.pth
 *.ckpt
+*.bin
+*.onnx
 *.safetensors
+models/
 uploads/
 outputs/
 voice_profiles/*.wav
@@ -43,14 +60,33 @@ redis_data/
 infrastructure/.terraform/
 infrastructure/*.tfstate
 infrastructure/*.tfstate.backup
+infrastructure/*.tfvars
 infrastructure/.terraform.lock.hcl
+
+# Docker
+docker-compose.override.yml
 
 # Logs
 *.log
 logs/
 
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# SSL / secrets
+*.pem
+*.key
+*.crt
+nginx/ssl/
+
 # OS / IDE
 .DS_Store
 Thumbs.db
+*~
 .vscode/
 .idea/
+*.swp
+*.swo

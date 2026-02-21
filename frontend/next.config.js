@@ -2,14 +2,32 @@
 const nextConfig = {
   reactStrictMode: true,
   images: {
-    domains: [
-      'localhost',
-      's3.amazonaws.com',
-      // Add your S3 bucket domain
-      process.env.NEXT_PUBLIC_S3_BUCKET_DOMAIN,
-      // Add CloudFront domain if using
-      process.env.NEXT_PUBLIC_CLOUDFRONT_DOMAIN,
-    ].filter(Boolean),
+    remotePatterns: [
+      {
+        protocol: 'http',
+        hostname: 'localhost',
+      },
+      {
+        protocol: 'https',
+        hostname: '*.s3.*.amazonaws.com',
+      },
+      {
+        protocol: 'https',
+        hostname: 's3.amazonaws.com',
+      },
+      ...(process.env.NEXT_PUBLIC_S3_BUCKET_DOMAIN
+        ? [{
+            protocol: 'https',
+            hostname: process.env.NEXT_PUBLIC_S3_BUCKET_DOMAIN,
+          }]
+        : []),
+      ...(process.env.NEXT_PUBLIC_CLOUDFRONT_DOMAIN
+        ? [{
+            protocol: 'https',
+            hostname: process.env.NEXT_PUBLIC_CLOUDFRONT_DOMAIN,
+          }]
+        : []),
+    ],
   },
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
