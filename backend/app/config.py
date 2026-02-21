@@ -24,7 +24,11 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     
-    # AWS
+    # Storage — local by default; set USE_LOCAL_STORAGE=false to use S3
+    USE_LOCAL_STORAGE: bool = True
+    LOCAL_STORAGE_PATH: str = "uploads"
+
+    # AWS (only needed when USE_LOCAL_STORAGE=false)
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
     AWS_REGION: str = "us-east-1"
