@@ -9,6 +9,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from app.config import settings
 from app.database import engine, Base
 from app.api.v1 import avatars, conversations, messages, sessions, users
+from app.api.v1 import voices
 from app.websocket import websocket_manager
 from app.services.storage import storage_service
 
@@ -75,6 +76,7 @@ app.include_router(avatars.router, prefix="/api/v1/avatars", tags=["avatars"])
 app.include_router(sessions.router, prefix="/api/v1/sessions", tags=["sessions"])
 app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["conversations"])
 app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"])
+app.include_router(voices.router, prefix="/api/v1/voices", tags=["voices"])
 
 
 @app.get("/")
