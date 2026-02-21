@@ -1,305 +1,229 @@
-from fastapi import WebSocket
-import logging
-import json
-import asyncio
-from typing import Dict, Optional
 import base64
+import logging
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-import tempfile
+from typing import Dict, Optional
 
+from fastapi import WebSocket
+
+from app.services.animator import avatar_animator
+from app.services.llm import llm_service
+from app.services.storage import storage_service
 from app.services.stt import stt_service
 from app.services.tts import tts_service
-from app.services.llm import llm_service
-from app.services.animator import avatar_animator
-from app.services.storage import storage_service
 
 logger = logging.getLogger(__name__)
+TMPDIR = Path(tempfile.gettempdir())
 
 
 class ConnectionManager:
-    """Manage WebSocket connections"""
+    """Manage WebSocket connections and the real-time avatar pipeline."""
 
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self.session_data: Dict[str, dict] = {}
 
+    # ── connection lifecycle ──────────────────────────────────────────────────
+
     async def connect(self, session_id: str, websocket: WebSocket):
-        """Connect new WebSocket client"""
         await websocket.accept()
         self.active_connections[session_id] = websocket
         self.session_data[session_id] = {
-            'messages': [],
-            'avatar_id': None,
-            'avatar_s3_key': None,
-            'user_id': None,
-            'connected_at': datetime.now(timezone.utc)
+            "messages": [],
+            "avatar_id": None,
+            "avatar_image_key": None,
+            "avatar_image_local": None,
+            "voice_wav": None,
+            "user_id": None,
+            "connected_at": datetime.now(timezone.utc),
         }
-
-        # Load session data from database
         await self._load_session_data(session_id)
-
         logger.info(f"WebSocket connected: {session_id}")
 
     async def _load_session_data(self, session_id: str):
-        """Load session and avatar data from database"""
         try:
             from app.database import AsyncSessionLocal
-            from app.models import Session, Avatar
+            from app.models import Avatar
+            from app.models import Session as SessionModel
             from sqlalchemy import select
 
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
-                    select(Session).where(Session.id == session_id)
+                    select(SessionModel).where(SessionModel.id == session_id)
                 )
                 session = result.scalar_one_or_none()
+                if not session:
+                    return
 
-                if session:
-                    self.session_data[session_id]['avatar_id'] = session.avatar_id
-                    self.session_data[session_id]['user_id'] = session.user_id
+                self.session_data[session_id]["avatar_id"] = session.avatar_id
+                self.session_data[session_id]["user_id"] = session.user_id
 
-                    # Load avatar image info
-                    result = await db.execute(
-                        select(Avatar).where(Avatar.id == session.avatar_id)
-                    )
-                    avatar = result.scalar_one_or_none()
-                    if avatar:
-                        self.session_data[session_id]['avatar_s3_key'] = avatar.s3_key
-                        logger.info(f"Loaded avatar {avatar.id} for session {session_id}")
+                result = await db.execute(
+                    select(Avatar).where(Avatar.id == session.avatar_id)
+                )
+                avatar = result.scalar_one_or_none()
+                if avatar:
+                    self.session_data[session_id]["avatar_image_key"] = avatar.s3_key
+                    local = await self._resolve_local_image(avatar)
+                    self.session_data[session_id]["avatar_image_local"] = local
+                    logger.info(f"Loaded avatar {avatar.id} for session {session_id}")
 
         except Exception as e:
             logger.error(f"Failed to load session data for {session_id}: {e}")
 
+    async def _resolve_local_image(self, avatar) -> str:
+        """Return a local FS path to the avatar image, downloading from S3 if needed."""
+        cache_path = TMPDIR / "avatars" / f"{avatar.id}.jpg"
+        if cache_path.exists():
+            return str(cache_path)
+
+        # Local storage: use get_local_path directly
+        try:
+            local = storage_service.get_local_path(avatar.s3_key)
+            if Path(local).exists():
+                return local
+        except (NotImplementedError, AttributeError):
+            pass
+
+        # S3 fallback: download and cache locally for the animator
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            data = await storage_service.download_file(avatar.s3_key)
+            cache_path.write_bytes(data)
+            return str(cache_path)
+        except Exception as e:
+            logger.error(f"Could not resolve avatar image: {e}")
+            return str(cache_path)
+
     async def disconnect(self, session_id: str):
-        """Disconnect WebSocket client"""
-        if session_id in self.active_connections:
-            del self.active_connections[session_id]
-        if session_id in self.session_data:
-            del self.session_data[session_id]
+        self.active_connections.pop(session_id, None)
+        self.session_data.pop(session_id, None)
         logger.info(f"WebSocket disconnected: {session_id}")
 
     async def send_message(self, session_id: str, message: dict):
-        """Send message to specific session"""
-        if session_id in self.active_connections:
-            websocket = self.active_connections[session_id]
+        ws = self.active_connections.get(session_id)
+        if ws:
             try:
-                await websocket.send_json(message)
+                await ws.send_json(message)
             except Exception as e:
-                logger.error(f"Failed to send message to {session_id}: {e}")
+                logger.error(f"Send failed [{session_id}]: {e}")
                 await self.disconnect(session_id)
 
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients"""
-        disconnected = []
-        for session_id, websocket in self.active_connections.items():
-            try:
-                await websocket.send_json(message)
-            except Exception as e:
-                logger.error(f"Failed to broadcast to {session_id}: {e}")
-                disconnected.append(session_id)
-
-        # Clean up disconnected clients
-        for session_id in disconnected:
-            await self.disconnect(session_id)
+    # ── handlers ──────────────────────────────────────────────────────────────
 
     async def handle_audio_input(self, session_id: str, audio_data: str):
-        """Handle audio input from client"""
         try:
-            logger.info(f"Processing audio input for session {session_id}")
-
-            # Send processing status
             await self.send_message(session_id, {
-                "type": "status",
-                "message": "Processing audio...",
-                "stage": "transcription"
+                "type": "status", "message": "Transcribing audio…", "stage": "transcription"
             })
 
-            # Decode base64 audio
-            audio_bytes = base64.b64decode(audio_data)
+            tmp_audio = TMPDIR / f"{session_id}_input.webm"
+            tmp_audio.write_bytes(base64.b64decode(audio_data))
 
-            # Save to temporary file
-            with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as tmp_audio:
-                tmp_audio.write(audio_bytes)
-                audio_path = tmp_audio.name
-
-            # Transcribe audio
-            text = await stt_service.transcribe(audio_path)
-            Path(audio_path).unlink(missing_ok=True)
+            text = await stt_service.transcribe(str(tmp_audio))
+            tmp_audio.unlink(missing_ok=True)
 
             if not text:
-                await self.send_message(session_id, {
-                    "type": "error",
-                    "message": "Could not transcribe audio"
-                })
+                await self.send_message(session_id, {"type": "error", "message": "Could not transcribe audio"})
                 return
 
-            logger.info(f"Transcribed text: {text}")
-
-            # Send transcription
-            await self.send_message(session_id, {
-                "type": "transcription",
-                "text": text
-            })
-
-            # Process as text input
+            await self.send_message(session_id, {"type": "transcription", "text": text})
             await self.handle_text_input(session_id, text)
 
         except Exception as e:
-            logger.error(f"Error processing audio: {e}")
-            await self.send_message(session_id, {
-                "type": "error",
-                "message": f"Audio processing failed: {str(e)}"
-            })
+            logger.error(f"Audio error [{session_id}]: {e}")
+            await self.send_message(session_id, {"type": "error", "message": f"Audio processing failed: {e}"})
 
     async def handle_text_input(self, session_id: str, text: str):
-        """Handle text input from client"""
         try:
-            logger.info(f"Processing text input for session {session_id}: {text}")
-
-            # Get session data
-            session_data = self.session_data.get(session_id, {})
-            messages = session_data.get('messages', [])
-
-            # Add user message
+            data = self.session_data.get(session_id, {})
+            messages = data.get("messages", [])
             messages.append({"role": "user", "content": text})
 
-            # Send thinking status
+            await self.send_message(session_id, {"type": "status", "message": "Thinking…", "stage": "llm"})
+
+            response = await llm_service.generate_response(messages)
+            messages.append({"role": "assistant", "content": response})
+            data["messages"] = messages
+
             await self.send_message(session_id, {
-                "type": "status",
-                "message": "Thinking...",
-                "stage": "llm"
+                "type": "message", "role": "assistant", "content": response
             })
-
-            # Generate LLM response
-            response_text = await llm_service.generate_response(messages)
-
-            # Add assistant message
-            messages.append({"role": "assistant", "content": response_text})
-            session_data['messages'] = messages
-
-            logger.info(f"LLM response: {response_text}")
-
-            # Send text response
-            await self.send_message(session_id, {
-                "type": "message",
-                "role": "assistant",
-                "content": response_text
-            })
-
-            # Generate avatar video
-            await self.generate_avatar_video(session_id, response_text)
+            await self._generate_avatar_video(session_id, response)
 
         except Exception as e:
-            logger.error(f"Error processing text: {e}")
-            await self.send_message(session_id, {
-                "type": "error",
-                "message": f"Text processing failed: {str(e)}"
-            })
+            logger.error(f"Text error [{session_id}]: {e}")
+            await self.send_message(session_id, {"type": "error", "message": f"Processing failed: {e}"})
 
-    async def _get_avatar_image_path(self, session_id: str, avatar_id: str) -> str:
-        """Download avatar image from S3 and return local path"""
-        local_path = f"/tmp/avatars/{avatar_id}.jpg"
+    # ── video generation ──────────────────────────────────────────────────────
 
-        # Return cached local copy if it exists
-        if Path(local_path).exists():
-            return local_path
-
-        session_data = self.session_data.get(session_id, {})
-        s3_key = session_data.get('avatar_s3_key')
-
-        if s3_key:
-            try:
-                Path("/tmp/avatars").mkdir(parents=True, exist_ok=True)
-                image_data = await storage_service.download_file(s3_key)
-                with open(local_path, 'wb') as f:
-                    f.write(image_data)
-                logger.info(f"Downloaded avatar image to {local_path}")
-                return local_path
-            except Exception as e:
-                logger.error(f"Failed to download avatar image: {e}")
-
-        return local_path
-
-    async def generate_avatar_video(self, session_id: str, text: str):
-        """Generate animated avatar video"""
+    async def _generate_avatar_video(self, session_id: str, text: str):
         try:
-            session_data = self.session_data.get(session_id, {})
-            avatar_id = session_data.get('avatar_id')
+            data = self.session_data.get(session_id, {})
+            avatar_image = data.get("avatar_image_local")
 
-            if not avatar_id:
-                logger.warning(f"No avatar_id for session {session_id}")
+            if not avatar_image:
+                logger.warning(f"No avatar image for session {session_id}")
                 return
 
-            # Send video generation status
+            # TTS — uses cloned voice WAV if one is set
             await self.send_message(session_id, {
-                "type": "status",
-                "message": "Generating speech...",
-                "stage": "tts"
+                "type": "status", "message": "Synthesising speech…", "stage": "tts"
             })
+            tmp_audio = TMPDIR / f"{session_id}_tts.wav"
+            speaker_wav: Optional[str] = data.get("voice_wav")
 
-            # Generate speech audio
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_audio:
-                audio_path = tmp_audio.name
+            await tts_service.synthesize(
+                text=text,
+                output_path=str(tmp_audio),
+                speaker_wav=speaker_wav,   # None → default voice, path → cloned voice
+                language="en",
+            )
 
-            await tts_service.synthesize(text, audio_path)
-
-            # Send animation status
+            # Animation
             await self.send_message(session_id, {
-                "type": "status",
-                "message": "Creating avatar animation...",
-                "stage": "animation"
+                "type": "status", "message": "Animating avatar…", "stage": "animation"
             })
-
-            # Get avatar image from storage
-            avatar_image_path = await self._get_avatar_image_path(session_id, avatar_id)
-
-            # Generate animation
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_video:
-                video_path = tmp_video.name
-
+            tmp_video = TMPDIR / f"{session_id}_video.mp4"
             await avatar_animator.animate(
-                avatar_image_path,
-                audio_path,
-                video_path
+                avatar_image_path=avatar_image,
+                audio_path=str(tmp_audio),
+                output_path=str(tmp_video),
             )
 
-            # Upload to S3
-            with open(video_path, 'rb') as f:
-                video_data = f.read()
-
-            s3_key = f"videos/{session_id}/{datetime.now(timezone.utc).timestamp()}.mp4"
+            # Upload / serve
+            ts = int(datetime.now(timezone.utc).timestamp())
+            video_key = f"videos/{session_id}/{ts}.mp4"
             video_url = await storage_service.upload_file(
-                video_data,
-                s3_key,
-                content_type="video/mp4"
+                tmp_video.read_bytes(), video_key, content_type="video/mp4"
             )
 
-            # Clean up temporary files
-            Path(audio_path).unlink(missing_ok=True)
-            Path(video_path).unlink(missing_ok=True)
+            tmp_audio.unlink(missing_ok=True)
+            tmp_video.unlink(missing_ok=True)
 
-            # Send video URL
             await self.send_message(session_id, {
-                "type": "video",
-                "video_url": video_url,
-                "text": text
+                "type": "video", "video_url": video_url, "text": text
             })
-
-            logger.info(f"Avatar video generated: {video_url}")
+            logger.info(f"Video ready [{session_id}]: {video_url}")
 
         except Exception as e:
-            logger.error(f"Error generating avatar video: {e}")
+            logger.error(f"Video generation error [{session_id}]: {e}")
             await self.send_message(session_id, {
-                "type": "error",
-                "message": f"Video generation failed: {str(e)}"
+                "type": "error", "message": f"Video generation failed: {e}"
             })
 
+    # ── helpers ───────────────────────────────────────────────────────────────
+
     async def set_avatar(self, session_id: str, avatar_id: str):
-        """Set avatar for session"""
         if session_id in self.session_data:
-            self.session_data[session_id]['avatar_id'] = avatar_id
-            logger.info(f"Avatar set for session {session_id}: {avatar_id}")
+            self.session_data[session_id]["avatar_id"] = avatar_id
+
+    async def set_voice(self, session_id: str, voice_wav_path: str):
+        """Attach a cloned-voice WAV file to the session for TTS synthesis."""
+        if session_id in self.session_data:
+            self.session_data[session_id]["voice_wav"] = voice_wav_path
+            logger.info(f"Voice set [{session_id}]: {voice_wav_path}")
 
 
-# Global instance
 websocket_manager = ConnectionManager()
