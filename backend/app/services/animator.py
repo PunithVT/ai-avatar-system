@@ -1,13 +1,18 @@
-import torch
-import cv2
-import numpy as np
-from pathlib import Path
+import asyncio
+import hashlib
 import logging
 import subprocess
-import hashlib
-import asyncio
+import tempfile
+from pathlib import Path
 from typing import Optional
+
+import cv2
+import numpy as np
+import torch
+
 from app.config import settings
+
+TMPDIR = Path(tempfile.gettempdir())
 
 logger = logging.getLogger(__name__)
 
