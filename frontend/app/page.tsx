@@ -76,6 +76,7 @@ type View = 'home' | 'avatars' | 'chat' | 'voice'
 
 export default function Home() {
   const [selectedAvatar, setSelectedAvatar] = useState<string | null>(null)
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [view, setView] = useState<View>('home')
 
   const handleSelectAvatar = (id: string) => {
@@ -264,7 +265,7 @@ export default function Home() {
               <h1 className="text-3xl font-black gradient-text mb-2">Voice Studio</h1>
               <p className="text-gray-400">Clone voices and manage your voice library.</p>
             </div>
-            <VoicePanel />
+            <VoicePanel sessionId={activeSessionId} />
           </div>
         )}
 
@@ -275,7 +276,7 @@ export default function Home() {
               <h1 className="text-3xl font-black gradient-text mb-2">Live Conversation</h1>
               <p className="text-gray-400">Talk to your AI avatar in real time.</p>
             </div>
-            <ChatInterface avatarId={selectedAvatar} />
+            <ChatInterface avatarId={selectedAvatar} onSessionCreated={setActiveSessionId} />
           </div>
         )}
 

@@ -20,6 +20,7 @@ interface Message {
 
 interface ChatInterfaceProps {
   avatarId: string
+  onSessionCreated?: (sessionId: string) => void
 }
 
 // Detect emotion from text (lightweight heuristic — server-side model can replace)
@@ -91,7 +92,7 @@ function TypingIndicator() {
   )
 }
 
-export function ChatInterface({ avatarId }: ChatInterfaceProps) {
+export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [inputText, setInputText] = useState('')
   const [isRecording, setIsRecording] = useState(false)
@@ -140,6 +141,7 @@ export function ChatInterface({ avatarId }: ChatInterfaceProps) {
     onSuccess: (data) => {
       setSessionId(data.id)
       connectWebSocket(data.id)
+      onSessionCreated?.(data.id)
     },
     onError: () => {
       toast.error('Failed to start session')
