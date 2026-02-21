@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Next.js
+.next/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Build
+dist/
+build/
+*.tsbuildinfo
+
+# ML models & media
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+uploads/
+outputs/
+voice_profiles/*.wav
+voice_profiles/*.webm
+
+# Database
+*.db
+*.sqlite
+postgres_data/
+redis_data/
+
+# Terraform
+infrastructure/.terraform/
+infrastructure/*.tfstate
+infrastructure/*.tfstate.backup
+infrastructure/.terraform.lock.hcl
+
+# Logs
+*.log
+logs/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
