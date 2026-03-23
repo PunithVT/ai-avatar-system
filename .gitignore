@@ -47,8 +47,11 @@ pnpm-lock.yaml
 models/
 uploads/
 outputs/
-voice_profiles/*.wav
-voice_profiles/*.webm
+voice_profiles/
+backend/voice_profiles/
+**/voice_profiles/*.wav
+**/voice_profiles/*.webm
+**/voice_profiles/*.mp3
 
 # Database
 *.db
