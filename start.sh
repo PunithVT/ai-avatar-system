@@ -110,9 +110,15 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
   warn "Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env, or use Ollama (LLM_PROVIDER=ollama)."
 fi
 
-# Check SadTalker lip-sync setup (uses sentinel file written by setup_sadtalker.sh)
+# Check SadTalker lip-sync setup
+# Sentinel written by setup_sadtalker.sh; also fall back to checking model files directly
+_sadtalker_ready() {
+  [[ -f ".sadtalker_ready" ]] && return 0
+  [[ -f "backend/models/SadTalker/checkpoints/SadTalker_V0.0.2_256.safetensors" ]] && return 0
+  return 1
+}
 if [[ "${AVATAR_ENGINE:-sadtalker}" == "sadtalker" ]]; then
-  if [[ -f ".sadtalker_ready" ]]; then
+  if _sadtalker_ready; then
     success "SadTalker lip-sync ready"
   else
     echo ""

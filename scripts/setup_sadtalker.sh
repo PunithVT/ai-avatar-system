@@ -8,6 +8,7 @@ BACKEND_DIR="$PROJECT_ROOT/backend"
 MODELS_DIR="$BACKEND_DIR/models"
 SADTALKER_DIR="$MODELS_DIR/SadTalker"
 VENV_PYTHON="$BACKEND_DIR/venv/bin/python"
+SENTINEL="$PROJECT_ROOT/.sadtalker_ready"
 
 # Fall back to system python if venv not found
 if [ ! -f "$VENV_PYTHON" ]; then
@@ -15,23 +16,24 @@ if [ ! -f "$VENV_PYTHON" ]; then
 fi
 
 echo "=== SadTalker Setup ==="
+echo "Project : $PROJECT_ROOT"
 echo "Backend : $BACKEND_DIR"
 echo "Python  : $VENV_PYTHON"
 echo ""
 
 # ── 1. Clone SadTalker ───────────────────────────────────────────────────────
 if [ -d "$SADTALKER_DIR/.git" ]; then
-  echo "[1/4] SadTalker already cloned — pulling latest..."
+  echo "[1/5] SadTalker already cloned — pulling latest..."
   git -C "$SADTALKER_DIR" pull --ff-only
 else
-  echo "[1/4] Cloning SadTalker..."
+  echo "[1/5] Cloning SadTalker..."
   mkdir -p "$MODELS_DIR"
   git clone https://github.com/OpenTalker/SadTalker.git "$SADTALKER_DIR"
 fi
 
 # ── 2. Install SadTalker Python dependencies into the venv ──────────────────
 echo ""
-echo "[2/4] Installing SadTalker requirements..."
+echo "[2/5] Installing SadTalker requirements..."
 "$VENV_PYTHON" -m pip install -q \
   face_alignment==1.3.5 \
   imageio==2.19.3 imageio-ffmpeg==0.4.7 \
@@ -44,7 +46,32 @@ echo "[2/4] Installing SadTalker requirements..."
   safetensors \
   av
 
-# ── 3. Download SadTalker checkpoints ───────────────────────────────────────
+# ── 3. Patch basicsr for torchvision ≥ 0.16 ─────────────────────────────────
+# basicsr 1.4.2 imports torchvision.transforms.functional_tensor which was
+# removed in torchvision 0.16. Create a compatibility shim if needed.
+echo ""
+echo "[3/5] Checking torchvision compatibility..."
+"$VENV_PYTHON" -c "from torchvision.transforms.functional_tensor import rgb_to_grayscale" 2>/dev/null \
+  && echo "  torchvision.transforms.functional_tensor OK" \
+  || {
+    echo "  Applying functional_tensor compatibility shim..."
+    "$VENV_PYTHON" - << 'PYEOF'
+import os, torchvision.transforms as T
+shim = os.path.join(os.path.dirname(T.__file__), "functional_tensor.py")
+if not os.path.exists(shim):
+    with open(shim, "w") as f:
+        f.write(
+            "# Compatibility shim for basicsr / torchvision >= 0.16\n"
+            "from torchvision.transforms.functional import *\n"
+            "from torchvision.transforms.functional import rgb_to_grayscale\n"
+        )
+    print(f"  Created shim at {shim}")
+else:
+    print("  Shim already exists")
+PYEOF
+  }
+
+# ── 4. Download SadTalker checkpoints ───────────────────────────────────────
 CKPT_DIR="$SADTALKER_DIR/checkpoints"
 GFPGAN_DIR="$SADTALKER_DIR/gfpgan/weights"
 mkdir -p "$CKPT_DIR" "$GFPGAN_DIR"
@@ -66,7 +93,7 @@ download_if_missing() {
 }
 
 echo ""
-echo "[3/4] Downloading SadTalker model checkpoints..."
+echo "[4/5] Downloading SadTalker model checkpoints..."
 download_if_missing "$BASE_URL/mapping_00109-model.pth.tar"         "$CKPT_DIR/mapping_00109-model.pth.tar"
 download_if_missing "$BASE_URL/mapping_00229-model.pth.tar"         "$CKPT_DIR/mapping_00229-model.pth.tar"
 download_if_missing "$BASE_URL/SadTalker_V0.0.2_256.safetensors"   "$CKPT_DIR/SadTalker_V0.0.2_256.safetensors"
@@ -79,22 +106,19 @@ download_if_missing "$FACEXLIB_URL/detection_Resnet50_Final.pth"    "$GFPGAN_DIR
 download_if_missing "$GFPGAN_URL/GFPGANv1.4.pth"                   "$GFPGAN_DIR/GFPGANv1.4.pth"
 download_if_missing "$FACEXLIB_V2_URL/parsing_parsenet.pth"         "$GFPGAN_DIR/parsing_parsenet.pth"
 
-# ── 4. Quick smoke-test ──────────────────────────────────────────────────────
+# ── 5. Verify and write sentinel ─────────────────────────────────────────────
 echo ""
-echo "[4/4] Verifying installation..."
-"$VENV_PYTHON" - <<'EOF'
-import sys, pathlib
-sadtalker = pathlib.Path(__file__).parent / "../../backend/models/SadTalker"
-EOF
-
-if [ -f "$SADTALKER_DIR/inference.py" ]; then
-  echo "  inference.py found ✓"
-else
-  echo "  ERROR: inference.py not found in $SADTALKER_DIR"
-  exit 1
-fi
+echo "[5/5] Verifying installation..."
 
 MISSING=0
+
+if [ ! -f "$SADTALKER_DIR/inference.py" ]; then
+  echo "  MISSING: inference.py not found in $SADTALKER_DIR"
+  MISSING=1
+else
+  echo "  inference.py ✓"
+fi
+
 for f in \
   "$CKPT_DIR/mapping_00109-model.pth.tar" \
   "$CKPT_DIR/SadTalker_V0.0.2_256.safetensors" \
@@ -102,17 +126,28 @@ for f in \
   if [ ! -f "$f" ]; then
     echo "  MISSING: $f"
     MISSING=1
+  else
+    echo "  $(basename "$f") ✓"
   fi
 done
 
+# Verify the torchvision shim works end-to-end
+if ! "$VENV_PYTHON" -c "from gfpgan import GFPGANer" 2>/dev/null; then
+  echo "  WARNING: gfpgan import still failing — SadTalker may not work"
+  MISSING=1
+else
+  echo "  gfpgan import ✓"
+fi
+
 if [ "$MISSING" -eq 0 ]; then
-  # Write sentinel so start.sh knows setup is done (avoids re-scanning model files)
-  touch "$PROJECT_ROOT/.sadtalker_ready"
+  touch "$SENTINEL"
+  echo ""
+  echo "  Sentinel written: $SENTINEL"
   echo ""
   echo "=== SadTalker setup complete! ==="
   echo "Restart the backend to pick up the change."
 else
   echo ""
-  echo "Some files are missing — check your internet connection and re-run."
+  echo "Some checks failed — see above. Fix and re-run."
   exit 1
 fi
