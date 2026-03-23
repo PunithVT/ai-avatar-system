@@ -78,7 +78,7 @@ async def upload_avatar(
         thumbnail_url=thumbnail_url,
         s3_key=image_key,
         status="ready",
-        metadata=metadata,
+        avatar_metadata=metadata,
     )
     db.add(avatar)
     await db.commit()

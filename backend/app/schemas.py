@@ -25,9 +25,8 @@ class UserResponse(UserBase):
     id: str
     is_active: bool
     created_at: datetime
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True}
 
 
 # Avatar Schemas
@@ -45,11 +44,10 @@ class AvatarResponse(AvatarBase):
     image_url: str
     thumbnail_url: Optional[str] = None
     status: str
-    metadata: Optional[Dict[str, Any]] = None
+    avatar_metadata: Optional[Dict[str, Any]] = Field(None, alias="avatar_metadata")
     created_at: datetime
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True, "populate_by_name": True}
 
 
 # Session Schemas
@@ -66,9 +64,8 @@ class SessionResponse(BaseModel):
     settings: Optional[Dict[str, Any]] = None
     started_at: datetime
     ended_at: Optional[datetime] = None
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True}
 
 
 # Message Schemas
@@ -87,11 +84,10 @@ class MessageResponse(MessageBase):
     role: str
     audio_url: Optional[str] = None
     video_url: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    message_metadata: Optional[Dict[str, Any]] = Field(None, alias="message_metadata")
     created_at: datetime
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True, "populate_by_name": True}
 
 
 # Conversation Schemas
@@ -103,9 +99,8 @@ class ConversationResponse(BaseModel):
     message_count: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True}
 
 
 # WebSocket Schemas

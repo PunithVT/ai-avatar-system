@@ -37,7 +37,7 @@ class Avatar(Base):
     thumbnail_url = Column(String, nullable=True)
     s3_key = Column(String, nullable=False)
     status = Column(String, default="processing")  # processing, ready, failed
-    metadata = Column(JSON, nullable=True)
+    avatar_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -73,7 +73,7 @@ class Message(Base):
     content_type = Column(String, default="text")  # text, audio, video
     audio_url = Column(String, nullable=True)
     video_url = Column(String, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    message_metadata = Column(JSON, nullable=True)
     tokens = Column(Integer, nullable=True)
     latency = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
