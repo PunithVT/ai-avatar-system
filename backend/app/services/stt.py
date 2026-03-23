@@ -68,11 +68,14 @@ class STTService:
             # Convert to mono if stereo
             if len(audio.shape) > 1:
                 audio = audio.mean(axis=1)
-            
+
             # Resample to 16kHz if needed
             if sample_rate != 16000:
                 import librosa
                 audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=16000)
+
+            # faster-whisper / ONNX Runtime requires float32
+            audio = audio.astype(np.float32)
             
             # Transcribe
             segments, info = self.model.transcribe(

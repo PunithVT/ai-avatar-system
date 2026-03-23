@@ -54,7 +54,8 @@ class Settings(BaseSettings):
     AVATAR_ENGINE: str = "sadtalker"  # sadtalker, liveportrait
     AVATAR_RESOLUTION: int = 512
     AVATAR_FPS: int = 25
-    
+    SADTALKER_PATH: str = "models/SadTalker"
+
     # STT Configuration
     STT_PROVIDER: str = "whisper"  # whisper, google, azure
     WHISPER_MODEL: str = "base"  # tiny, base, small, medium, large
