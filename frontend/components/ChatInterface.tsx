@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Send, Mic, MicOff, Video, Loader2, Volume2, VolumeX,
-  Sparkles, Clock, Copy, RotateCcw, ChevronDown, Wand2,
+  Sparkles, Clock, Copy, RotateCcw, Wand2,
   MessageCircle, Zap, Activity,
 } from 'lucide-react'
 import { useMutation } from '@tanstack/react-query'
@@ -197,6 +197,8 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
           timestamp: new Date(),
           emotion: detectEmotion(data.content),
         }])
+        setIsProcessing(false)
+        toast.dismiss('processing')
         break
 
       case 'video':
@@ -351,7 +353,6 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
           {/* Controls bar */}
           <div className="flex items-center justify-between mt-4 px-1">
             <div className="flex items-center gap-2">
-              {/* Connection status */}
               <div className="flex items-center gap-1.5 text-xs">
                 <span className={`status-dot ${
                   connectionStatus === 'connected' ? 'online'
@@ -463,7 +464,6 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
                         }`}
                     >
                       {message.content}
-                      {/* Copy on hover */}
                       <button
                         onClick={() => copyMessage(message.content)}
                         className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-surface-600 border border-white/10 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
@@ -509,7 +509,6 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
 
         {/* Input */}
         <div className="border-t border-white/8 px-4 py-3">
-          {/* Waveform when recording */}
           {isRecording && (
             <div className="flex items-center gap-2 mb-3 px-2">
               <span className="text-xs text-red-400 font-medium animate-pulse">REC</span>
@@ -574,7 +573,6 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
             </button>
           </div>
 
-          {/* Hint */}
           <p className="text-xs text-gray-600 text-center mt-2">
             Shift+Enter for new line · Mic for voice
           </p>
