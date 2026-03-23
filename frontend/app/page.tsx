@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, type CSSProperties } from 'react'
 import { AvatarUpload } from '@/components/AvatarUpload'
 import { AvatarList } from '@/components/AvatarList'
 import { ChatInterface } from '@/components/ChatInterface'
@@ -215,7 +215,7 @@ export default function Home() {
                   <div
                     key={title}
                     className="feature-card group"
-                    style={{ '--glow': glow } as React.CSSProperties}
+                    style={{ '--glow': glow } as CSSProperties}
                   >
                     <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${color} flex items-center justify-center mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300`}>
                       <Icon size={22} className="text-white" />
