@@ -37,6 +37,9 @@ package-lock.json
 yarn.lock
 pnpm-lock.yaml
 
+# Local setup sentinels
+.sadtalker_ready
+
 # ML models & media
 *.pt
 *.pth

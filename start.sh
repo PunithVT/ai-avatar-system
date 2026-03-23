@@ -110,11 +110,11 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
   warn "Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env, or use Ollama (LLM_PROVIDER=ollama)."
 fi
 
-# Check SadTalker lip-sync setup
-SADTALKER_INFERENCE="backend/models/SadTalker/inference.py"
-SADTALKER_CKPT="backend/models/SadTalker/checkpoints/SadTalker_V0.0.2_256.safetensors"
+# Check SadTalker lip-sync setup (uses sentinel file written by setup_sadtalker.sh)
 if [[ "${AVATAR_ENGINE:-sadtalker}" == "sadtalker" ]]; then
-  if [[ ! -f "$SADTALKER_INFERENCE" || ! -f "$SADTALKER_CKPT" ]]; then
+  if [[ -f ".sadtalker_ready" ]]; then
+    success "SadTalker lip-sync ready"
+  else
     echo ""
     echo -e "  ${YELLOW}┌─────────────────────────────────────────────────────┐${RESET}"
     echo -e "  ${YELLOW}│  ⚠  Lip-sync (SadTalker) is NOT set up yet          │${RESET}"
@@ -127,8 +127,6 @@ if [[ "${AVATAR_ENGINE:-sadtalker}" == "sadtalker" ]]; then
     echo -e "  ${YELLOW}│  (~600 MB download, one-time setup)                 │${RESET}"
     echo -e "  ${YELLOW}└─────────────────────────────────────────────────────┘${RESET}"
     echo ""
-  else
-    success "SadTalker lip-sync models found"
   fi
 fi
 

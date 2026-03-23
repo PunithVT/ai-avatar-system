@@ -3,7 +3,8 @@
 # Run from the project root:  bash scripts/setup_sadtalker.sh
 set -e
 
-BACKEND_DIR="$(cd "$(dirname "$0")/.." && pwd)/backend"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BACKEND_DIR="$PROJECT_ROOT/backend"
 MODELS_DIR="$BACKEND_DIR/models"
 SADTALKER_DIR="$MODELS_DIR/SadTalker"
 VENV_PYTHON="$BACKEND_DIR/venv/bin/python"
@@ -105,6 +106,8 @@ for f in \
 done
 
 if [ "$MISSING" -eq 0 ]; then
+  # Write sentinel so start.sh knows setup is done (avoids re-scanning model files)
+  touch "$PROJECT_ROOT/.sadtalker_ready"
   echo ""
   echo "=== SadTalker setup complete! ==="
   echo "Restart the backend to pick up the change."
