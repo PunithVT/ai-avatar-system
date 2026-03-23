@@ -242,8 +242,10 @@ if [[ "$MODE" == "dev" ]]; then
     python3 -m venv venv
   fi
   source venv/bin/activate
+  info "Upgrading pip and setuptools..."
+  pip install --upgrade pip "setuptools==69.5.1" wheel -q
   info "Installing backend dependencies..."
-  pip install -r requirements.txt -q
+  pip install --no-build-isolation -r requirements.txt -q
   info "Running database migrations..."
   alembic upgrade head 2>/dev/null || warn "Migration failed — DB may not be ready yet"
 
