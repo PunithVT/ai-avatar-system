@@ -1,4 +1,3 @@
-import whisper
 from faster_whisper import WhisperModel
 import logging
 import io

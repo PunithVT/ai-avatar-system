@@ -77,36 +77,47 @@ class TTSService:
         Returns:
             Path to generated audio file
         """
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+        # Try Coqui TTS first; fall back to gTTS if model not ready
         try:
             if self.model is None:
                 await self.initialize()
-            
-            logger.info(f"Synthesizing speech: {text[:100]}...")
-            
-            # Ensure output directory exists
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            
-            # Synthesize speech
+
+            logger.info(f"Synthesizing speech (coqui): {text[:100]}...")
+
             if speaker_wav and hasattr(self.model, 'tts_to_file'):
-                # Voice cloning with reference audio
                 self.model.tts_to_file(
                     text=text,
                     speaker_wav=speaker_wav,
                     language=language,
-                    file_path=output_path
+                    file_path=output_path,
                 )
             else:
-                # Standard synthesis
-                self.model.tts_to_file(
-                    text=text,
-                    file_path=output_path
-                )
-            
+                self.model.tts_to_file(text=text, file_path=output_path)
+
             logger.info(f"Speech synthesized successfully: {output_path}")
             return output_path
-        
+
         except Exception as e:
-            logger.error(f"Speech synthesis error: {e}")
+            logger.warning(f"Coqui TTS failed ({e}), falling back to gTTS")
+            return await self._gtts_fallback(text, output_path, language)
+
+    async def _gtts_fallback(self, text: str, output_path: str, language: str = "en") -> str:
+        """Fallback TTS using Google TTS (no local model required)."""
+        try:
+            from gtts import gTTS
+            from pydub import AudioSegment
+
+            logger.info(f"Synthesizing speech (gTTS): {text[:100]}...")
+            mp3_path = output_path.replace(".wav", "_gtts.mp3")
+            gTTS(text=text, lang=language, slow=False).save(mp3_path)
+            AudioSegment.from_mp3(mp3_path).export(output_path, format="wav")
+            Path(mp3_path).unlink(missing_ok=True)
+            logger.info(f"gTTS synthesis complete: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"gTTS also failed: {e}")
             raise
     
     async def synthesize_bytes(

@@ -4,7 +4,7 @@ python-multipart==0.0.6
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.0
-pydantic==2.5.3
+pydantic[email]==2.5.3
 pydantic-settings==2.1.0
 
 # Database
@@ -42,12 +42,12 @@ soundfile==0.12.1
 scipy==1.12.0
 
 # STT
-openai-whisper==20231117
-faster-whisper==0.10.0
+faster-whisper>=1.0.0
 
 # TTS
-TTS==0.22.0
-bark==0.1.4
+coqui-tts>=0.24.0
+gtts==2.5.1
+pydub==0.25.1
 
 # Avatar Animation
 face-alignment==1.4.1
