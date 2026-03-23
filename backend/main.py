@@ -6,6 +6,8 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from pathlib import Path
 import logging
+from datetime import datetime, timezone
+
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import settings
@@ -14,12 +16,29 @@ from app.api.v1 import avatars, conversations, messages, sessions, users
 from app.api.v1 import voices
 from app.websocket import websocket_manager
 from app.services.storage import storage_service
+from app.services.cache import cache_service
+from app.middleware.rate_limiter import RateLimitMiddleware
+from app.middleware.security import SecurityHeadersMiddleware, RequestLoggingMiddleware
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Initialize Sentry if DSN is configured
+if settings.SENTRY_DSN:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=settings.SENTRY_DSN,
+            traces_sample_rate=0.1 if settings.ENVIRONMENT == "production" else 1.0,
+            environment=settings.ENVIRONMENT,
+            release=f"avatar-system@1.0.0",
+        )
+        logger.info("Sentry initialized successfully")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Sentry: {e}")
 
 
 @asynccontextmanager
@@ -30,8 +49,9 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Initialise storage (creates uploads/ dir in local mode)
+    # Initialize services
     await storage_service.initialize()
+    await cache_service.initialize()
 
     # Mount local uploads directory so the browser can fetch images/videos
     if getattr(settings, "USE_LOCAL_STORAGE", True):
@@ -41,10 +61,13 @@ async def lifespan(app: FastAPI):
         logger.info(f"Serving local uploads from {uploads_dir}")
 
     logger.info("AI Avatar System started successfully")
+
     yield
 
+    # Cleanup
     logger.info("Shutting down AI Avatar System...")
     await storage_service.cleanup()
+    await cache_service.cleanup()
     logger.info("Shutdown complete")
 
 
@@ -57,6 +80,10 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
 )
 
+# Middleware (order matters — outermost first)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -66,6 +93,7 @@ app.add_middleware(
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# Prometheus metrics
 if settings.PROMETHEUS_ENABLED:
     Instrumentator().instrument(app).expose(app)
 
@@ -80,12 +108,47 @@ app.include_router(voices.router,        prefix="/api/v1/voices",        tags=["
 
 @app.get("/")
 async def root():
-    return {"name": "AI Avatar System API", "version": "2.0.0", "status": "running"}
+    return {
+        "name": "AI Avatar System API",
+        "version": "2.0.0",
+        "status": "running",
+        "environment": settings.ENVIRONMENT,
+    }
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "environment": settings.ENVIRONMENT}
+    services: dict[str, str] = {}
+    health: dict[str, object] = {
+        "status": "healthy",
+        "environment": settings.ENVIRONMENT,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "services": services,
+    }
+
+    # Check database
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(
+                __import__("sqlalchemy").text("SELECT 1")
+            )
+        services["database"] = "connected"
+    except Exception:
+        services["database"] = "disconnected"
+        health["status"] = "degraded"
+
+    # Check Redis
+    try:
+        if cache_service.redis:
+            await cache_service.redis.ping()
+            services["redis"] = "connected"
+        else:
+            services["redis"] = "not configured"
+    except Exception:
+        services["redis"] = "disconnected"
+        health["status"] = "degraded"
+
+    return health
 
 
 @app.websocket("/ws/session/{session_id}")
