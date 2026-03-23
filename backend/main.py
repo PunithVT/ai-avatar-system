@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import settings
-from app.database import engine, Base
+from app.database import engine, Base, AsyncSessionLocal
+from app.models import User
 from app.api.v1 import avatars, conversations, messages, sessions, users
 from app.api.v1 import voices
 from app.websocket import websocket_manager
@@ -45,13 +46,41 @@ if settings.SENTRY_DSN:
 async def lifespan(app: FastAPI):
     logger.info("Starting AI Avatar System...")
 
-    # Create database tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Create database tables (non-fatal if DB not available yet)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created/verified")
+    except Exception as e:
+        logger.warning(f"Database not available at startup (will retry on first request): {e}")
 
-    # Initialize services
-    await storage_service.initialize()
-    await cache_service.initialize()
+    # Initialize services (non-fatal)
+    try:
+        await storage_service.initialize()
+    except Exception as e:
+        logger.warning(f"Storage service init failed: {e}")
+    try:
+        await cache_service.initialize()
+    except Exception as e:
+        logger.warning(f"Cache service init failed: {e}")
+
+    # Seed demo user (needed for unauthenticated dev uploads)
+    try:
+        from sqlalchemy import select
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(User).where(User.id == "demo-user"))
+            if result.scalar_one_or_none() is None:
+                session.add(User(
+                    id="demo-user",
+                    email="demo@localhost",
+                    username="demo",
+                    hashed_password="",
+                    full_name="Demo User",
+                ))
+                await session.commit()
+                logger.info("Demo user created")
+    except Exception as e:
+        logger.warning(f"Could not seed demo user: {e}")
 
     # Mount local uploads directory so the browser can fetch images/videos
     if getattr(settings, "USE_LOCAL_STORAGE", True):
@@ -104,6 +133,21 @@ app.include_router(sessions.router,      prefix="/api/v1/sessions",      tags=["
 app.include_router(conversations.router, prefix="/api/v1/conversations",  tags=["conversations"])
 app.include_router(messages.router,      prefix="/api/v1/messages",      tags=["messages"])
 app.include_router(voices.router,        prefix="/api/v1/voices",        tags=["voices"])
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    origin = request.headers.get("origin", "")
+    headers = {}
+    if origin in settings.CORS_ORIGINS:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "error": str(exc)},
+        headers=headers,
+    )
 
 
 @app.get("/")
@@ -180,15 +224,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error(f"WebSocket error in session {session_id}: {e}")
         await websocket_manager.disconnect(session_id)
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "An internal server error occurred" if not settings.DEBUG else str(exc)},
-    )
 
 
 if __name__ == "__main__":
