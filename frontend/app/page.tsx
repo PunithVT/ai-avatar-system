@@ -109,7 +109,7 @@ export default function Home() {
               <button
                 key={id}
                 onClick={() => !disabled && setView(id)}
-                disabled={disabled === true}
+                disabled={disabled || undefined}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200
                   ${view === id
                     ? 'bg-gradient-to-r from-primary-600/80 to-accent-600/80 text-white shadow-glow-sm'
