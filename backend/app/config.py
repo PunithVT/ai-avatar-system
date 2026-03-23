@@ -1,6 +1,10 @@
 from pydantic_settings import BaseSettings
 from typing import List, Optional
+from pathlib import Path
 import os
+
+# Resolve .env path relative to this file's location (always project root)
+_ENV_FILE = str(Path(__file__).resolve().parent.parent.parent / ".env")
 
 
 class Settings(BaseSettings):
@@ -96,7 +100,7 @@ class Settings(BaseSettings):
     BACKEND_URL: str = "http://localhost:8000"
     
     model_config = {
-        "env_file": ".env",
+        "env_file": _ENV_FILE,
         "case_sensitive": True,
     }
 
