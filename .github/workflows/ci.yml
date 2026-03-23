@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI
 
 on:
   push:
@@ -11,9 +11,31 @@ env:
   NODE_VERSION: '18'
 
 jobs:
-  # Backend linting and type checking
+  # ── Detect which folders changed ────────────────────────────────────────
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+
+  # ── Backend lint ────────────────────────────────────────────────────────
   backend-lint:
     name: Backend Lint
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -21,26 +43,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
-      - name: Install dependencies
-        run: |
-          pip install ruff mypy
-          pip install -r requirements.txt
+      - name: Install linters
+        run: pip install ruff
 
-      - name: Run Ruff linter
+      - name: Ruff lint
         run: ruff check .
 
-      - name: Run Ruff formatter check
+      - name: Ruff format check
         run: ruff format --check .
 
-  # Backend tests
+  # ── Backend tests ───────────────────────────────────────────────────────
   backend-test:
     name: Backend Tests
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -80,21 +102,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y ffmpeg
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Run tests with coverage
-        run: |
-          pytest tests/ -v --cov=app --cov-report=xml --cov-report=term-missing
+      - name: Run tests
+        run: pytest tests/ -v --cov=app --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -103,9 +124,11 @@ jobs:
           name: backend-coverage
           path: backend/coverage.xml
 
-  # Frontend linting
+  # ── Frontend lint ───────────────────────────────────────────────────────
   frontend-lint:
     name: Frontend Lint
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -113,22 +136,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          cache: npm
+          cache-dependency-path: frontend/package.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
-      - name: Run ESLint
+      - name: ESLint
         run: npm run lint
 
-  # Frontend build
+  # ── Frontend build ──────────────────────────────────────────────────────
   frontend-build:
     name: Frontend Build
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -136,15 +160,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          cache: npm
+          cache-dependency-path: frontend/package.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Build
         run: npm run build
@@ -152,29 +175,38 @@ jobs:
           NEXT_PUBLIC_API_URL: http://localhost:8000
           NEXT_PUBLIC_WS_URL: ws://localhost:8000
 
-  # Docker build validation
+  # ── Docker build ────────────────────────────────────────────────────────
+  # Runs only after lint passes; skipped jobs are treated as success.
   docker-build:
     name: Docker Build
+    needs: [changes, backend-lint, frontend-lint]
+    if: |
+      always() &&
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true') &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
-    needs: [backend-lint, frontend-lint]
     steps:
       - uses: actions/checkout@v4
 
       - name: Build backend image
+        if: needs.changes.outputs.backend == 'true'
         run: docker build -t avatar-backend ./backend
 
       - name: Build frontend image
+        if: needs.changes.outputs.frontend == 'true'
         run: docker build -t avatar-frontend ./frontend
 
-  # Security scanning
+  # ── Security scan ───────────────────────────────────────────────────────
   security-scan:
     name: Security Scan
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
