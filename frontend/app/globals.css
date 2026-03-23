@@ -103,7 +103,7 @@
   .glass-card {
     @apply relative rounded-2xl overflow-hidden
            bg-surface-800/60 backdrop-blur-xl
-           border border-white/8
+           border border-white/10
            shadow-glass;
   }
 
