@@ -114,6 +114,15 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
   const loadingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const levelAnimRef = useRef<number | null>(null)
 
+  // Play video once the <video> element is mounted in the DOM
+  useEffect(() => {
+    if (currentVideo && videoRef.current) {
+      videoRef.current.src = currentVideo
+      videoRef.current.muted = isMuted
+      videoRef.current.play().catch(() => {/* autoplay blocked — user will see poster */})
+    }
+  }, [currentVideo]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Auto-scroll
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -204,10 +213,6 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
       case 'video':
         setCurrentVideo(data.video_url)
         setIsProcessing(false)
-        if (videoRef.current && !isMuted) {
-          videoRef.current.src = data.video_url
-          videoRef.current.play()
-        }
         break
 
       case 'status':
