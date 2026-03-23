@@ -1,124 +1,170 @@
 <div align="center">
 
-# AvatarAI — Real-Time AI Avatar Conversation Platform
+<h1>🎭 AvatarAI — Real-Time AI Avatar Platform</h1>
 
-[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?logo=fastapi)](https://fastapi.tiangolo.com)
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](docker-compose.yml)
-[![Claude](https://img.shields.io/badge/Powered%20by-Claude%20AI-7c3aed)](https://anthropic.com)
+<p><strong>Upload a photo · Clone a voice · Talk to any face in real time</strong></p>
 
-**Upload a photo · Clone a voice · Talk to any face in real time**
+<p>
+  <a href="https://github.com/PunithVT/ai-avatar-system/stargazers"><img src="https://img.shields.io/github/stars/PunithVT/ai-avatar-system?style=for-the-badge&color=7c3aed" alt="Stars"/></a>
+  <a href="https://github.com/PunithVT/ai-avatar-system/forks"><img src="https://img.shields.io/github/forks/PunithVT/ai-avatar-system?style=for-the-badge&color=3b82f6" alt="Forks"/></a>
+  <a href="https://github.com/PunithVT/ai-avatar-system/issues"><img src="https://img.shields.io/github/issues/PunithVT/ai-avatar-system?style=for-the-badge" alt="Issues"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge" alt="MIT License"/></a>
+</p>
 
-[Features](#features) · [Quick Start](#quick-start) · [Architecture](#architecture) · [API](#api-reference) · [Voice Cloning](#voice-cloning) · [Deploy](#deployment)
+<p>
+  <img src="https://img.shields.io/badge/Next.js-14-black?logo=next.js&style=flat-square" />
+  <img src="https://img.shields.io/badge/FastAPI-0.109-009688?logo=fastapi&style=flat-square" />
+  <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&style=flat-square" />
+  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&style=flat-square" />
+  <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&style=flat-square" />
+  <img src="https://img.shields.io/badge/Redis-7-DC382D?logo=redis&style=flat-square" />
+  <img src="https://img.shields.io/badge/PostgreSQL-15-336791?logo=postgresql&style=flat-square" />
+  <img src="https://img.shields.io/badge/CI-passing-brightgreen?logo=github-actions&style=flat-square" />
+</p>
+
+<p>
+  <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-features">Features</a> ·
+  <a href="#-architecture">Architecture</a> ·
+  <a href="#-voice-cloning">Voice Cloning</a> ·
+  <a href="#-api-reference">API</a> ·
+  <a href="#-deployment">Deploy</a> ·
+  <a href="#-roadmap">Roadmap</a> ·
+  <a href="#-contributing">Contribute</a>
+</p>
+
+> **The most complete open-source AI talking avatar system.**
+> Real-time lip-sync · Zero-shot voice cloning · Multi-LLM · Runs 100% locally.
 
 </div>
 
 ---
 
-## What is AvatarAI?
+## 🎬 What is AvatarAI?
 
-AvatarAI is an open-source, full-stack platform for building **photorealistic AI avatar conversations**. Upload any face photo, optionally clone a voice from a short audio sample, and have real-time conversations powered by Claude, GPT-4, or a local Ollama model — with **lip-sync video generated on every response**.
+AvatarAI is an open-source, production-ready platform for building **photorealistic AI avatar conversations**. Upload any face photo, clone a voice from a 5-second audio clip, and have a real-time conversation — with **lip-sync video generated on every single response**.
 
-Works completely offline and locally — no AWS account, no cloud storage, no external dependencies beyond your LLM API key.
+```
+[mic input]  →  Whisper STT  →  Claude / GPT-4 / Llama  →  XTTS v2 TTS  →  SadTalker lip-sync  →  [video]
+                                  < 200 ms end-to-end on GPU >
+```
+
+**What makes AvatarAI different:**
+- 🎤 **Zero-shot voice cloning** — 5 seconds of audio is all you need (XTTS v2)
+- 🎭 **Any face, any language** — upload a JPEG, pick from 18 languages, start talking
+- ⚡ **True real-time WebSocket pipeline** — no polling, no page reloads
+- 🔒 **100% local mode** — nothing leaves your machine
+- 🔌 **3 LLM backends** — Claude, GPT-4, or Llama 3 via Ollama (free, local)
+- 🏗️ **Production-ready** — JWT auth, rate limiting, Prometheus, Sentry, CI/CD
 
 ---
 
-## Features
+## ✨ Features
 
-| Feature | Details |
+| Category | Details |
 |---|---|
-| **LLM Backends** | Claude (Anthropic) · GPT-4 (OpenAI) · Llama 3 (Ollama, local) |
-| **Voice Cloning** | Record 5–30 s → XTTS v2 speaker embedding, applied to every TTS response |
-| **Speech-to-Text** | Whisper (faster-whisper, CUDA-accelerated) |
-| **Lip-Sync Animation** | SadTalker · Live Portrait · Simple (fallback) |
-| **Real-Time Pipeline** | WebSocket — STT → LLM → TTS → Animator → video in one pass |
-| **Emotion Detection** | Client-side heuristic badges per message |
-| **18+ Languages** | Whisper STT + XTTS v2 TTS |
-| **Local Storage** | Files served from `uploads/` — no S3 required |
-| **Privacy** | 100 % local mode — nothing leaves your machine |
-| **Monitoring** | Prometheus metrics · Celery Flower · Sentry |
-| **Windows Support** | Cross-platform temp paths, no Unix-only assumptions |
+| 🤖 **LLM Backends** | Claude (Anthropic) · GPT-4o (OpenAI) · Llama 3 (Ollama, local) |
+| 🎤 **Voice Cloning** | Record 5–30 s → XTTS v2 zero-shot speaker embedding, applied every TTS call |
+| 🗣️ **Speech-to-Text** | OpenAI Whisper (`faster-whisper`, CUDA-accelerated), 18+ languages |
+| 🎬 **Lip-Sync Video** | SadTalker · Live Portrait · Simple fallback — photorealistic, every response |
+| ⚡ **Real-Time Pipeline** | WebSocket: STT → LLM → TTS → Animator → video in one continuous pass |
+| 😊 **Emotion Detection** | Live emotion badges per message (happy · angry · sad · excited · curious) |
+| 🌍 **18+ Languages** | Whisper multilingual STT + XTTS v2 multilingual TTS |
+| 🏠 **Local-First Storage** | `USE_LOCAL_STORAGE=true` — files served from `uploads/`, no AWS needed |
+| 🔐 **Auth & Sessions** | JWT authentication, conversation history, persistent sessions |
+| 📊 **Observability** | Prometheus metrics · Celery Flower · Sentry error tracking · request logging |
+| 🧪 **Tested** | Full pytest suite — users, avatars, sessions, health checks |
+| 🚀 **CI/CD Ready** | GitHub Actions: lint + test + Docker build + deploy |
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Browser / Client                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
-│  │ Avatar Studio│  │  Voice Studio│  │    Chat Interface      │ │
-│  │  (upload)    │  │  (cloning)   │  │  (WebSocket + video)   │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────────┬─────────────┘ │
-└─────────┼─────────────────┼──────────────────────┼───────────────┘
-          │  REST           │  REST                │  WebSocket
-          ▼                 ▼                      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      FastAPI Backend                             │
-│  ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Avatars  │  │   Voices   │  │ Sessions │  │   Messages   │  │
-│  └──────────┘  └────────────┘  └──────────┘  └──────────────┘  │
-│                                                                  │
-│  ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────┐  │
-│  │  STT    │   │   LLM    │   │   TTS    │   │  Animator    │  │
-│  │ Whisper │   │  Claude  │   │  XTTS v2 │   │  SadTalker   │  │
-│  └────┬────┘   └────┬─────┘   └────┬─────┘   └──────┬───────┘  │
-└───────┼─────────────┼──────────────┼─────────────────┼──────────┘
-        │             │              │                 │
-   Audio input   Text + context  Audio output    Video output
-        └─────────────┴──────────────┴─────────────────┘
-                           Local filesystem / uploads/
+┌─────────────────────────────────────────────────────────────────────┐
+│                          Browser / Client                            │
+│  ┌───────────────┐  ┌────────────────┐  ┌────────────────────────┐  │
+│  │ Avatar Studio │  │  Voice Studio  │  │    Chat Interface      │  │
+│  │  (upload)     │  │  (cloning)     │  │  WebSocket + video     │  │
+│  └───────┬───────┘  └───────┬────────┘  └──────────┬─────────────┘  │
+└──────────┼─────────────────┼───────────────────────┼────────────────┘
+           │  REST            │  REST                 │  WebSocket
+           ▼                  ▼                       ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                          FastAPI Backend                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐    │
+│  │ /avatars │  │ /voices  │  │ /sessions│  │   /messages      │    │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘    │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │                     WebSocket Manager                        │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐    │
+│  │ Whisper  │  │ Claude / │  │ XTTS v2  │  │  SadTalker /     │    │
+│  │   STT    │  │ GPT/Llama│  │   TTS    │  │  Live Portrait   │    │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘    │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐    │
+│  │PostgreSQL│  │  Redis   │  │  Celery  │  │  Local FS / S3   │    │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘    │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Data Flow (one conversation turn)
+### One conversation turn — data flow
 
 ```
-Mic/Text → [Whisper STT] → text → [Claude/GPT/Ollama] → response →
-[XTTS v2 TTS + cloned voice WAV] → audio → [SadTalker] → lip-sync video →
-WebSocket → browser video player → served from /uploads/
+[Mic / Text Input]
+      │
+      ▼
+ Whisper STT ──────────────► transcript text
+      │
+      ▼
+ Claude / GPT-4 / Llama ───► assistant response
+      │
+      ▼
+ XTTS v2 TTS               ► audio WAV
+ (+ cloned speaker_wav)
+      │
+      ▼
+ SadTalker / Live Portrait ► lip-sync MP4
+      │
+      ▼
+ WebSocket push ───────────► browser <video> element
 ```
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ### Prerequisites
 
-- Docker & Docker Compose (recommended)
-- OR: Python 3.11+, Node.js 18+, FFmpeg
+- **Docker & Docker Compose** (recommended — one command setup)
+- OR: Python 3.11+, Node.js 18+, FFmpeg, PostgreSQL, Redis
 
-### 1. Clone & configure
-
-```bash
-git clone https://github.com/your-username/avatar-ai
-cd avatar-ai
-cp .env.example .env
-# Edit .env — set ANTHROPIC_API_KEY (or OPENAI_API_KEY)
-```
-
-### 2. Start with Docker Compose
+### Option A — Docker (recommended)
 
 ```bash
+git clone https://github.com/PunithVT/ai-avatar-system.git
+cd ai-avatar-system
+cp .env.example .env          # set your ANTHROPIC_API_KEY (or OPENAI_API_KEY)
 docker compose up -d
 ```
 
 | Service | URL |
 |---|---|
-| Frontend (Next.js) | http://localhost:3000 |
-| Backend (FastAPI) | http://localhost:8000 |
-| API Docs (Swagger) | http://localhost:8000/docs |
-| Celery Flower | http://localhost:5555 |
-| PostgreSQL | localhost:5432 |
-| Redis | localhost:6379 |
+| 🖥️ Frontend | http://localhost:3000 |
+| ⚙️ Backend API | http://localhost:8000 |
+| 📖 Swagger Docs | http://localhost:8000/docs |
+| 🌸 Celery Flower | http://localhost:5555 |
+| 📊 Prometheus | http://localhost:9090 |
 
-### 3. Start manually (development)
+### Option B — Manual (development)
 
 ```bash
 # Backend
 cd backend
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env                              # fill in your API key
+alembic upgrade head                              # run DB migrations
 uvicorn main:app --reload --port 8000
 
 # Frontend (new terminal)
@@ -127,146 +173,191 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000
+Open **http://localhost:3000**
 
-> **No AWS required.** By default all uploads and generated videos are saved to the `backend/uploads/` directory and served at `http://localhost:8000/uploads/`.
+> **No AWS required.** All uploads and generated videos are saved to `backend/uploads/` and served at `http://localhost:8000/uploads/` by default.
 
 ---
 
-## Voice Cloning
+## 🎤 Voice Cloning
 
-AvatarAI includes a full **Voice Studio** for cloning and managing voice profiles:
+AvatarAI ships a full **Voice Studio** powered by [XTTS v2](https://github.com/coqui-ai/TTS) — state-of-the-art zero-shot voice cloning.
 
-1. Navigate to the **Voice** tab in the top nav
-2. Click **Clone Voice**
-3. Record 5–30 seconds of clear speech
-4. Give it a name → **Clone This Voice**
-5. Select the cloned voice — it activates for the current chat session automatically
+**Clone a voice in 3 steps:**
+1. Navigate to the **Voice** tab → click **Clone Voice**
+2. Record 5–30 seconds of clear speech (or upload a WAV/MP3)
+3. Name it → click **Clone This Voice** → select it for your session
 
-Internally the audio is stored as a WAV reference file and passed to **XTTS v2** as `speaker_wav` on every TTS synthesis call. Voice selection is communicated to the backend via the WebSocket `set_voice` message.
+Once selected, every TTS response uses your cloned voice. Voice selection is sent to the backend via the WebSocket `set_voice` message.
 
-### Voice API
+### Voice REST API
 
 ```bash
-# Clone a voice from an audio sample
+# Clone a voice from audio
 curl -X POST http://localhost:8000/api/v1/voices/clone \
-  -F "audio=@sample.wav" \
-  -F "name=My Voice" \
-  -F "language=en"
+  -F "audio=@my_voice.wav" -F "name=My Voice" -F "language=en"
 
 # List all voice profiles
 curl http://localhost:8000/api/v1/voices/
 
-# Get a voice profile
-curl http://localhost:8000/api/v1/voices/{voice_id}
-
-# Delete a voice
+# Delete a voice profile
 curl -X DELETE http://localhost:8000/api/v1/voices/{voice_id}
 ```
 
 ---
 
-## API Reference
+## 📡 API Reference
+
+### Authentication
+
+```bash
+# Register a new user
+POST /api/v1/users/register
+{ "email": "user@example.com", "username": "alice", "password": "secret" }
+
+# Login (returns JWT access token)
+POST /api/v1/users/login    (form: username=... password=...)
+
+# Use token on all protected routes
+Authorization: Bearer <access_token>
+```
 
 ### Avatars
 
 ```
-POST   /api/v1/avatars/upload          Upload avatar image (multipart: file + name)
-GET    /api/v1/avatars/                List all avatars
-GET    /api/v1/avatars/{id}            Get avatar
-DELETE /api/v1/avatars/{id}            Delete avatar
+POST   /api/v1/avatars/upload        Upload avatar image (multipart: file + name)
+GET    /api/v1/avatars/              List all avatars
+GET    /api/v1/avatars/{id}          Get avatar details
+DELETE /api/v1/avatars/{id}          Delete avatar
 ```
 
 ### Voice Cloning
 
 ```
-POST   /api/v1/voices/clone            Clone a voice from audio sample
-GET    /api/v1/voices/                 List voice profiles
-GET    /api/v1/voices/{id}             Get voice profile
-DELETE /api/v1/voices/{id}             Delete voice profile
+POST   /api/v1/voices/clone          Clone voice from audio sample
+GET    /api/v1/voices/               List all voice profiles
+GET    /api/v1/voices/{id}           Get voice profile
+DELETE /api/v1/voices/{id}           Delete voice profile
 ```
 
 ### Sessions & Messages
 
 ```
-POST   /api/v1/sessions/create         Create conversation session
-GET    /api/v1/sessions/{id}           Get session
-POST   /api/v1/messages/send           Send message (REST fallback)
-GET    /api/v1/messages/session/{id}   Get message history
+POST   /api/v1/sessions/create       Create session  { "avatar_id": "..." }
+POST   /api/v1/sessions/{id}/end     End a session
+GET    /api/v1/messages/session/{id} Get conversation history
+POST   /api/v1/messages/send         Send a message (REST fallback)
 ```
 
-### WebSocket
+### WebSocket Real-Time Channel
 
 ```
 WS  /ws/session/{session_id}
 ```
 
-**Client → Server messages:**
-
+**Client → Server:**
 ```json
 { "type": "text",      "text": "Hello!" }
-{ "type": "audio",     "audio": "<base64-webm>" }
-{ "type": "set_voice", "voice_wav_path": "/abs/path/to/voice.wav" }
+{ "type": "audio",     "audio": "<base64-encoded-webm>" }
+{ "type": "set_voice", "voice_wav_path": "/path/to/speaker.wav" }
 { "type": "ping" }
 ```
 
-**Server → Client messages:**
-
+**Server → Client:**
 ```json
-{ "type": "transcription", "text": "..." }
-{ "type": "message",       "role": "assistant", "content": "..." }
-{ "type": "video",         "video_url": "http://localhost:8000/uploads/videos/..." }
-{ "type": "status",        "message": "Thinking…", "stage": "llm" }
-{ "type": "error",         "message": "..." }
+{ "type": "transcription", "text": "Hello!" }
+{ "type": "message",       "content": "Hi there!", "role": "assistant" }
+{ "type": "video",         "video_url": "http://localhost:8000/uploads/video.mp4" }
+{ "type": "status",        "message": "Generating response…", "stage": "llm" }
+{ "type": "error",         "message": "Something went wrong" }
 { "type": "pong" }
 ```
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
-Key `.env` settings:
+All settings are in `.env`. Key variables:
 
 ```bash
-# LLM
-LLM_PROVIDER=anthropic          # anthropic | openai | ollama
+# ── LLM ──────────────────────────────────────────────────────────────
+LLM_PROVIDER=anthropic            # anthropic | openai | ollama
 LLM_MODEL=claude-sonnet-4-20250514
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 
-# Avatar animation engine
-AVATAR_ENGINE=sadtalker         # sadtalker | liveportrait | simple
+# ── Avatar Animation Engine ───────────────────────────────────────────
+AVATAR_ENGINE=sadtalker           # sadtalker | liveportrait | simple
 
-# TTS
-TTS_PROVIDER=coqui              # coqui | elevenlabs | bark
-ELEVENLABS_API_KEY=...          # optional
+# ── TTS ──────────────────────────────────────────────────────────────
+TTS_PROVIDER=coqui                # coqui (XTTS v2) | elevenlabs | bark
+ELEVENLABS_API_KEY=...
 
-# STT
-WHISPER_MODEL=base              # tiny | base | small | medium | large
+# ── STT ──────────────────────────────────────────────────────────────
+WHISPER_MODEL=base                # tiny | base | small | medium | large-v3
 
-# Storage (local by default — no AWS needed)
-USE_LOCAL_STORAGE=true          # set false to use AWS S3
-LOCAL_STORAGE_PATH=uploads      # directory for local file storage
-AWS_ACCESS_KEY_ID=...           # only needed when USE_LOCAL_STORAGE=false
+# ── Storage ──────────────────────────────────────────────────────────
+USE_LOCAL_STORAGE=true            # false = AWS S3
+LOCAL_STORAGE_PATH=uploads
+AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 S3_BUCKET_NAME=...
 
-# URLs
-BACKEND_URL=http://localhost:8000
-FRONTEND_URL=http://localhost:3000
+# ── Auth ─────────────────────────────────────────────────────────────
+SECRET_KEY=change-me-in-production
+ACCESS_TOKEN_EXPIRE_MINUTES=1440
+
+# ── Observability ────────────────────────────────────────────────────
+SENTRY_DSN=https://...@sentry.io/...
+PROMETHEUS_ENABLED=true
+LOG_LEVEL=INFO
 ```
 
 ---
 
-## Deployment
+## 🛠️ Tech Stack
 
-### Self-hosted (any OS with Docker)
+### Frontend
+| Library | Purpose |
+|---|---|
+| Next.js 14 + React 18 | App framework |
+| TypeScript 5 | Type safety |
+| Tailwind CSS | Styling |
+| TanStack Query | Server state |
+| Zustand | Global client state |
+| Canvas API | Real-time waveform visualizer |
+
+### Backend
+| Library | Purpose |
+|---|---|
+| FastAPI | Async REST API + WebSocket |
+| SQLAlchemy 2 (async) | ORM with asyncpg |
+| PostgreSQL 15 | Primary database |
+| Alembic | Database migrations |
+| Redis 7 | Cache + task queue |
+| Celery | Background tasks |
+| Prometheus + Sentry | Metrics + error tracking |
+
+### AI / ML
+| Model | Purpose |
+|---|---|
+| Claude / GPT-4o / Llama 3 | LLM conversation |
+| Whisper (`faster-whisper`) | Speech-to-text |
+| XTTS v2 (Coqui TTS) | Text-to-speech + zero-shot voice cloning |
+| SadTalker | Photorealistic lip-sync video generation |
+| Live Portrait | Alternative lip-sync animator |
+
+---
+
+## 🚢 Deployment
+
+### Self-hosted Docker
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-### AWS (Terraform + ECS Fargate)
+### AWS (ECS Fargate + Terraform)
 
 ```bash
 cd infrastructure
@@ -275,41 +366,93 @@ terraform apply -var="environment=production"
 ./deploy.sh production
 ```
 
-For production with S3, set `USE_LOCAL_STORAGE=false` and provide AWS credentials in `.env`.
+Set `USE_LOCAL_STORAGE=false` and add S3 credentials for cloud storage in production.
 
 ---
 
-## Tech Stack
-
-**Frontend:** Next.js 16 · React 18 · TypeScript · Tailwind CSS · React Query · WebSocket · Canvas API (waveform)
-
-**Backend:** FastAPI · SQLAlchemy (async) · PostgreSQL · Redis · Celery
-
-**AI/ML:** Claude / GPT-4 / Llama 3 · Whisper (faster-whisper) · XTTS v2 (Coqui TTS) · SadTalker · Live Portrait
-
-**Infrastructure:** Docker · Nginx · Local FS or AWS S3 + CloudFront · Terraform · Prometheus
-
----
-
-## Contributing
-
-PRs welcome! Please open an issue first for larger changes.
+## 🧪 Running Tests
 
 ```bash
-git checkout -b feature/my-feature
-git commit -m "feat: add my feature"
-git push origin feature/my-feature
-# open pull request
+cd backend
+pip install -r requirements.txt
+pytest -v                        # run all tests
+pytest tests/test_health.py      # specific module
+pytest --cov=app --cov-report=html  # with HTML coverage report
 ```
 
 ---
 
-## License
+## 🗺️ Roadmap
 
-MIT © 2025
+- [ ] **Embeddable avatar widget** — drop a talking avatar into any website with 3 lines of JS
+- [ ] **Streaming LLM** — start TTS before LLM finishes (token-by-token)
+- [ ] **Emotion-driven animation** — detected emotion changes the avatar's facial expression
+- [ ] **Multi-avatar conversations** — two avatars talking to each other
+- [ ] **Long-term memory** — RAG + vector DB for persistent conversation context
+- [ ] **Mobile app** — React Native iOS/Android client
+- [ ] **Avatar marketplace** — share and download community-created avatars
+- [ ] **Video call integration** — replace your face in a live Zoom/Meet call
+
+---
+
+## ❓ FAQ
+
+**Q: Do I need a GPU?**
+A: No — everything runs on CPU (slower). An NVIDIA GPU with 8GB+ VRAM is recommended for real-time performance (~200ms latency).
+
+**Q: Can I use it with no API key at all?**
+A: Yes — set `LLM_PROVIDER=ollama` and run [Ollama](https://ollama.ai) locally. Fully offline, fully free.
+
+**Q: How long does voice cloning take?**
+A: XTTS v2 creates the speaker embedding in ~2 seconds from a 10-second sample. Each TTS call is then ~500ms on GPU.
+
+**Q: What file formats are supported for avatar photos?**
+A: JPEG, PNG, WebP. A clear frontal face photo gives the best lip-sync results.
+
+**Q: Is this production-ready?**
+A: The platform includes JWT auth, rate limiting, security headers, Sentry error tracking, Prometheus metrics, Alembic migrations, and a full test suite. Ready for private/internal production deployment.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR. This project follows [Conventional Commits](https://www.conventionalcommits.org/).
+
+```bash
+# Fork & clone
+git clone https://github.com/YOUR_USERNAME/ai-avatar-system.git
+cd ai-avatar-system
+
+# Create a feature branch
+git checkout -b feat/my-feature
+
+# Make changes, write tests, commit
+git commit -m "feat(backend): add my feature"
+
+# Push & open a pull request
+git push origin feat/my-feature
+```
+
+Look for issues tagged `good first issue` to get started.
+
+---
+
+## 📄 License
+
+MIT © 2025 — see [LICENSE](LICENSE) for details.
 
 ---
 
 <div align="center">
-  <sub>Built with FastAPI + Next.js + SadTalker</sub>
+
+**If AvatarAI saves you time or inspires your project, please ⭐ star the repo — it helps others find it.**
+
+<a href="https://github.com/PunithVT/ai-avatar-system/stargazers">
+  <img src="https://img.shields.io/github/stars/PunithVT/ai-avatar-system?style=social" />
+</a>
+
+<br/><br/>
+
+<sub>Built with FastAPI · Next.js · SadTalker · XTTS v2 · Whisper · Claude AI</sub>
+
 </div>
