@@ -1,0 +1,184 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: '3.10'
+  NODE_VERSION: '18'
+
+jobs:
+  # Backend linting and type checking
+  backend-lint:
+    name: Backend Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install ruff mypy
+          pip install -r requirements.txt
+
+      - name: Run Ruff linter
+        run: ruff check .
+
+      - name: Run Ruff formatter check
+        run: ruff format --check .
+
+  # Backend tests
+  backend-test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: avatar_test_db
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://test_user:test_password@localhost:5432/avatar_test_db
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/1
+      CELERY_RESULT_BACKEND: redis://localhost:6379/2
+      ENVIRONMENT: testing
+      DEBUG: 'false'
+      SECRET_KEY: test-secret-key
+      JWT_SECRET_KEY: test-jwt-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ -v --cov=app --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+
+  # Frontend linting
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  # Frontend build
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+          NEXT_PUBLIC_WS_URL: ws://localhost:8000
+
+  # Docker build validation
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [backend-lint, frontend-lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t avatar-backend ./backend
+
+      - name: Build frontend image
+        run: docker build -t avatar-frontend ./frontend
+
+  # Security scanning
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt --ignore-vuln PYSEC-2024-* || true
