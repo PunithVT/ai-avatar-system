@@ -23,17 +23,17 @@ echo ""
 
 # ── 1. Clone SadTalker ───────────────────────────────────────────────────────
 if [ -d "$SADTALKER_DIR/.git" ]; then
-  echo "[1/5] SadTalker already cloned — pulling latest..."
+  echo "[1/6] SadTalker already cloned — pulling latest..."
   git -C "$SADTALKER_DIR" pull --ff-only
 else
-  echo "[1/5] Cloning SadTalker..."
+  echo "[1/6] Cloning SadTalker..."
   mkdir -p "$MODELS_DIR"
   git clone https://github.com/OpenTalker/SadTalker.git "$SADTALKER_DIR"
 fi
 
 # ── 2. Install SadTalker Python dependencies into the venv ──────────────────
 echo ""
-echo "[2/5] Installing SadTalker requirements..."
+echo "[2/6] Installing SadTalker requirements..."
 "$VENV_PYTHON" -m pip install -q \
   face_alignment==1.3.5 \
   imageio==2.19.3 imageio-ffmpeg==0.4.7 \
@@ -46,11 +46,26 @@ echo "[2/5] Installing SadTalker requirements..."
   safetensors \
   av
 
-# ── 3. Patch basicsr for torchvision ≥ 0.16 ─────────────────────────────────
+# ── 3. Patch SadTalker source for NumPy ≥ 1.24 ──────────────────────────────
+# np.float / np.int / np.bool / np.complex were removed in NumPy 1.24.
+echo ""
+echo "[3/6] Patching SadTalker for NumPy >= 1.24..."
+find "$SADTALKER_DIR/src" -name "*.py" -exec \
+  sed -i \
+    -e 's/\bnp\.float\b/np.float64/g' \
+    -e 's/\bnp\.int\b/np.int64/g' \
+    -e 's/\bnp\.complex\b/np.complex128/g' \
+    -e 's/\bnp\.bool\b/np.bool_/g' \
+    -e 's/\bnp\.object\b/object/g' \
+    -e 's/\bnp\.str\b/np.str_/g' \
+  {} +
+echo "  NumPy alias patch applied ✓"
+
+# ── 4. Patch basicsr for torchvision ≥ 0.16 ─────────────────────────────────
 # basicsr 1.4.2 imports torchvision.transforms.functional_tensor which was
 # removed in torchvision 0.16. Create a compatibility shim if needed.
 echo ""
-echo "[3/5] Checking torchvision compatibility..."
+echo "[4/6] Checking torchvision compatibility..."
 "$VENV_PYTHON" -c "from torchvision.transforms.functional_tensor import rgb_to_grayscale" 2>/dev/null \
   && echo "  torchvision.transforms.functional_tensor OK" \
   || {
@@ -93,7 +108,7 @@ download_if_missing() {
 }
 
 echo ""
-echo "[4/5] Downloading SadTalker model checkpoints..."
+echo "[5/6] Downloading SadTalker model checkpoints..."
 download_if_missing "$BASE_URL/mapping_00109-model.pth.tar"         "$CKPT_DIR/mapping_00109-model.pth.tar"
 download_if_missing "$BASE_URL/mapping_00229-model.pth.tar"         "$CKPT_DIR/mapping_00229-model.pth.tar"
 download_if_missing "$BASE_URL/SadTalker_V0.0.2_256.safetensors"   "$CKPT_DIR/SadTalker_V0.0.2_256.safetensors"
@@ -108,7 +123,7 @@ download_if_missing "$FACEXLIB_V2_URL/parsing_parsenet.pth"         "$GFPGAN_DIR
 
 # ── 5. Verify and write sentinel ─────────────────────────────────────────────
 echo ""
-echo "[5/5] Verifying installation..."
+echo "[6/6] Verifying installation..."
 
 MISSING=0
 
