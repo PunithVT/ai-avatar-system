@@ -37,24 +37,23 @@ echo "[2/5] Installing MuseTalk requirements..."
 # Install requirements, skipping packages incompatible with Python 3.12
 # (mmpose/mmcv have no 3.12 wheels; tensorflow is optional for our use case)
 "$VENV_PYTHON" -m pip install -q \
-  diffusers==0.30.2 \
-  accelerate==0.28.0 \
-  transformers==4.39.2 \
-  opencv-python==4.9.0.80 \
-  soundfile==0.12.1 \
-  librosa==0.11.0 \
-  einops==0.8.1 \
-  omegaconf \
-  pyyaml \
-  huggingface_hub \
-  imageio \
+  "diffusers==0.32.2" \
+  "accelerate==0.28.0" \
+  "transformers==4.39.2" \
+  "opencv-python==4.9.0.80" \
+  "soundfile==0.12.1" \
+  "librosa==0.11.0" \
+  "einops==0.8.1" \
+  "omegaconf" \
+  "pyyaml" \
+  "imageio" \
   "imageio[ffmpeg]" \
-  ffmpeg-python \
-  moviepy \
-  mediapipe \
-  face-alignment \
-  safetensors \
-  timm
+  "ffmpeg-python" \
+  "moviepy<2" \
+  "mediapipe" \
+  "face-alignment" \
+  "safetensors" \
+  "timm"
 
 # ── 3. Patch preprocessing for Python 3.12 (replace mmpose with mediapipe) ─
 echo ""
