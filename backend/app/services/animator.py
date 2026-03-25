@@ -130,8 +130,9 @@ class AvatarAnimator:
         cfg_path.write_text(yaml.dump(cfg_data))
 
         unet_model = musetalk_dir / "models" / "musetalkV15" / "unet.pth"
-        unet_config = musetalk_dir / "models" / "musetalk" / "config.json"
+        unet_config = musetalk_dir / "models" / "musetalkV15" / "musetalk.json"
         whisper_dir = musetalk_dir / "models" / "whisper"
+        vae_dir = musetalk_dir / "models" / "sd-vae"
 
         cmd = [
             sys.executable, "scripts/inference.py",
@@ -139,6 +140,7 @@ class AvatarAnimator:
             "--unet_model_path", str(unet_model),
             "--unet_config", str(unet_config),
             "--whisper_dir", str(whisper_dir),
+            "--vae_type", str(vae_dir),
             "--output_vid_name", output_name,
             "--version", "v15",
             "--batch_size", "4",

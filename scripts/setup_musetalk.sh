@@ -149,7 +149,7 @@ echo "  preprocessing.py replaced ✓"
 
 # ── 4. Download model weights from HuggingFace ──────────────────────────────
 echo ""
-echo "[4/5] Downloading MuseTalk model weights (~8 GB total)..."
+echo "[4/5] Downloading MuseTalk model weights (~8.5 GB total)..."
 
 "$VENV_PYTHON" - "$MUSETALK_DIR" << 'PYEOF'
 from huggingface_hub import snapshot_download
@@ -181,6 +181,19 @@ if not os.path.isdir(whisper_target) or not os.listdir(whisper_target):
 else:
     print("  Whisper-tiny already present — skipping.")
 
+# ── SD-VAE (stabilityai/sd-vae-ft-mse, ~335 MB) ─────────────────────────────
+vae_target = os.path.join(models_target, "sd-vae")
+if not os.path.isdir(vae_target) or not os.listdir(vae_target):
+    print("  Downloading stabilityai/sd-vae-ft-mse (~335 MB)...")
+    snapshot_download(
+        repo_id="stabilityai/sd-vae-ft-mse",
+        local_dir=vae_target,
+        ignore_patterns=["*.md", "*.gitattributes"],
+    )
+    print("  SD-VAE done.")
+else:
+    print("  SD-VAE already present — skipping.")
+
 print("  All model downloads complete.")
 PYEOF
 
@@ -209,6 +222,13 @@ if [ ! -d "$MUSETALK_DIR/models/whisper" ]; then
   MISSING=1
 else
   echo "  models/whisper/ ✓"
+fi
+
+if [ ! -f "$MUSETALK_DIR/models/sd-vae/config.json" ]; then
+  echo "  MISSING: models/sd-vae/config.json"
+  MISSING=1
+else
+  echo "  models/sd-vae/ ✓"
 fi
 
 if [ "$MISSING" -eq 0 ]; then
