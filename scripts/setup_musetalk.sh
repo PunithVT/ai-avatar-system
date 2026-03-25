@@ -55,47 +55,97 @@ echo "[2/5] Installing MuseTalk requirements..."
   "safetensors" \
   "timm"
 
-# ── 3. Patch preprocessing for Python 3.12 (replace mmpose with mediapipe) ─
+# ── 3. Replace preprocessing.py with CPU-compatible version ─────────────────
 echo ""
-echo "[3/5] Patching MuseTalk preprocessing for Python 3.12..."
+echo "[3/5] Writing CPU-compatible preprocessing.py (replaces mmpose with face_alignment)..."
 
 PREPROCESS="$MUSETALK_DIR/musetalk/utils/preprocessing.py"
-if grep -q "mmpose\|mmdet\|mmcv" "$PREPROCESS" 2>/dev/null; then
-  # Backup original
-  cp "$PREPROCESS" "${PREPROCESS}.orig"
+# Always overwrite — idempotent, works on first run and re-runs
+cp "$PREPROCESS" "${PREPROCESS}.orig" 2>/dev/null || true
+cat > "$PREPROCESS" << 'PYEOF'
+# preprocessing.py — rewritten for Python 3.12 / CPU-only compatibility
+# Uses face_alignment (pip install face-alignment) instead of mmpose/mmcv.
+import os
+import json
+import pickle
+import numpy as np
+import cv2
+import torch
+from tqdm import tqdm
+import face_alignment
 
-  # Replace mmpose/mmdet imports with mediapipe equivalents
-  "$VENV_PYTHON" - "$PREPROCESS" << 'PYEOF'
-import re, sys
-from pathlib import Path
-
-src = Path(sys.argv[1])
-code = src.read_text()
-
-# Replace the mmpose/mmdet import block
-old_block = re.search(
-    r'from mmpose.*?(?=\n\S|\nclass|\ndef|\Z)',
-    code, re.DOTALL
+# Initialise face alignment on CPU or GPU automatically
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+_fa = face_alignment.FaceAlignment(
+    face_alignment.LandmarksType.TWO_D,
+    flip_input=False,
+    device=_device,
 )
-if old_block:
-    replacement = (
-        "# mmpose replaced with mediapipe for Python 3.12 compatibility\n"
-        "import mediapipe as mp\n"
-        "import face_alignment\n"
-        "_fa = face_alignment.FaceAlignment(\n"
-        "    face_alignment.LandmarksType.TWO_D, flip_input=False\n"
-        ")\n"
-    )
-    code = code[:old_block.start()] + replacement + code[old_block.end():]
-    src.write_text(code)
-    print(f"  Patched {src}")
-else:
-    print("  No mmpose imports found — skipping patch")
+
+# Sentinel value used by callers when no face is detected in a frame
+coord_placeholder = (0.0, 0.0, 0.0, 0.0)
+
+
+def resize_landmark(landmark, w, h, new_w, new_h):
+    landmark_norm = landmark / np.array([w, h])
+    return landmark_norm * np.array([new_w, new_h])
+
+
+def read_imgs(img_list):
+    frames = []
+    print("reading images...")
+    for img_path in tqdm(img_list):
+        frame = cv2.imread(img_path)
+        frames.append(frame)
+    return frames
+
+
+def _detect_face_bbox(frame_bgr, bbox_shift=0):
+    """Detect face bounding box using 68-point landmarks. Returns (x1,y1,x2,y2) or None."""
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    preds = _fa.get_landmarks(frame_rgb)
+    if preds is None or len(preds) == 0:
+        return None
+    lm = preds[0]  # (68, 2)
+    x1, y1 = int(lm[:, 0].min()), int(lm[:, 1].min())
+    x2, y2 = int(lm[:, 0].max()), int(lm[:, 1].max())
+    y1 = max(0, y1 + bbox_shift)
+    if x2 <= x1 or y2 <= y1 or x1 < 0:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def get_landmark_and_bbox(img_list, upperbondrange=0):
+    """
+    Detect face bounding boxes for all images.
+    Returns (coords_list, frames).
+    """
+    frames = read_imgs(img_list)
+    coords_list = []
+    print(f"Getting face bounding boxes (bbox_shift={upperbondrange})..." if upperbondrange != 0
+          else "Getting face bounding boxes...")
+    for frame in tqdm(frames):
+        bbox = _detect_face_bbox(frame, bbox_shift=upperbondrange)
+        coords_list.append(bbox if bbox is not None else coord_placeholder)
+    return coords_list, frames
+
+
+def get_bbox_range(img_list, upperbondrange=0):
+    frames = read_imgs(img_list)
+    deltas = []
+    for frame in tqdm(frames):
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        preds = _fa.get_landmarks(frame_rgb)
+        if preds is None or len(preds) == 0:
+            continue
+        lm = preds[0]
+        deltas.append(int(lm[:, 1].max()) - int(lm[:, 1].mean()))
+    if not deltas:
+        return "No faces detected"
+    avg = int(sum(deltas) / len(deltas))
+    return f"Total frame: {len(frames)}  Adjust range: [-{avg}~{avg}]  current value: {upperbondrange}"
 PYEOF
-  echo "  Preprocessing patch applied ✓"
-else
-  echo "  No mmpose imports in preprocessing — no patch needed ✓"
-fi
+echo "  preprocessing.py replaced ✓"
 
 # ── 4. Download model weights from HuggingFace ──────────────────────────────
 echo ""
