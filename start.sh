@@ -25,10 +25,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 MODE="docker"
-[[ "${1:-}" == "--dev"    ]] && MODE="dev"
-[[ "${1:-}" == "--stop"   ]] && MODE="stop"
-[[ "${1:-}" == "--logs"   ]] && MODE="logs"
-[[ "${1:-}" == "--status" ]] && MODE="status"
+[[ "${1:-}" == "--dev"     ]] && MODE="dev"
+[[ "${1:-}" == "--stop"    ]] && MODE="stop"
+[[ "${1:-}" == "--logs"    ]] && MODE="logs"
+[[ "${1:-}" == "--status"  ]] && MODE="status"
+[[ "${1:-}" == "--migrate" ]] && MODE="migrate"
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+  echo -e "${BOLD}Usage:${RESET}  ./start.sh [option]"
+  echo ""
+  echo -e "  ${CYAN}(no flag)${RESET}   Docker mode — build & start all services"
+  echo -e "  ${CYAN}--dev${RESET}       Dev mode — run backend/frontend directly (no Docker)"
+  echo -e "  ${CYAN}--migrate${RESET}   Run pending DB migrations only (dev mode)"
+  echo -e "  ${CYAN}--stop${RESET}      Stop all services"
+  echo -e "  ${CYAN}--logs${RESET}      Tail Docker logs"
+  echo -e "  ${CYAN}--status${RESET}    Show service health"
+  echo ""
+}
+[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { usage; exit 0; }
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo -e "${BOLD}${CYAN}"
@@ -86,6 +101,35 @@ if [[ "$MODE" == "status" ]]; then
 fi
 
 # =============================================================================
+#  STANDALONE MIGRATE
+# =============================================================================
+if [[ "$MODE" == "migrate" ]]; then
+  step "Running database migrations (dev)"
+  cd backend
+  if [[ ! -d "venv" ]]; then
+    error "No Python venv found. Run ./start.sh --dev first to set it up."
+    exit 1
+  fi
+  source venv/bin/activate
+  source ../.env 2>/dev/null || true
+  info "Current migration state:"
+  alembic current 2>&1 || true
+  echo ""
+  info "Applying pending migrations..."
+  if alembic upgrade head; then
+    success "All migrations applied."
+    info "Migration history:"
+    alembic history --verbose 2>&1 | tail -20
+  else
+    error "Migration failed. Check the output above."
+    exit 1
+  fi
+  deactivate
+  cd ..
+  exit 0
+fi
+
+# =============================================================================
 #  PREFLIGHT CHECKS
 # =============================================================================
 step "Preflight checks"
@@ -102,6 +146,10 @@ if [[ ! -f ".env" ]]; then
 else
   success ".env found"
 fi
+
+# Ensure local runtime directories exist
+mkdir -p backend/voice_profiles
+success "Runtime directories ready"
 
 # Check if any LLM key is set
 source .env 2>/dev/null || true
@@ -180,14 +228,29 @@ if [[ "$MODE" == "docker" ]]; then
   done
 
   echo -n "  Backend  "
+  BACKEND_READY=false
   for i in $(seq 1 30); do
     if curl -sf http://localhost:8000/health &>/dev/null; then
       echo -e " ${GREEN}ready${RESET}"
+      BACKEND_READY=true
       break
     fi
     echo -n "."; sleep 3
     [[ $i -eq 30 ]] && echo -e " ${YELLOW}still starting${RESET}"
   done
+
+  # Show migration status (entrypoint already ran them; this confirms)
+  if $BACKEND_READY; then
+    echo -n "  Migrations "
+    if docker exec avatar-backend bash -c "cd /app && alembic current 2>&1" | grep -q "(head)"; then
+      echo -e " ${GREEN}up to date${RESET}"
+    else
+      echo -e " ${YELLOW}running...${RESET}"
+      docker exec avatar-backend bash -c "cd /app && alembic upgrade head" \
+        && success "Migrations applied" \
+        || warn "Migration check failed — see: docker logs avatar-backend"
+    fi
+  fi
 
   echo -n "  Frontend "
   for i in $(seq 1 30); do
@@ -272,8 +335,21 @@ if [[ "$MODE" == "dev" ]]; then
   pip install --upgrade pip "setuptools==69.5.1" wheel -q
   info "Installing backend dependencies..."
   pip install --no-build-isolation -r requirements.txt -q
-  info "Running database migrations..."
-  alembic upgrade head 2>/dev/null || warn "Migration failed — DB may not be ready yet"
+  # Run migrations — show pending count and result
+  PENDING=$(alembic history --verbose 2>/dev/null | grep -c "^Rev" || true)
+  CURRENT=$(alembic current 2>/dev/null | grep -v "^$" | head -1)
+  if echo "$CURRENT" | grep -q "(head)"; then
+    success "Database already at latest migration (head)"
+  else
+    info "Applying database migrations..."
+    if alembic upgrade head 2>&1; then
+      success "Migrations applied successfully"
+    else
+      warn "Migration failed — DB may not be ready yet (run ./start.sh --migrate to retry)"
+    fi
+  fi
+
+  mkdir -p voice_profiles
 
   # Start backend
   info "Starting backend on :8000"

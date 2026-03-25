@@ -62,6 +62,7 @@ services:
       - avatar_cache:/tmp/avatars
       - video_cache:/tmp/videos
       - audio_cache:/tmp/audio
+      - voice_profiles:/app/voice_profiles
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,6 +122,7 @@ services:
       - avatar_cache:/tmp/avatars
       - video_cache:/tmp/videos
       - audio_cache:/tmp/audio
+      - voice_profiles:/app/voice_profiles
     depends_on:
       postgres:
         condition: service_healthy
@@ -175,6 +177,8 @@ volumes:
   video_cache:
     driver: local
   audio_cache:
+    driver: local
+  voice_profiles:
     driver: local
 
 networks:
