@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import {
   Mic, MicOff, Play, Pause, Trash2, Upload, Check, Loader2,
   Volume2, Wand2, Music, AlertCircle, PlusCircle, RefreshCw,
@@ -45,6 +45,8 @@ interface VoicePanelProps {
   onVoiceSelect?: (voiceId: string) => void
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
 export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   const [voices, setVoices] = useState<VoiceProfile[]>(PRESET_VOICES)
   const [selectedVoice, setSelectedVoice] = useState<string>(PRESET_VOICES[0].id)
@@ -65,6 +67,25 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   const animFrameRef = useRef<number | null>(null)
 
   const MAX_RECORDING_SECS = 30
+
+  // Load persisted custom voices from backend on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/api/v1/voices/`)
+      .then(r => r.json())
+      .then((data: Array<{ id: string; name: string; language: string; duration: number }>) => {
+        if (!Array.isArray(data) || data.length === 0) return
+        const custom: VoiceProfile[] = data.map(v => ({
+          id: v.id,
+          name: v.name,
+          language: v.language || 'en',
+          duration: v.duration || 0,
+          createdAt: new Date(),
+          isDefault: false,
+        }))
+        setVoices([...PRESET_VOICES, ...custom])
+      })
+      .catch(() => { /* backend may not be up yet */ })
+  }, [])
 
   const startRecording = useCallback(async () => {
     try {
@@ -154,7 +175,7 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
       formData.append('audio', audioBlob, 'voice_sample.webm')
       formData.append('name', newVoiceName.trim())
 
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/voices/clone`, {
+      const res = await fetch(`${API_BASE}/api/v1/voices/clone`, {
         method: 'POST',
         body: formData,
       })
@@ -186,7 +207,10 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
     }
   }
 
-  const deleteVoice = (id: string) => {
+  const deleteVoice = async (id: string) => {
+    try {
+      await fetch(`${API_BASE}/api/v1/voices/${id}`, { method: 'DELETE' })
+    } catch { /* ignore network errors */ }
     setVoices(v => v.filter(x => x.id !== id))
     if (selectedVoice === id) {
       setSelectedVoice(PRESET_VOICES[0].id)

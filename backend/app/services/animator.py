@@ -132,8 +132,12 @@ class AvatarAnimator:
         unet_config = musetalk_dir / "models" / "musetalk" / "config.json"
         whisper_dir = musetalk_dir / "models" / "whisper"
 
+        # Use the MuseTalk-specific venv python (has musetalk package installed)
+        musetalk_python = musetalk_dir / "venv" / "bin" / "python3"
+        python_exe = str(musetalk_python) if musetalk_python.exists() else sys.executable
+
         cmd = [
-            sys.executable, "scripts/inference.py",
+            python_exe, "scripts/inference.py",
             "--inference_config", str(cfg_path),
             "--unet_model_path", str(unet_model),
             "--unet_config", str(unet_config),
