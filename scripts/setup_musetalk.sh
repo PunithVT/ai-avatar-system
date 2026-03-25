@@ -66,7 +66,7 @@ if grep -q "mmpose\|mmdet\|mmcv" "$PREPROCESS" 2>/dev/null; then
   cp "$PREPROCESS" "${PREPROCESS}.orig"
 
   # Replace mmpose/mmdet imports with mediapipe equivalents
-  "$VENV_PYTHON" - << 'PYEOF'
+  "$VENV_PYTHON" - "$PREPROCESS" << 'PYEOF'
 import re, sys
 from pathlib import Path
 
@@ -92,7 +92,7 @@ if old_block:
     print(f"  Patched {src}")
 else:
     print("  No mmpose imports found — skipping patch")
-PYEOF "$PREPROCESS"
+PYEOF
   echo "  Preprocessing patch applied ✓"
 else
   echo "  No mmpose imports in preprocessing — no patch needed ✓"
@@ -102,7 +102,7 @@ fi
 echo ""
 echo "[4/5] Downloading MuseTalk model weights (~3 GB)..."
 
-"$VENV_PYTHON" - << 'PYEOF'
+"$VENV_PYTHON" - "$MUSETALK_DIR" << 'PYEOF'
 from huggingface_hub import snapshot_download
 import os, sys
 
@@ -118,7 +118,7 @@ snapshot_download(
     ignore_patterns=["*.md", "*.txt", "*.gitattributes"],
 )
 print("  Model download complete.")
-PYEOF "$MUSETALK_DIR"
+PYEOF
 
 # ── 5. Verify and write sentinel ─────────────────────────────────────────────
 echo ""
