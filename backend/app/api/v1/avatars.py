@@ -105,6 +105,25 @@ async def get_avatar(avatar_id: str, db: AsyncSession = Depends(get_db)):
     return avatar
 
 
+@router.put("/{avatar_id}/voice", response_model=AvatarResponse)
+async def set_avatar_voice(
+    avatar_id: str,
+    voice_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign a voice profile to an avatar (persisted for all future sessions)."""
+    result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
+    avatar = result.scalar_one_or_none()
+    if not avatar:
+        raise HTTPException(status_code=404, detail="Avatar not found")
+
+    avatar.voice_id = voice_id if voice_id else None
+    await db.commit()
+    await db.refresh(avatar)
+    logger.info(f"Avatar {avatar_id} voice set to: {voice_id!r}")
+    return avatar
+
+
 @router.delete("/{avatar_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_avatar(avatar_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))

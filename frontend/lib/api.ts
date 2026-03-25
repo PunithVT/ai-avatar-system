@@ -84,6 +84,11 @@ export const api = {
     return response.data
   },
 
+  setAvatarVoice: async (avatarId: string, voiceId: string) => {
+    const response = await apiClient.put(`/api/v1/avatars/${avatarId}/voice?voice_id=${encodeURIComponent(voiceId)}`)
+    return response.data
+  },
+
   // Sessions
   createSession: async (avatarId: string) => {
     const response = await apiClient.post('/api/v1/sessions/create', {

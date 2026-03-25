@@ -41,7 +41,11 @@ function WaveformBar({ active, height }: { active: boolean; height: number }) {
   )
 }
 
-export function VoicePanel() {
+interface VoicePanelProps {
+  onVoiceSelect?: (voiceId: string) => void
+}
+
+export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   const [voices, setVoices] = useState<VoiceProfile[]>(PRESET_VOICES)
   const [selectedVoice, setSelectedVoice] = useState<string>(PRESET_VOICES[0].id)
   const [isRecording, setIsRecording] = useState(false)
@@ -168,6 +172,7 @@ export function VoicePanel() {
       }
       setVoices(v => [...v, newProfile])
       setSelectedVoice(newProfile.id)
+      onVoiceSelect?.(newProfile.id)
       toast.success(`Voice "${newVoiceName}" cloned successfully!`, { icon: '🎙️' })
       // Reset
       setAudioBlob(null)
@@ -183,7 +188,10 @@ export function VoicePanel() {
 
   const deleteVoice = (id: string) => {
     setVoices(v => v.filter(x => x.id !== id))
-    if (selectedVoice === id) setSelectedVoice(PRESET_VOICES[0].id)
+    if (selectedVoice === id) {
+      setSelectedVoice(PRESET_VOICES[0].id)
+      onVoiceSelect?.(PRESET_VOICES[0].id)
+    }
     toast.success('Voice removed')
   }
 
@@ -215,7 +223,7 @@ export function VoicePanel() {
             return (
               <div
                 key={voice.id}
-                onClick={() => setSelectedVoice(voice.id)}
+                onClick={() => { setSelectedVoice(voice.id); onVoiceSelect?.(voice.id) }}
                 className={`flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all duration-200 group
                   ${isSelected
                     ? 'bg-primary-500/15 border border-primary-500/40 shadow-glow-sm'

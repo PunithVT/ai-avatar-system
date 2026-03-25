@@ -5,6 +5,8 @@ import { AvatarUpload } from '@/components/AvatarUpload'
 import { AvatarList } from '@/components/AvatarList'
 import { ChatInterface } from '@/components/ChatInterface'
 import { VoicePanel } from '@/components/VoicePanel'
+import { api } from '@/lib/api'
+import { toast } from 'react-hot-toast'
 import {
   Camera,
   MessageCircle,
@@ -78,6 +80,19 @@ export default function Home() {
   const [selectedAvatar, setSelectedAvatar] = useState<string | null>(null)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [view, setView] = useState<View>('home')
+
+  const handleVoiceSelect = async (voiceId: string) => {
+    if (!selectedAvatar) {
+      toast('Select an avatar first to assign this voice', { icon: '💡' })
+      return
+    }
+    try {
+      await api.setAvatarVoice(selectedAvatar, voiceId)
+      toast.success('Voice assigned to avatar', { icon: '🎙️' })
+    } catch {
+      toast.error('Failed to assign voice')
+    }
+  }
 
   const handleSelectAvatar = (id: string) => {
     setSelectedAvatar(id)
@@ -265,7 +280,7 @@ export default function Home() {
               <h1 className="text-3xl font-black gradient-text mb-2">Voice Studio</h1>
               <p className="text-gray-400">Clone voices and manage your voice library.</p>
             </div>
-            <VoicePanel sessionId={activeSessionId} />
+            <VoicePanel onVoiceSelect={handleVoiceSelect} />
           </div>
         )}
 
