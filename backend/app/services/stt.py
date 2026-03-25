@@ -96,15 +96,6 @@ class STTService:
             logger.error(f"Whisper transcription error: {e}")
             raise
     
-    async def transcribe_stream(
-        self,
-        audio_stream,
-        language: str = "en"
-    ):
-        """Transcribe audio stream in real-time"""
-        # TODO: Implement streaming transcription
-        pass
-
 
 # Global instance
 stt_service = STTService()

@@ -2,7 +2,7 @@ import tempfile
 import uuid
 import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,7 @@ from app.models import User, Avatar
 from app.schemas import AvatarCreate, AvatarResponse
 from app.services.storage import storage_service
 from app.services.avatar_processor import avatar_processor
+from app.api.v1.users import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,6 +25,7 @@ async def upload_avatar(
     name: str = Form(...),        # Form() so it's read from multipart body, not query string
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     """Upload and process an avatar image."""
     if not file.content_type or not file.content_type.startswith("image/"):
@@ -72,7 +74,7 @@ async def upload_avatar(
 
     avatar = Avatar(
         id=avatar_id,
-        user_id="demo-user",
+        user_id=current_user.id if current_user else "demo-user",
         name=name,
         image_url=image_url,
         thumbnail_url=thumbnail_url,

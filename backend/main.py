@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -35,7 +36,7 @@ if settings.SENTRY_DSN:
             dsn=settings.SENTRY_DSN,
             traces_sample_rate=0.1 if settings.ENVIRONMENT == "production" else 1.0,
             environment=settings.ENVIRONMENT,
-            release=f"avatar-system@1.0.0",
+            release="avatar-system@2.0.0",
         )
         logger.info("Sentry initialized successfully")
     except Exception as e:
@@ -138,15 +139,9 @@ app.include_router(voices.router,        prefix="/api/v1/voices",        tags=["
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    origin = request.headers.get("origin", "")
-    headers = {}
-    if origin in settings.CORS_ORIGINS:
-        headers["Access-Control-Allow-Origin"] = origin
-        headers["Access-Control-Allow-Credentials"] = "true"
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error", "error": str(exc)},
-        headers=headers,
     )
 
 
@@ -173,9 +168,7 @@ async def health_check():
     # Check database
     try:
         async with engine.connect() as conn:
-            await conn.execute(
-                __import__("sqlalchemy").text("SELECT 1")
-            )
+            await conn.execute(text("SELECT 1"))
         services["database"] = "connected"
     except Exception:
         services["database"] = "disconnected"
@@ -204,13 +197,20 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             msg_type = data.get("type")
 
             if msg_type == "audio":
-                await websocket_manager.handle_audio_input(session_id, data.get("audio"))
+                audio_data = data.get("audio")
+                if not audio_data:
+                    await websocket.send_json({"type": "error", "message": "Missing audio data"})
+                    continue
+                await websocket_manager.handle_audio_input(session_id, audio_data)
 
             elif msg_type == "text":
-                await websocket_manager.handle_text_input(session_id, data.get("text"))
+                text_data = data.get("text")
+                if not text_data:
+                    await websocket.send_json({"type": "error", "message": "Missing text data"})
+                    continue
+                await websocket_manager.handle_text_input(session_id, text_data)
 
             elif msg_type == "set_voice":
-                # Client sends chosen voice WAV path (returned by /api/v1/voices/clone)
                 voice_wav = data.get("voice_wav_path")
                 if voice_wav:
                     await websocket_manager.set_voice(session_id, voice_wav)

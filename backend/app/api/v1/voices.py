@@ -63,7 +63,8 @@ async def clone_voice(
             buf = io.BytesIO(audio_bytes)
             data, samplerate = sf.read(buf)
             sf.write(str(wav_path), data, samplerate)
-        except Exception:
+        except Exception as sf_err:
+            logger.debug(f"soundfile could not read audio, falling back to ffmpeg: {sf_err}")
             # Fallback: save raw bytes and let ffmpeg handle conversion
             raw_path = VOICE_DIR / f"{voice_id}_raw"
             raw_path.write_bytes(audio_bytes)

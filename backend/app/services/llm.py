@@ -1,6 +1,6 @@
 import anthropic
 import openai
-from typing import List, Dict, AsyncGenerator
+from typing import List, Dict, AsyncGenerator, Optional
 import logging
 from app.config import settings
 
@@ -28,7 +28,7 @@ class LLMService:
     async def generate_response(
         self,
         messages: List[Dict[str, str]],
-        system_prompt: str = None
+        system_prompt: Optional[str] = None
     ) -> str:
         """Generate AI response"""
         try:
@@ -46,7 +46,7 @@ class LLMService:
     async def _generate_anthropic(
         self,
         messages: List[Dict[str, str]],
-        system_prompt: str = None
+        system_prompt: Optional[str] = None
     ) -> str:
         """Generate response using Anthropic Claude"""
         try:
@@ -57,7 +57,9 @@ class LLMService:
                 system=system_prompt or "You are a helpful AI assistant in an avatar conversation system.",
                 messages=messages
             )
-            
+
+            if not response.content or not hasattr(response.content[0], "text"):
+                raise ValueError("Unexpected response structure from Anthropic API")
             return response.content[0].text
         
         except Exception as e:
@@ -67,7 +69,7 @@ class LLMService:
     async def _generate_openai(
         self,
         messages: List[Dict[str, str]],
-        system_prompt: str = None
+        system_prompt: Optional[str] = None
     ) -> str:
         """Generate response using OpenAI"""
         try:
@@ -91,7 +93,7 @@ class LLMService:
     async def stream_response(
         self,
         messages: List[Dict[str, str]],
-        system_prompt: str = None
+        system_prompt: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         """Stream AI response"""
         try:
@@ -109,7 +111,7 @@ class LLMService:
     async def _stream_anthropic(
         self,
         messages: List[Dict[str, str]],
-        system_prompt: str = None
+        system_prompt: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         """Stream response from Anthropic"""
         try:
@@ -130,7 +132,7 @@ class LLMService:
     async def _stream_openai(
         self,
         messages: List[Dict[str, str]],
-        system_prompt: str = None
+        system_prompt: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         """Stream response from OpenAI"""
         try:

@@ -87,14 +87,10 @@ class ConnectionManager:
             pass
 
         # S3 fallback: download and cache locally for the animator
-        try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            data = await storage_service.download_file(avatar.s3_key)
-            cache_path.write_bytes(data)
-            return str(cache_path)
-        except Exception as e:
-            logger.error(f"Could not resolve avatar image: {e}")
-            return str(cache_path)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        data = await storage_service.download_file(avatar.s3_key)
+        cache_path.write_bytes(data)
+        return str(cache_path)
 
     async def disconnect(self, session_id: str):
         self.active_connections.pop(session_id, None)

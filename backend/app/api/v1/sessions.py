@@ -2,12 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import logging
-from typing import List
+from typing import List, Optional
 
 from app.database import get_db
-from app.models import Session, Avatar
+from app.models import Session, Avatar, User
 from app.schemas import SessionCreate, SessionResponse
 from app.websocket import websocket_manager
+from app.api.v1.users import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,8 @@ router = APIRouter()
 @router.post("/create", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
 async def create_session(
     session_data: SessionCreate,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     """
     Create new conversation session
@@ -44,10 +46,8 @@ async def create_session(
                 detail="Avatar is not ready"
             )
         
-        # Create session
-        # For demo, using default user_id
-        user_id = "demo-user"
-        
+        user_id = current_user.id if current_user else "demo-user"
+
         session = Session(
             user_id=user_id,
             avatar_id=session_data.avatar_id,
@@ -187,12 +187,13 @@ async def delete_session(
         
         await db.delete(session)
         await db.commit()
-        
+
         logger.info(f"Session deleted: {session_id}")
-    
+
     except HTTPException:
         raise
     except Exception as e:
+        await db.rollback()
         logger.error(f"Failed to delete session: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

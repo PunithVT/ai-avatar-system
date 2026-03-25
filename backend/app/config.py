@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     ELEVENLABS_API_KEY: Optional[str] = None
     
     # LLM Configuration
-    LLM_PROVIDER: str = "anthropic"  # anthropic, openai, ollama
+    LLM_PROVIDER: str = "anthropic"  # anthropic, openai
     LLM_MODEL: str = "claude-sonnet-4-20250514"
     LLM_TEMPERATURE: float = 0.7
     LLM_MAX_TOKENS: int = 2000
