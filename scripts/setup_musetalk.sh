@@ -100,7 +100,7 @@ fi
 
 # ── 4. Download model weights from HuggingFace ──────────────────────────────
 echo ""
-echo "[4/5] Downloading MuseTalk model weights (~3 GB)..."
+echo "[4/5] Downloading MuseTalk model weights (~8 GB total)..."
 
 "$VENV_PYTHON" - "$MUSETALK_DIR" << 'PYEOF'
 from huggingface_hub import snapshot_download
@@ -110,14 +110,29 @@ musetalk_dir = sys.argv[1]
 models_target = os.path.join(musetalk_dir, "models")
 os.makedirs(models_target, exist_ok=True)
 
-print("  Downloading TMElyralab/MuseTalk weights...")
+# ── MuseTalk weights (unet + VAE) ────────────────────────────────────────────
+print("  Downloading TMElyralab/MuseTalk weights (~7 GB)...")
 snapshot_download(
     repo_id="TMElyralab/MuseTalk",
     local_dir=models_target,
-    local_dir_use_symlinks=False,
     ignore_patterns=["*.md", "*.txt", "*.gitattributes"],
 )
-print("  Model download complete.")
+print("  MuseTalk weights done.")
+
+# ── Whisper-tiny (audio feature extractor, ~150 MB) ─────────────────────────
+whisper_target = os.path.join(models_target, "whisper")
+if not os.path.isdir(whisper_target) or not os.listdir(whisper_target):
+    print("  Downloading openai/whisper-tiny (~150 MB)...")
+    snapshot_download(
+        repo_id="openai/whisper-tiny",
+        local_dir=whisper_target,
+        ignore_patterns=["*.md", "*.gitattributes", "flax_model*", "tf_model*", "rust_model*"],
+    )
+    print("  Whisper-tiny done.")
+else:
+    print("  Whisper-tiny already present — skipping.")
+
+print("  All model downloads complete.")
 PYEOF
 
 # ── 5. Verify and write sentinel ─────────────────────────────────────────────
