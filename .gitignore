@@ -39,6 +39,7 @@ pnpm-lock.yaml
 
 # Local setup sentinels
 .sadtalker_ready
+.musetalk_ready
 
 # ML models & media
 *.pt
