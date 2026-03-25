@@ -25,6 +25,29 @@ except Exception as e:
 done
 echo "[startup] PostgreSQL is ready."
 
+echo "[startup] Checking migration state..."
+# If tables already exist but alembic has no history, stamp to current head
+# so alembic doesn't try to re-create existing tables.
+CURRENT=$(alembic current 2>/dev/null || true)
+if [ -z "$CURRENT" ]; then
+    # Check if the users table already exists (pre-alembic install)
+    TABLES=$(python -c "
+import os, psycopg2, urllib.parse as up
+url = os.environ.get('DATABASE_URL','')
+r = up.urlparse(url)
+conn = psycopg2.connect(host=r.hostname, port=r.port or 5432,
+    dbname=r.path.lstrip('/'), user=r.username, password=r.password)
+cur = conn.cursor()
+cur.execute(\"SELECT to_regclass('public.users')\")
+print(cur.fetchone()[0] or '')
+conn.close()
+" 2>/dev/null || echo "")
+    if [ "$TABLES" = "users" ]; then
+        echo "[startup] Existing DB detected without alembic history — stamping to head..."
+        alembic stamp head
+    fi
+fi
+
 echo "[startup] Running database migrations (alembic upgrade head)..."
 if ! alembic upgrade head; then
     echo "[startup] ERROR: Alembic migrations failed. Check logs above." >&2

@@ -335,9 +335,8 @@ if [[ "$MODE" == "dev" ]]; then
   pip install --upgrade pip "setuptools==69.5.1" wheel -q
   info "Installing backend dependencies..."
   pip install --no-build-isolation -r requirements.txt -q
-  # Run migrations — show pending count and result
-  PENDING=$(alembic history --verbose 2>/dev/null | grep -c "^Rev" || true)
-  CURRENT=$(alembic current 2>/dev/null | grep -v "^$" | head -1)
+  # Run migrations — safe check avoids grep pipefail on empty output
+  CURRENT=$(alembic current 2>/dev/null || true)
   if echo "$CURRENT" | grep -q "(head)"; then
     success "Database already at latest migration (head)"
   else
