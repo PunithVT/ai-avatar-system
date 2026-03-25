@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models import User, Avatar
-from app.schemas import AvatarCreate, AvatarResponse
+from app.schemas import AvatarResponse
 from app.services.storage import storage_service
 from app.services.avatar_processor import avatar_processor
 from app.api.v1.users import get_current_user

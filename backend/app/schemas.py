@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 from datetime import datetime
 
 
@@ -32,10 +32,6 @@ class UserResponse(UserBase):
 # Avatar Schemas
 class AvatarBase(BaseModel):
     name: str
-
-
-class AvatarCreate(AvatarBase):
-    pass
 
 
 class AvatarResponse(AvatarBase):
@@ -101,38 +97,6 @@ class ConversationResponse(BaseModel):
     updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
-
-
-# WebSocket Schemas
-class WebSocketMessage(BaseModel):
-    type: str  # audio, text, video, ping, pong, error
-    data: Optional[Dict[str, Any]] = None
-
-
-class AudioInput(BaseModel):
-    audio_data: str  # base64 encoded
-    format: str = "webm"
-
-
-class TextInput(BaseModel):
-    text: str
-
-
-# Response Schemas
-class AvatarVideoResponse(BaseModel):
-    video_url: str
-    duration: float
-    status: str = "success"
-
-
-class ErrorResponse(BaseModel):
-    detail: str
-    error_code: Optional[str] = None
-
-
-class SuccessResponse(BaseModel):
-    message: str
-    data: Optional[Dict[str, Any]] = None
 
 
 # Token Schema

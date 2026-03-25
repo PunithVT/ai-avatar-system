@@ -9,7 +9,7 @@ from alembic import context
 
 from app.config import settings
 from app.database import Base
-from app.models import User, Avatar, Session, Message, Conversation, AvatarCache
+from app.models import User, Avatar, Session, Message, Conversation
 
 config = context.config
 

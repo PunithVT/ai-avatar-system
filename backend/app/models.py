@@ -93,17 +93,3 @@ class Conversation(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-
-class AvatarCache(Base):
-    __tablename__ = "avatar_cache"
-    
-    id = Column(String, primary_key=True, default=generate_uuid)
-    avatar_id = Column(String, ForeignKey("avatars.id"), nullable=False)
-    text_hash = Column(String, nullable=False, index=True)
-    video_url = Column(String, nullable=False)
-    s3_key = Column(String, nullable=False)
-    duration = Column(Float, nullable=False)
-    size = Column(Integer, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    accessed_at = Column(DateTime(timezone=True), server_default=func.now())
-    access_count = Column(Integer, default=0)
