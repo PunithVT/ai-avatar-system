@@ -45,7 +45,7 @@
 AvatarAI is an open-source, production-ready platform for building **photorealistic AI avatar conversations**. Upload any face photo, clone a voice from a 5-second audio clip, and have a real-time conversation — with **lip-sync video generated on every single response**.
 
 ```
-[mic input]  →  Whisper STT  →  Claude / GPT-4 / Llama  →  XTTS v2 TTS  →  SadTalker lip-sync  →  [video]
+[mic input]  →  Whisper STT  →  Claude / GPT-4 / Llama  →  XTTS v2 TTS  →  MuseTalk lip-sync  →  [video]
                                   < 200 ms end-to-end on GPU >
 ```
 
@@ -66,7 +66,7 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
 | 🤖 **LLM Backends** | Claude (Anthropic) · GPT-4o (OpenAI) · Llama 3 (Ollama, local) |
 | 🎤 **Voice Cloning** | Record 5–30 s → XTTS v2 zero-shot speaker embedding, applied every TTS call |
 | 🗣️ **Speech-to-Text** | OpenAI Whisper (`faster-whisper`, CUDA-accelerated), 18+ languages |
-| 🎬 **Lip-Sync Video** | SadTalker · Live Portrait · Simple fallback — photorealistic, every response |
+| 🎬 **Lip-Sync Video** | MuseTalk · Simple fallback — photorealistic, every response |
 | ⚡ **Real-Time Pipeline** | WebSocket: STT → LLM → TTS → Animator → video in one continuous pass |
 | 😊 **Emotion Detection** | Live emotion badges per message (happy · angry · sad · excited · curious) |
 | 🌍 **18+ Languages** | Whisper multilingual STT + XTTS v2 multilingual TTS |
@@ -99,8 +99,8 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
 │  │                     WebSocket Manager                        │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐    │
-│  │ Whisper  │  │ Claude / │  │ XTTS v2  │  │  SadTalker /     │    │
-│  │   STT    │  │ GPT/Llama│  │   TTS    │  │  Live Portrait   │    │
+│  │ Whisper  │  │ Claude / │  │ XTTS v2  │  │  MuseTalk /     │    │
+│  │   STT    │  │ GPT/Llama│  │   TTS    │  │  MuseTalk   │    │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘    │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐    │
 │  │PostgreSQL│  │  Redis   │  │  Celery  │  │  Local FS / S3   │    │
@@ -124,7 +124,7 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
  (+ cloned speaker_wav)
       │
       ▼
- SadTalker / Live Portrait ► lip-sync MP4
+ MuseTalk ► lip-sync MP4
       │
       ▼
  WebSocket push ───────────► browser <video> element
@@ -287,7 +287,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 
 # ── Avatar Animation Engine ───────────────────────────────────────────
-AVATAR_ENGINE=sadtalker           # sadtalker | liveportrait | simple
+AVATAR_ENGINE=musetalk           # musetalk | simple
 
 # ── TTS ──────────────────────────────────────────────────────────────
 TTS_PROVIDER=coqui                # coqui (XTTS v2) | elevenlabs | bark
@@ -344,8 +344,8 @@ LOG_LEVEL=INFO
 | Claude / GPT-4o / Llama 3 | LLM conversation |
 | Whisper (`faster-whisper`) | Speech-to-text |
 | XTTS v2 (Coqui TTS) | Text-to-speech + zero-shot voice cloning |
-| SadTalker | Photorealistic lip-sync video generation |
-| Live Portrait | Alternative lip-sync animator |
+| MuseTalk V1.5 | Photorealistic lip-sync video generation |
+| MuseTalk | Alternative lip-sync animator |
 
 ---
 
@@ -453,6 +453,6 @@ MIT © 2025 — see [LICENSE](LICENSE) for details.
 
 <br/><br/>
 
-<sub>Built with FastAPI · Next.js · SadTalker · XTTS v2 · Whisper · Claude AI</sub>
+<sub>Built with FastAPI · Next.js · MuseTalk · XTTS v2 · Whisper · Claude AI</sub>
 
 </div>

@@ -38,7 +38,7 @@ const FEATURES = [
   {
     icon: Activity,
     title: 'Lip-Sync Animation',
-    description: 'SadTalker & Live Portrait produce photorealistic animated responses.',
+    description: 'MuseTalk V1.5 produces photorealistic lip-sync animated responses.',
     color: 'from-emerald-500 to-teal-500',
     glow: 'rgba(16,185,129,0.3)',
   },
@@ -165,7 +165,7 @@ export default function Home() {
 
               <p className="max-w-2xl text-lg md:text-xl text-gray-400 mb-10 leading-relaxed animate-slide-up" style={{ animationDelay: '0.2s' }}>
                 Upload a photo, clone a voice, and have real-time AI-powered conversations with
-                photorealistic lip-sync animations. Powered by Claude, Whisper, and SadTalker.
+                photorealistic lip-sync animations. Powered by Claude, Whisper, and MuseTalk.
               </p>
 
               {/* CTAs */}

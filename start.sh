@@ -110,37 +110,14 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
   warn "Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env, or use Ollama (LLM_PROVIDER=ollama)."
 fi
 
-# Check lip-sync engine setup
-_sadtalker_ready() {
-  [[ -f ".sadtalker_ready" ]] && return 0
-  [[ -f "backend/models/SadTalker/checkpoints/SadTalker_V0.0.2_256.safetensors" ]] && return 0
-  return 1
-}
+# Check MuseTalk lip-sync setup
 _musetalk_ready() {
   [[ -f ".musetalk_ready" ]] && return 0
   [[ -f "backend/models/MuseTalk/models/musetalkV15/unet.pth" ]] && return 0
   return 1
 }
 
-_ENGINE="${AVATAR_ENGINE:-musetalk}"
-if [[ "$_ENGINE" == "sadtalker" ]]; then
-  if _sadtalker_ready; then
-    success "SadTalker lip-sync ready"
-  else
-    echo ""
-    echo -e "  ${YELLOW}┌─────────────────────────────────────────────────────┐${RESET}"
-    echo -e "  ${YELLOW}│  ⚠  Lip-sync (SadTalker) is NOT set up yet          │${RESET}"
-    echo -e "  ${YELLOW}│                                                     │${RESET}"
-    echo -e "  ${YELLOW}│  Avatars will show a static image instead of        │${RESET}"
-    echo -e "  ${YELLOW}│  animated lip-sync until you run:                   │${RESET}"
-    echo -e "  ${YELLOW}│                                                     │${RESET}"
-    echo -e "  ${YELLOW}│    ${BOLD}bash scripts/setup_sadtalker.sh${RESET}${YELLOW}               │${RESET}"
-    echo -e "  ${YELLOW}│                                                     │${RESET}"
-    echo -e "  ${YELLOW}│  (~600 MB download, one-time setup)                 │${RESET}"
-    echo -e "  ${YELLOW}└─────────────────────────────────────────────────────┘${RESET}"
-    echo ""
-  fi
-elif [[ "$_ENGINE" == "musetalk" ]]; then
+if [[ "${AVATAR_ENGINE:-musetalk}" == "musetalk" ]]; then
   if _musetalk_ready; then
     success "MuseTalk lip-sync ready"
   else

@@ -51,11 +51,10 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 2000
     
     # Avatar Engine
-    AVATAR_ENGINE: str = "musetalk"  # musetalk, sadtalker, simple
+    AVATAR_ENGINE: str = "musetalk"  # musetalk, simple
     AVATAR_RESOLUTION: int = 512
     AVATAR_FPS: int = 25
     MUSETALK_PATH: str = "models/MuseTalk"
-    SADTALKER_PATH: str = "models/SadTalker"
 
     # STT Configuration
     STT_PROVIDER: str = "whisper"  # whisper, google, azure

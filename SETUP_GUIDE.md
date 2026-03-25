@@ -186,13 +186,13 @@ chmod +x deploy.sh
 
 ### Avatar Engine Options
 
-**SadTalker** (Best quality, slower):
+**MuseTalk** (Best quality, slower):
 ```env
 AVATAR_ENGINE=sadtalker
 AVATAR_RESOLUTION=512
 ```
 
-**Live Portrait** (Faster, good quality):
+**MuseTalk** (Faster, good quality):
 ```env
 AVATAR_ENGINE=liveportrait
 AVATAR_RESOLUTION=512

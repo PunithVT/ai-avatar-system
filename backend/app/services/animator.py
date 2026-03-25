@@ -22,9 +22,8 @@ class AvatarAnimator:
     """
     Avatar Animation Service.
     Supported engines (set AVATAR_ENGINE in .env):
-      - musetalk   : MuseTalk V1.5 — best quality, Python 3.12 compatible (default)
-      - sadtalker  : SadTalker — legacy, kept as fallback
-      - simple     : ffmpeg static image + audio, no lip-sync
+      - musetalk : MuseTalk V1.5 — best quality, Python 3.12 compatible (default)
+      - simple   : ffmpeg static image + audio, no lip-sync
     """
 
     def __init__(self):
@@ -34,7 +33,6 @@ class AvatarAnimator:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self._initialised = False
         self._musetalk_dir: Optional[Path] = None
-        self._sadtalker_dir: Optional[Path] = None
 
         logger.info(f"AvatarAnimator: engine={self.engine}, device={self.device}")
 
@@ -58,21 +56,6 @@ class AvatarAnimator:
                 self.engine = "simple"
             else:
                 logger.info(f"MuseTalk found at: {self._musetalk_dir}")
-
-        elif self.engine == "sadtalker":
-            self._sadtalker_dir = self._find_dir(
-                settings.SADTALKER_PATH, "inference.py"
-            )
-            if self._sadtalker_dir is None:
-                logger.warning(
-                    "SadTalker not found at '%s'. "
-                    "Run scripts/setup_sadtalker.sh to install it. "
-                    "Falling back to simple animation.",
-                    settings.SADTALKER_PATH,
-                )
-                self.engine = "simple"
-            else:
-                logger.info(f"SadTalker found at: {self._sadtalker_dir}")
 
         elif self.engine not in ("simple",):
             logger.warning(f"Unknown engine '{self.engine}', using simple animation.")
@@ -113,8 +96,6 @@ class AvatarAnimator:
         try:
             if self.engine == "musetalk":
                 return await self._animate_musetalk(avatar_image_path, audio_path, output_path)
-            elif self.engine == "sadtalker":
-                return await self._animate_sadtalker(avatar_image_path, audio_path, output_path)
             else:
                 return await self._animate_simple(avatar_image_path, audio_path, output_path)
         except Exception as e:
@@ -133,7 +114,7 @@ class AvatarAnimator:
         assert self._musetalk_dir is not None
         musetalk_dir: Path = self._musetalk_dir  # type: ignore[assignment]
 
-        task_id = uuid.uuid4().hex  # 32-char hex string, unique per request
+        task_id = uuid.uuid4().hex
         output_name = f"musetalk_{task_id}.mp4"
 
         # MuseTalk reads a YAML config that maps task → {video_path, audio_path}
@@ -181,7 +162,6 @@ class AvatarAnimator:
         # MuseTalk writes output to results/v15/<output_name>
         result_video = self._musetalk_dir / "results" / "v15" / output_name
         if not result_video.exists():
-            # fallback: newest mp4 in results/v15/
             candidates = sorted(
                 (self._musetalk_dir / "results" / "v15").glob("*.mp4"),
                 key=lambda f: f.stat().st_mtime,
@@ -194,54 +174,6 @@ class AvatarAnimator:
         cfg_path.unlink(missing_ok=True)
 
         logger.info(f"MuseTalk animation done: {output_path}")
-        return output_path
-
-    # ── SadTalker (legacy) ────────────────────────────────────────────────────
-
-    async def _animate_sadtalker(
-        self,
-        avatar_path: str,
-        audio_path: str,
-        output_path: str,
-    ) -> str:
-        """Run SadTalker via subprocess (legacy — kept as fallback)."""
-        assert self._sadtalker_dir is not None
-        result_dir = TMPDIR / f"sadtalker_{Path(output_path).stem}"
-        result_dir.mkdir(parents=True, exist_ok=True)
-
-        cmd = [
-            sys.executable,
-            str(self._sadtalker_dir / "inference.py"),
-            "--driven_audio", str(audio_path),
-            "--source_image", str(avatar_path),
-            "--result_dir", str(result_dir),
-            "--still",
-            "--preprocess", "crop",
-            "--size", "256",
-        ]
-
-        logger.info("Running SadTalker: %s", " ".join(cmd))
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(self._sadtalker_dir),
-        )
-        stdout, stderr = await proc.communicate()
-
-        if proc.returncode != 0:
-            err = stderr.decode(errors="replace")
-            logger.error(f"SadTalker stderr:\n{err}")
-            raise RuntimeError(f"SadTalker exited with code {proc.returncode}")
-
-        mp4_files = sorted(result_dir.glob("*.mp4"), key=lambda f: f.stat().st_mtime)
-        if not mp4_files:
-            raise FileNotFoundError(f"SadTalker produced no .mp4 in {result_dir}")
-
-        shutil.move(str(mp4_files[-1]), output_path)
-        shutil.rmtree(str(result_dir), ignore_errors=True)
-
-        logger.info(f"SadTalker animation done: {output_path}")
         return output_path
 
     # ── Simple ffmpeg fallback ────────────────────────────────────────────────
