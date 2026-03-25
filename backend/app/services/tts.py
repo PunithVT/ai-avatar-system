@@ -86,13 +86,12 @@ class TTSService:
 
             logger.info(f"Synthesizing speech (coqui): {text[:100]}...")
 
+            is_multilingual = getattr(self.model, 'is_multi_lingual', False)
             if speaker_wav and hasattr(self.model, 'tts_to_file'):
-                self.model.tts_to_file(
-                    text=text,
-                    speaker_wav=speaker_wav,
-                    language=language,
-                    file_path=output_path,
-                )
+                kwargs = {"text": text, "speaker_wav": speaker_wav, "file_path": output_path}
+                if is_multilingual:
+                    kwargs["language"] = language
+                self.model.tts_to_file(**kwargs)
             else:
                 self.model.tts_to_file(text=text, file_path=output_path)
 

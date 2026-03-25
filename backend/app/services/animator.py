@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import os
 import shutil
 import sys
 import tempfile
@@ -132,12 +133,8 @@ class AvatarAnimator:
         unet_config = musetalk_dir / "models" / "musetalk" / "config.json"
         whisper_dir = musetalk_dir / "models" / "whisper"
 
-        # Use the MuseTalk-specific venv python (has musetalk package installed)
-        musetalk_python = musetalk_dir / "venv" / "bin" / "python3"
-        python_exe = str(musetalk_python) if musetalk_python.exists() else sys.executable
-
         cmd = [
-            python_exe, "scripts/inference.py",
+            sys.executable, "scripts/inference.py",
             "--inference_config", str(cfg_path),
             "--unet_model_path", str(unet_model),
             "--unet_config", str(unet_config),
@@ -149,12 +146,18 @@ class AvatarAnimator:
         if self.device == "cuda":
             cmd += ["--gpu_id", "0"]
 
+        # Inject PYTHONPATH so the musetalk package (in the repo root) is importable
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(musetalk_dir) + (":" + existing if existing else "")
+
         logger.info("Running MuseTalk: %s", " ".join(cmd))
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._musetalk_dir),
+            env=env,
         )
         stdout, stderr = await proc.communicate()
 
