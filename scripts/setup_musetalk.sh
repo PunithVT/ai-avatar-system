@@ -149,11 +149,14 @@ echo "  preprocessing.py replaced ✓"
 
 # ── 4. Download model weights from HuggingFace ──────────────────────────────
 echo ""
-echo "[4/5] Downloading MuseTalk model weights (~8.5 GB total)..."
+echo "[4/5] Downloading MuseTalk model weights (~8.8 GB total)..."
+
+# gdown is required for the Google Drive face parsing model
+"$VENV_PYTHON" -m pip install -q gdown
 
 "$VENV_PYTHON" - "$MUSETALK_DIR" << 'PYEOF'
 from huggingface_hub import snapshot_download
-import os, sys
+import os, sys, urllib.request, subprocess
 
 musetalk_dir = sys.argv[1]
 models_target = os.path.join(musetalk_dir, "models")
@@ -194,6 +197,30 @@ if not os.path.isdir(vae_target) or not os.listdir(vae_target):
 else:
     print("  SD-VAE already present — skipping.")
 
+# ── face-parse-bisent (BiSeNet face segmentation) ────────────────────────────
+bisent_dir = os.path.join(models_target, "face-parse-bisent")
+os.makedirs(bisent_dir, exist_ok=True)
+
+resnet_path = os.path.join(bisent_dir, "resnet18-5c106cde.pth")
+if not os.path.isfile(resnet_path):
+    print("  Downloading ResNet18 backbone (~45 MB)...")
+    urllib.request.urlretrieve(
+        "https://download.pytorch.org/models/resnet18-5c106cde.pth",
+        resnet_path,
+    )
+    print("  ResNet18 done.")
+else:
+    print("  resnet18-5c106cde.pth already present — skipping.")
+
+bisenet_path = os.path.join(bisent_dir, "79999_iter.pth")
+if not os.path.isfile(bisenet_path):
+    print("  Downloading BiSeNet face parser via gdown (~53 MB)...")
+    import gdown
+    gdown.download(id="154JgKpzCPW82qINcVieuPH3fZ2e0P812", output=bisenet_path, quiet=False)
+    print("  BiSeNet done.")
+else:
+    print("  79999_iter.pth already present — skipping.")
+
 print("  All model downloads complete.")
 PYEOF
 
@@ -229,6 +256,16 @@ if [ ! -f "$MUSETALK_DIR/models/sd-vae/config.json" ]; then
   MISSING=1
 else
   echo "  models/sd-vae/ ✓"
+fi
+
+if [ ! -f "$MUSETALK_DIR/models/face-parse-bisent/resnet18-5c106cde.pth" ]; then
+  echo "  MISSING: models/face-parse-bisent/resnet18-5c106cde.pth"
+  MISSING=1
+elif [ ! -f "$MUSETALK_DIR/models/face-parse-bisent/79999_iter.pth" ]; then
+  echo "  MISSING: models/face-parse-bisent/79999_iter.pth"
+  MISSING=1
+else
+  echo "  models/face-parse-bisent/ ✓"
 fi
 
 if [ "$MISSING" -eq 0 ]; then
