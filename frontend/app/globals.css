@@ -297,6 +297,34 @@
   50% { background-position: 100% 50%; }
 }
 
+@keyframes avatar-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.018); }
+}
+
+@keyframes avatar-glow {
+  0%, 100% { box-shadow: 0 0 24px rgba(124, 58, 237, 0.25), 0 0 0px rgba(59, 130, 246, 0); }
+  50% { box-shadow: 0 0 48px rgba(124, 58, 237, 0.5), 0 0 80px rgba(59, 130, 246, 0.15); }
+}
+
+@keyframes avatar-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  96% { transform: scaleY(0.06); }
+}
+
+.avatar-idle {
+  animation: avatar-breathe 3.8s ease-in-out infinite;
+}
+
+.avatar-idle-glow {
+  animation: avatar-glow 3.8s ease-in-out infinite;
+}
+
+.avatar-eye {
+  animation: avatar-blink 5s ease-in-out infinite;
+  transform-origin: center 60%;
+}
+
 /* ── Toaster overrides ── */
 .react-hot-toast > div {
   font-family: 'Inter', sans-serif !important;

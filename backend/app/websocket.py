@@ -1,10 +1,12 @@
 import base64
 import json
 import logging
+import re
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import WebSocket
 
@@ -165,7 +167,7 @@ class ConnectionManager:
             await self.send_message(session_id, {
                 "type": "message", "role": "assistant", "content": response
             })
-            await self._generate_avatar_video(session_id, response)
+            await self._stream_avatar_video_chunks(session_id, response)
 
         except Exception as e:
             logger.error(f"Text error [{session_id}]: {e}")
@@ -173,59 +175,107 @@ class ConnectionManager:
 
     # ── video generation ──────────────────────────────────────────────────────
 
-    async def _generate_avatar_video(self, session_id: str, text: str):
-        try:
-            data = self.session_data.get(session_id, {})
-            avatar_image = data.get("avatar_image_local")
+    @staticmethod
+    def _split_sentences(text: str) -> List[str]:
+        """Split text into sentences, keeping each chunk meaningful."""
+        # Split on sentence-ending punctuation followed by whitespace
+        raw = re.split(r'(?<=[.!?])\s+', text.strip())
+        sentences: List[str] = []
+        buf = ""
+        for s in raw:
+            s = s.strip()
+            if not s:
+                continue
+            buf = (buf + " " + s).strip() if buf else s
+            # Flush buffer when it's long enough to be worth a chunk
+            if len(buf) >= 30 or s.endswith(('.', '!', '?')):
+                sentences.append(buf)
+                buf = ""
+        if buf:
+            sentences.append(buf)
+        return sentences if sentences else [text.strip()]
 
-            if not avatar_image:
-                logger.warning(f"No avatar image for session {session_id}")
-                return
+    async def _stream_avatar_video_chunks(self, session_id: str, text: str):
+        """
+        Sentence-based streaming: process each sentence independently and
+        send video_chunk messages as they complete so the frontend can play
+        them back-to-back without waiting for the full response.
+        """
+        data = self.session_data.get(session_id, {})
+        avatar_image = data.get("avatar_image_local")
+        speaker_wav: Optional[str] = data.get("voice_wav")
 
-            # TTS — uses cloned voice WAV if one is set
+        if not avatar_image:
+            logger.warning(f"No avatar image for session {session_id}")
+            return
+
+        sentences = self._split_sentences(text)
+        total = len(sentences)
+        logger.info(f"Streaming {total} chunk(s) for session {session_id}")
+
+        await self.send_message(session_id, {
+            "type": "video_chunk_start",
+            "total_chunks": total,
+        })
+
+        sent_any = False
+        for i, sentence in enumerate(sentences):
+            try:
+                await self.send_message(session_id, {
+                    "type": "status",
+                    "message": f"Animating part {i + 1} of {total}…",
+                    "stage": "animation",
+                })
+
+                job_id = uuid.uuid4().hex[:12]
+                tmp_audio = TMPDIR / f"{session_id}_{job_id}_audio.wav"
+                tmp_video = TMPDIR / f"{session_id}_{job_id}_video.mp4"
+
+                await tts_service.synthesize(
+                    text=sentence,
+                    output_path=str(tmp_audio),
+                    speaker_wav=speaker_wav,
+                    language="en",
+                )
+
+                await avatar_animator.animate(
+                    avatar_image_path=avatar_image,
+                    audio_path=str(tmp_audio),
+                    output_path=str(tmp_video),
+                )
+
+                ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+                video_key = f"videos/{session_id}/{ts}_c{i}.mp4"
+                video_url = await storage_service.upload_file(
+                    tmp_video.read_bytes(), video_key, content_type="video/mp4"
+                )
+
+                tmp_audio.unlink(missing_ok=True)
+                tmp_video.unlink(missing_ok=True)
+
+                await self.send_message(session_id, {
+                    "type": "video_chunk",
+                    "chunk_index": i,
+                    "total_chunks": total,
+                    "video_url": video_url,
+                    "text": sentence,
+                })
+                logger.info(f"Chunk {i + 1}/{total} ready [{session_id}]")
+                sent_any = True
+
+            except Exception as e:
+                logger.error(f"Chunk {i} failed [{session_id}]: {e}")
+                tmp_audio.unlink(missing_ok=True)  # type: ignore[possibly-undefined]
+                tmp_video.unlink(missing_ok=True)  # type: ignore[possibly-undefined]
+
+        await self.send_message(session_id, {
+            "type": "video_chunk_end",
+            "sent_chunks": sum(1 for _ in sentences) if sent_any else 0,
+        })
+
+        if not sent_any:
             await self.send_message(session_id, {
-                "type": "status", "message": "Synthesising speech…", "stage": "tts"
-            })
-            tmp_audio = TMPDIR / f"{session_id}_tts.wav"
-            speaker_wav: Optional[str] = data.get("voice_wav")
-
-            await tts_service.synthesize(
-                text=text,
-                output_path=str(tmp_audio),
-                speaker_wav=speaker_wav,   # None → default voice, path → cloned voice
-                language="en",
-            )
-
-            # Animation
-            await self.send_message(session_id, {
-                "type": "status", "message": "Animating avatar…", "stage": "animation"
-            })
-            tmp_video = TMPDIR / f"{session_id}_video.mp4"
-            await avatar_animator.animate(
-                avatar_image_path=avatar_image,
-                audio_path=str(tmp_audio),
-                output_path=str(tmp_video),
-            )
-
-            # Upload / serve
-            ts = int(datetime.now(timezone.utc).timestamp())
-            video_key = f"videos/{session_id}/{ts}.mp4"
-            video_url = await storage_service.upload_file(
-                tmp_video.read_bytes(), video_key, content_type="video/mp4"
-            )
-
-            tmp_audio.unlink(missing_ok=True)
-            tmp_video.unlink(missing_ok=True)
-
-            await self.send_message(session_id, {
-                "type": "video", "video_url": video_url, "text": text
-            })
-            logger.info(f"Video ready [{session_id}]: {video_url}")
-
-        except Exception as e:
-            logger.error(f"Video generation error [{session_id}]: {e}")
-            await self.send_message(session_id, {
-                "type": "error", "message": f"Video generation failed: {e}"
+                "type": "error", "message": "Avatar animation failed for all sentences."
             })
 
     # ── helpers ───────────────────────────────────────────────────────────────

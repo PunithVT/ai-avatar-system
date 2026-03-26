@@ -18,12 +18,16 @@ interface Message {
   emotion?: string
 }
 
+interface VideoChunk {
+  url: string
+  text: string
+}
+
 interface ChatInterfaceProps {
   avatarId: string
   onSessionCreated?: (sessionId: string) => void
 }
 
-// Detect emotion from text (lightweight heuristic — server-side model can replace)
 function detectEmotion(text: string): string {
   const lower = text.toLowerCase()
   if (/\b(haha|lol|funny|laugh|joke|hilarious)\b/.test(lower)) return 'happy'
@@ -43,14 +47,6 @@ const EMOTION_CONFIG: Record<string, { label: string; color: string; bg: string 
   neutral: { label: '😊 Neutral', color: 'text-gray-300',   bg: 'bg-gray-500/20 border-gray-500/30' },
 }
 
-const LOADING_MESSAGES = [
-  'Processing your voice…',
-  'Generating response…',
-  'Animating avatar…',
-  'Rendering lip-sync…',
-  'Almost ready…',
-]
-
 function WaveformBars({ active }: { active: boolean }) {
   return (
     <div className="flex items-center gap-0.5 h-6">
@@ -62,8 +58,8 @@ function WaveformBars({ active }: { active: boolean }) {
             height: active ? `${Math.random() * 20 + 4}px` : '4px',
             background: 'linear-gradient(to top, #7c3aed, #3b82f6)',
             transition: 'height 0.15s ease',
-            animationDelay: `${i * 0.1}s`,
             animation: active ? 'waveform 1.2s ease-in-out infinite' : 'none',
+            animationDelay: `${i * 0.1}s`,
           }}
         />
       ))}
@@ -92,59 +88,130 @@ function TypingIndicator() {
   )
 }
 
+// Idle avatar: shows the avatar image with a breathing + glow animation
+function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
+  if (!imageUrl) {
+    return (
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
+        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-primary-600/30 to-accent-600/20
+                        flex items-center justify-center border border-white/10 animate-pulse-slow">
+          <Video size={36} className="text-primary-400" />
+        </div>
+        <p className="text-gray-500 text-sm">Avatar video will appear here</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center bg-surface-950">
+      {/* Glow ring behind image */}
+      <div
+        className="absolute w-[70%] aspect-square rounded-full avatar-idle-glow"
+        style={{ filter: 'blur(32px)', background: 'radial-gradient(circle, rgba(124,58,237,0.15) 0%, transparent 70%)' }}
+      />
+      {/* Avatar image with breathing scale */}
+      <img
+        src={imageUrl}
+        alt="Avatar idle"
+        className="avatar-idle relative z-10 w-full h-full object-cover"
+        style={{ borderRadius: '0.75rem' }}
+      />
+      {/* Subtle scanline shimmer overlay */}
+      <div
+        className="absolute inset-0 z-20 pointer-events-none rounded-xl"
+        style={{
+          background: 'linear-gradient(180deg, transparent 60%, rgba(0,0,0,0.25) 100%)',
+        }}
+      />
+      {/* "Idle" indicator dot */}
+      <div className="absolute bottom-3 left-3 z-30 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm
+                      px-2 py-1 rounded-full border border-white/10">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+        <span className="text-[10px] text-gray-300 font-medium tracking-wide">IDLE</span>
+      </div>
+    </div>
+  )
+}
+
 export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [inputText, setInputText] = useState('')
   const [isRecording, setIsRecording] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [ws, setWs] = useState<WebSocket | null>(null)
-  const [currentVideo, setCurrentVideo] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
-  const [loadingMsg, setLoadingMsg] = useState(LOADING_MESSAGES[0])
+  const [statusMsg, setStatusMsg] = useState('Almost ready…')
   const [isTyping, setIsTyping] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [recordingLevel, setRecordingLevel] = useState(0)
+  const [avatarImageUrl, setAvatarImageUrl] = useState<string | null>(null)
+
+  // Video playback state
+  const [showVideo, setShowVideo] = useState(false)           // true while a chunk is playing
+  const [currentChunkProgress, setCurrentChunkProgress] = useState({ current: 0, total: 0 })
+
+  // Chunk queue — managed via refs to avoid stale closures in event handlers
+  const chunkQueueRef = useRef<VideoChunk[]>([])
+  const isPlayingRef = useRef(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
-  const loadingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const levelAnimRef = useRef<number | null>(null)
 
-  // Play video once the <video> element is mounted in the DOM
+  // ── Fetch avatar image on mount ──────────────────────────────────────────
   useEffect(() => {
-    if (currentVideo && videoRef.current) {
-      videoRef.current.src = currentVideo
-      videoRef.current.muted = isMuted
-      videoRef.current.play().catch(() => {/* autoplay blocked — user will see poster */})
-    }
-  }, [currentVideo]) // eslint-disable-line react-hooks/exhaustive-deps
+    api.getAvatars()
+      .then((avatars: any[]) => {
+        const av = avatars.find((a: any) => a.id === avatarId)
+        if (av) {
+          setAvatarImageUrl(av.thumbnail_url || av.image_url || null)
+        }
+      })
+      .catch(() => {})
+  }, [avatarId])
 
-  // Auto-scroll
+  // ── Chunk queue player ───────────────────────────────────────────────────
+  const playNextChunk = useCallback(() => {
+    const next = chunkQueueRef.current.shift()
+    if (!next) {
+      isPlayingRef.current = false
+      setShowVideo(false)
+      return
+    }
+    isPlayingRef.current = true
+    setShowVideo(true)
+    if (videoRef.current) {
+      videoRef.current.src = next.url
+      videoRef.current.muted = isMuted
+      videoRef.current.play().catch(() => {})
+    }
+  }, [isMuted])
+
+  // Attach onended handler to video element
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    const handler = () => playNextChunk()
+    video.addEventListener('ended', handler)
+    return () => video.removeEventListener('ended', handler)
+  }, [playNextChunk])
+
+  // Sync muted state to video element
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.muted = isMuted
+  }, [isMuted])
+
+  // Auto-scroll chat
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
-
   useEffect(scrollToBottom, [messages, isTyping, scrollToBottom])
 
-  // Rotate loading messages
-  useEffect(() => {
-    if (isProcessing) {
-      let i = 0
-      loadingIntervalRef.current = setInterval(() => {
-        i = (i + 1) % LOADING_MESSAGES.length
-        setLoadingMsg(LOADING_MESSAGES[i])
-      }, 1800)
-    } else {
-      if (loadingIntervalRef.current) clearInterval(loadingIntervalRef.current)
-    }
-    return () => { if (loadingIntervalRef.current) clearInterval(loadingIntervalRef.current) }
-  }, [isProcessing])
-
-  // Create session
+  // ── WebSocket ────────────────────────────────────────────────────────────
   const createSessionMutation = useMutation({
     mutationFn: () => api.createSession(avatarId),
     onSuccess: (data) => {
@@ -166,25 +233,19 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
       setConnectionStatus('connected')
       toast.success('Connected to avatar!', { icon: '✨' })
     }
-
     websocket.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      handleWebSocketMessage(data)
+      handleWebSocketMessage(JSON.parse(event.data))
     }
-
     websocket.onerror = () => {
       setConnectionStatus('disconnected')
       toast.error('Connection error')
     }
-
-    websocket.onclose = () => {
-      setConnectionStatus('disconnected')
-    }
+    websocket.onclose = () => setConnectionStatus('disconnected')
 
     setWs(websocket)
   }
 
-  const handleWebSocketMessage = (data: any) => {
+  const handleWebSocketMessage = useCallback((data: any) => {
     switch (data.type) {
       case 'transcription':
         setMessages(prev => [...prev, {
@@ -206,17 +267,34 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
           timestamp: new Date(),
           emotion: detectEmotion(data.content),
         }])
-        setIsProcessing(false)
-        toast.dismiss('processing')
+        // Keep isProcessing=true — spinner stays until first video chunk arrives
         break
 
-      case 'video':
-        setCurrentVideo(data.video_url)
-        setIsProcessing(false)
+      case 'video_chunk_start':
+        chunkQueueRef.current = []
+        setCurrentChunkProgress({ current: 0, total: data.total_chunks })
+        break
+
+      case 'video_chunk': {
+        const chunk: VideoChunk = { url: data.video_url, text: data.text }
+        chunkQueueRef.current.push(chunk)
+        setCurrentChunkProgress({ current: data.chunk_index + 1, total: data.total_chunks })
+        // First chunk arriving → clear processing spinner, start playback
+        if (!isPlayingRef.current) {
+          setIsProcessing(false)
+          playNextChunk()
+        }
+        break
+      }
+
+      case 'video_chunk_end':
+        // If nothing ever played (all chunks failed), clear spinner
+        if (!isPlayingRef.current) setIsProcessing(false)
         break
 
       case 'status':
         setIsProcessing(true)
+        setStatusMsg(data.message || 'Processing…')
         break
 
       case 'error':
@@ -225,7 +303,7 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
         setIsTyping(false)
         break
     }
-  }
+  }, [playNextChunk])
 
   const sendMessage = () => {
     if (!inputText.trim() || !ws || !sessionId) return
@@ -241,40 +319,36 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
     setInputText('')
     setIsProcessing(true)
     setIsTyping(true)
+    chunkQueueRef.current = []
+    isPlayingRef.current = false
+    setShowVideo(false)
   }
 
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-
-      // Set up audio level analyser
       const audioCtx = new AudioContext()
       const analyser = audioCtx.createAnalyser()
       analyser.fftSize = 256
-      const source = audioCtx.createMediaStreamSource(stream)
-      source.connect(analyser)
+      audioCtx.createMediaStreamSource(stream).connect(analyser)
       audioContextRef.current = audioCtx
       analyserRef.current = analyser
 
       const updateLevel = () => {
         const data = new Uint8Array(analyser.frequencyBinCount)
         analyser.getByteFrequencyData(data)
-        const avg = data.reduce((a, b) => a + b, 0) / data.length
-        setRecordingLevel(Math.min(100, avg * 2))
+        setRecordingLevel(Math.min(100, (data.reduce((a, b) => a + b, 0) / data.length) * 2))
         levelAnimRef.current = requestAnimationFrame(updateLevel)
       }
       updateLevel()
 
       const mediaRecorder = new MediaRecorder(stream)
       const audioChunks: Blob[] = []
-
       mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data)
-
       mediaRecorder.onstop = async () => {
         cancelAnimationFrame(levelAnimRef.current!)
         setRecordingLevel(0)
         audioCtx.close()
-
         const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
         const reader = new FileReader()
         reader.onloadend = () => {
@@ -282,12 +356,14 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
           if (ws) {
             ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }))
             setIsProcessing(true)
+            chunkQueueRef.current = []
+            isPlayingRef.current = false
+            setShowVideo(false)
           }
         }
         reader.readAsDataURL(audioBlob)
         stream.getTracks().forEach(t => t.stop())
       }
-
       mediaRecorder.start()
       mediaRecorderRef.current = mediaRecorder
       setIsRecording(true)
@@ -301,6 +377,13 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
     setIsRecording(false)
   }
 
+  const resetVideo = () => {
+    chunkQueueRef.current = []
+    isPlayingRef.current = false
+    setShowVideo(false)
+    if (videoRef.current) videoRef.current.src = ''
+  }
+
   const copyMessage = (content: string) => {
     navigator.clipboard.writeText(content)
     toast.success('Copied!', { duration: 1500 })
@@ -312,45 +395,61 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const isSpeaking = showVideo && !isProcessing
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 h-[calc(100vh-10rem)]">
-      {/* ── Video Panel (3 cols) ── */}
+      {/* ── Video Panel ─────────────────────────────────────────────────── */}
       <div className="lg:col-span-3 flex flex-col gap-4">
         <div className="card-glow flex-1 relative overflow-hidden rounded-2xl group">
-          {/* Glow border animation when video playing */}
-          {currentVideo && !isProcessing && (
+          {/* Neon border when speaking */}
+          {isSpeaking && (
             <div className="absolute inset-0 rounded-2xl neon-border pointer-events-none z-10 animate-glow" />
           )}
 
-          {/* Video / Placeholder */}
+          {/* Main display area */}
           <div className="aspect-video w-full bg-surface-950 rounded-xl overflow-hidden relative">
-            {currentVideo ? (
-              <video
-                ref={videoRef}
-                className="w-full h-full object-cover"
-                autoPlay
-                playsInline
-                muted={isMuted}
-                loop={false}
-              />
-            ) : (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
-                <div className="w-20 h-20 rounded-full bg-gradient-to-br from-primary-600/30 to-accent-600/20 flex items-center justify-center border border-white/10 animate-pulse-slow">
-                  <Video size={36} className="text-primary-400" />
+
+            {/* ── Idle avatar (always mounted, hidden when video plays) ── */}
+            <div
+              className="absolute inset-0 transition-opacity duration-500"
+              style={{ opacity: showVideo ? 0 : 1, zIndex: showVideo ? 0 : 5 }}
+            >
+              <IdleAvatar imageUrl={avatarImageUrl} />
+            </div>
+
+            {/* ── Video element (mounted always; shown only when playing) ── */}
+            <video
+              ref={videoRef}
+              className="absolute inset-0 w-full h-full object-cover transition-opacity duration-500"
+              style={{ opacity: showVideo ? 1 : 0, zIndex: showVideo ? 5 : 0 }}
+              autoPlay
+              playsInline
+              muted={isMuted}
+            />
+
+            {/* ── Processing overlay ── */}
+            {isProcessing && (
+              <div className="absolute inset-0 bg-surface-950/75 backdrop-blur-sm flex flex-col
+                              items-center justify-center gap-4 z-20">
+                <div className="relative">
+                  <div className="w-16 h-16 rounded-full border-2 border-primary-500/30 animate-spin-slow" />
+                  <div className="absolute inset-2 rounded-full border-2 border-t-primary-400
+                                  border-r-transparent border-b-transparent border-l-transparent animate-spin" />
+                  <Wand2 className="absolute inset-0 m-auto text-primary-400" size={20} />
                 </div>
-                <p className="text-gray-500 text-sm">Avatar video will appear here</p>
+                <p className="text-sm text-gray-300 font-medium animate-pulse">{statusMsg}</p>
               </div>
             )}
 
-            {/* Processing overlay */}
-            {isProcessing && (
-              <div className="absolute inset-0 bg-surface-950/80 backdrop-blur-sm flex flex-col items-center justify-center gap-4 z-20">
-                <div className="relative">
-                  <div className="w-16 h-16 rounded-full border-2 border-primary-500/30 animate-spin-slow" />
-                  <div className="absolute inset-2 rounded-full border-2 border-t-primary-400 border-r-transparent border-b-transparent border-l-transparent animate-spin" />
-                  <Wand2 className="absolute inset-0 m-auto text-primary-400" size={20} />
-                </div>
-                <p className="text-sm text-gray-300 font-medium animate-pulse">{loadingMsg}</p>
+            {/* ── Chunk progress badge (shows while more chunks are coming) ── */}
+            {isSpeaking && currentChunkProgress.total > 1 && (
+              <div className="absolute top-3 right-3 z-30 flex items-center gap-1.5 bg-black/50
+                              backdrop-blur-sm px-2.5 py-1.5 rounded-full border border-white/10">
+                <span className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-pulse" />
+                <span className="text-[10px] text-gray-300 font-medium">
+                  {currentChunkProgress.current}/{currentChunkProgress.total}
+                </span>
               </div>
             )}
           </div>
@@ -369,15 +468,8 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
             </div>
 
             <div className="flex items-center gap-2">
-              {currentVideo && (
-                <button
-                  onClick={() => {
-                    setCurrentVideo(null)
-                    if (videoRef.current) videoRef.current.src = ''
-                  }}
-                  className="btn-icon"
-                  title="Reset video"
-                >
+              {(showVideo || isProcessing) && (
+                <button onClick={resetVideo} className="btn-icon" title="Reset video">
                   <RotateCcw size={15} />
                 </button>
               )}
@@ -412,9 +504,8 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
         )}
       </div>
 
-      {/* ── Chat Panel (2 cols) ── */}
+      {/* ── Chat Panel ──────────────────────────────────────────────────── */}
       <div className="lg:col-span-2 flex flex-col glass-card rounded-2xl overflow-hidden p-0">
-        {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/8">
           <div className="flex items-center gap-2">
             <MessageCircle size={16} className="text-primary-400" />
@@ -426,11 +517,11 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
           </div>
         </div>
 
-        {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 messages-scroll">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full gap-4 py-12 text-center">
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-600/20 to-accent-600/10 flex items-center justify-center border border-white/8">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-600/20 to-accent-600/10
+                              flex items-center justify-center border border-white/8">
                 <Sparkles size={28} className="text-primary-400" />
               </div>
               <div>
@@ -443,14 +534,12 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
               const isUser = message.role === 'user'
               const emotion = message.emotion || 'neutral'
               const emotionCfg = EMOTION_CONFIG[emotion]
-
               return (
                 <div
                   key={message.id}
                   className={`flex gap-2.5 animate-slide-up ${isUser ? 'flex-row-reverse' : 'flex-row'}`}
                   style={{ animationDelay: `${idx * 0.05}s` }}
                 >
-                  {/* Avatar bubble */}
                   <div className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold
                     ${isUser
                       ? 'bg-gradient-to-br from-accent-600 to-accent-800'
@@ -459,26 +548,24 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
                   >
                     {isUser ? 'U' : 'AI'}
                   </div>
-
                   <div className={`max-w-[85%] group ${isUser ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
-                    <div
-                      className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed
-                        ${isUser
-                          ? 'bg-gradient-to-br from-primary-700/80 to-accent-700/60 text-white rounded-tr-sm'
-                          : 'bg-surface-700/80 border border-white/8 text-gray-200 rounded-tl-sm'
-                        }`}
+                    <div className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed
+                      ${isUser
+                        ? 'bg-gradient-to-br from-primary-700/80 to-accent-700/60 text-white rounded-tr-sm'
+                        : 'bg-surface-700/80 border border-white/8 text-gray-200 rounded-tl-sm'
+                      }`}
                     >
                       {message.content}
                       <button
                         onClick={() => copyMessage(message.content)}
-                        className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-surface-600 border border-white/10 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-surface-600
+                                   border border-white/10 flex items-center justify-center
+                                   opacity-0 group-hover:opacity-100 transition-opacity"
                         title="Copy"
                       >
                         <Copy size={10} className="text-gray-400" />
                       </button>
                     </div>
-
-                    {/* Timestamp + emotion */}
                     <div className={`flex items-center gap-1.5 px-1 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
                       <Clock size={10} className="text-gray-600" />
                       <span className="text-xs text-gray-600">
@@ -495,24 +582,18 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
               )
             })
           )}
-
           {isTyping && <TypingIndicator />}
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Recording level bar */}
         {isRecording && (
           <div className="px-4 pb-2">
             <div className="h-1 rounded-full bg-surface-700 overflow-hidden">
-              <div
-                className="voice-level h-full"
-                style={{ width: `${recordingLevel}%` }}
-              />
+              <div className="voice-level h-full" style={{ width: `${recordingLevel}%` }} />
             </div>
           </div>
         )}
 
-        {/* Input */}
         <div className="border-t border-white/8 px-4 py-3">
           {isRecording && (
             <div className="flex items-center gap-2 mb-3 px-2">
@@ -523,11 +604,11 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
           )}
 
           <div className="flex gap-2 items-end">
-            {/* Mic button */}
             <button
               onClick={isRecording ? stopRecording : startRecording}
               disabled={isProcessing}
-              className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 active:scale-95
+              className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
+                transition-all duration-200 active:scale-95
                 ${isRecording
                   ? 'bg-red-600 hover:bg-red-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)]'
                   : 'bg-surface-700 hover:bg-surface-600 border border-white/10 hover:border-primary-500/40 text-gray-400 hover:text-white'
@@ -541,40 +622,31 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
               )}
             </button>
 
-            {/* Text input */}
             <div className="flex-1 relative">
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    sendMessage()
-                  }
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
                 }}
                 placeholder={isRecording ? 'Recording…' : 'Message your avatar… (Enter to send)'}
                 disabled={isProcessing || isRecording}
                 rows={1}
                 className="w-full px-4 py-2.5 rounded-xl bg-surface-700/80 border border-white/10 text-white text-sm
-                           placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500/40
-                           resize-none transition-all duration-200 disabled:opacity-50
+                           placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-primary-500/50
+                           focus:border-primary-500/40 resize-none transition-all duration-200 disabled:opacity-50
                            [field-sizing:content] max-h-32 overflow-y-auto"
               />
             </div>
 
-            {/* Send button */}
             <button
               onClick={sendMessage}
               disabled={!inputText.trim() || isProcessing || isRecording}
-              className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center text-white
-                         hover:shadow-glow disabled:opacity-30 disabled:cursor-not-allowed
-                         transition-all duration-200 active:scale-95"
+              className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600
+                         flex items-center justify-center text-white hover:shadow-glow
+                         disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-95"
             >
-              {isProcessing ? (
-                <Loader2 size={18} className="animate-spin" />
-              ) : (
-                <Send size={18} />
-              )}
+              {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
             </button>
           </div>
 
