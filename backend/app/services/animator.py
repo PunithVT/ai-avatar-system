@@ -161,7 +161,12 @@ class AvatarAnimator:
             cwd=str(self._musetalk_dir),
             env=env,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise RuntimeError("MuseTalk timed out after 10 minutes")
 
         if proc.returncode != 0:
             err = stderr.decode(errors="replace")

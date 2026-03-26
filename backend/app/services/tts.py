@@ -1,3 +1,6 @@
+import os
+os.environ["COQUI_TOS_AGREED"] = "1"  # Accept Coqui non-commercial CPML license non-interactively
+
 from TTS.api import TTS
 import logging
 import io
