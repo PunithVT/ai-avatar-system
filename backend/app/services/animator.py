@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -10,7 +11,6 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-import yaml
 
 from app.config import settings
 
@@ -23,7 +23,7 @@ class AvatarAnimator:
     """
     Avatar Animation Service.
     Supported engines (set AVATAR_ENGINE in .env):
-      - musetalk : MuseTalk V1.5 — best quality, Python 3.12 compatible (default)
+      - musetalk : MuseTalk V1.5 — persistent worker (models loaded once)
       - simple   : ffmpeg static image + audio, no lip-sync
     """
 
@@ -34,6 +34,11 @@ class AvatarAnimator:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self._initialised = False
         self._musetalk_dir: Optional[Path] = None
+
+        # Persistent worker handles
+        self._worker_proc: Optional[asyncio.subprocess.Process] = None
+        self._worker_lock = asyncio.Lock()
+        self._worker_env: dict = {}
 
         logger.info(f"AvatarAnimator: engine={self.engine}, device={self.device}")
 
@@ -57,6 +62,12 @@ class AvatarAnimator:
                 self.engine = "simple"
             else:
                 logger.info(f"MuseTalk found at: {self._musetalk_dir}")
+                # Build env once
+                existing = os.environ.get("PYTHONPATH", "")
+                self._worker_env = os.environ.copy()
+                self._worker_env["PYTHONPATH"] = (
+                    str(self._musetalk_dir) + (":" + existing if existing else "")
+                )
 
         elif self.engine not in ("simple",):
             logger.warning(f"Unknown engine '{self.engine}', using simple animation.")
@@ -65,7 +76,6 @@ class AvatarAnimator:
         self._initialised = True
 
     def _find_dir(self, config_path: str, marker_file: str) -> Optional[Path]:
-        """Return resolved path if marker_file exists inside it, else None."""
         candidates = [
             Path(config_path),
             Path(__file__).resolve().parent.parent.parent / config_path,
@@ -74,6 +84,86 @@ class AvatarAnimator:
             if (p / marker_file).exists():
                 return p.resolve()
         return None
+
+    # ── persistent worker management ─────────────────────────────────────────
+
+    async def _ensure_worker(self) -> asyncio.subprocess.Process:
+        """Start the persistent worker if not already running."""
+        if self._worker_proc is not None and self._worker_proc.returncode is None:
+            return self._worker_proc
+
+        musetalk_dir: Path = self._musetalk_dir  # type: ignore[assignment]
+        worker_script = musetalk_dir / "scripts" / "musetalk_worker.py"
+
+        logger.info("Starting persistent MuseTalk worker (loading models once)…")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(worker_script),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(musetalk_dir),
+            env=self._worker_env,
+        )
+
+        # Send init config
+        init_msg = json.dumps({
+            "unet_model_path": str(musetalk_dir / "models" / "musetalkV15" / "unet.pth"),
+            "unet_config":     str(musetalk_dir / "models" / "musetalkV15" / "musetalk.json"),
+            "whisper_dir":     str(musetalk_dir / "models" / "whisper"),
+            "vae_type":        str(musetalk_dir / "models" / "sd-vae"),
+        }) + "\n"
+        proc.stdin.write(init_msg.encode())
+        await proc.stdin.drain()
+
+        # Wait for READY (model loading — up to 10 min first time)
+        logger.info("Waiting for worker to finish loading models…")
+        try:
+            ready_line = await asyncio.wait_for(proc.stdout.readline(), timeout=600)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise RuntimeError("MuseTalk worker timed out while loading models")
+
+        if not ready_line.decode().strip().startswith("READY"):
+            stderr_out = await proc.stderr.read()
+            proc.kill()
+            raise RuntimeError(
+                f"Worker failed to start. stderr:\n{stderr_out.decode(errors='replace')}"
+            )
+
+        logger.info("MuseTalk worker ready — models loaded")
+        self._worker_proc = proc
+        return proc
+
+    async def _worker_infer(self, image_path: str, audio_path: str,
+                             output_path: str, coord_cache: Optional[str]) -> str:
+        """Send one job to the persistent worker and await its result."""
+        async with self._worker_lock:
+            proc = await self._ensure_worker()
+
+            job = json.dumps({
+                "image":       str(Path(image_path).resolve()),
+                "audio":       str(Path(audio_path).resolve()),
+                "output":      str(Path(output_path).resolve()),
+                "coord_cache": coord_cache,
+            }) + "\n"
+
+            proc.stdin.write(job.encode())
+            await proc.stdin.drain()
+
+            try:
+                result_line = await asyncio.wait_for(
+                    proc.stdout.readline(), timeout=300   # 5 min per inference
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                self._worker_proc = None
+                raise RuntimeError("MuseTalk inference timed out")
+
+            result = json.loads(result_line.decode().strip())
+            if result["status"] != "ok":
+                raise RuntimeError(result.get("msg", "Unknown worker error"))
+
+            return output_path
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -111,81 +201,15 @@ class AvatarAnimator:
         audio_path: str,
         output_path: str,
     ) -> str:
-        """Run MuseTalk V1.5 via subprocess."""
-        assert self._musetalk_dir is not None
+        """Run MuseTalk via persistent worker (models stay loaded between calls)."""
         musetalk_dir: Path = self._musetalk_dir  # type: ignore[assignment]
 
-        task_id = uuid.uuid4().hex
-        output_name = f"musetalk_{task_id}.mp4"
+        # Per-avatar face-coordinate cache (saves face-detection on repeat calls)
+        avatar_id = hashlib.md5(str(Path(avatar_path).resolve()).encode()).hexdigest()
+        coord_cache = str(musetalk_dir / "results" / "coords" / f"{avatar_id}.pkl")
+        os.makedirs(os.path.dirname(coord_cache), exist_ok=True)
 
-        # MuseTalk reads a YAML config that maps task → {video_path, audio_path}
-        cfg_path = TMPDIR / f"musetalk_cfg_{task_id}.yaml"
-        cfg_data = {
-            "task_0": {
-                "video_path": str(Path(avatar_path).resolve()),
-                "audio_path": str(Path(audio_path).resolve()),
-                "bbox_shift": -7,
-            }
-        }
-        cfg_path.write_text(yaml.dump(cfg_data))
-
-        unet_model = musetalk_dir / "models" / "musetalkV15" / "unet.pth"
-        unet_config = musetalk_dir / "models" / "musetalkV15" / "musetalk.json"
-        whisper_dir = musetalk_dir / "models" / "whisper"
-        vae_dir = musetalk_dir / "models" / "sd-vae"
-
-        cmd = [
-            sys.executable, "scripts/inference.py",
-            "--inference_config", str(cfg_path),
-            "--unet_model_path", str(unet_model),
-            "--unet_config", str(unet_config),
-            "--whisper_dir", str(whisper_dir),
-            "--vae_type", str(vae_dir),
-            "--output_vid_name", output_name,
-            "--version", "v15",
-            "--batch_size", "4",
-        ]
-        if self.device == "cuda":
-            cmd += ["--gpu_id", "0"]
-
-        # Inject PYTHONPATH so the musetalk package (in the repo root) is importable
-        env = os.environ.copy()
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = str(musetalk_dir) + (":" + existing if existing else "")
-
-        logger.info("Running MuseTalk: %s", " ".join(cmd))
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(self._musetalk_dir),
-            env=env,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            raise RuntimeError("MuseTalk timed out after 10 minutes")
-
-        if proc.returncode != 0:
-            err = stderr.decode(errors="replace")
-            logger.error(f"MuseTalk stderr:\n{err}")
-            raise RuntimeError(f"MuseTalk exited with code {proc.returncode}")
-
-        # MuseTalk writes output to results/v15/<output_name>
-        result_video = self._musetalk_dir / "results" / "v15" / output_name
-        if not result_video.exists():
-            candidates = sorted(
-                (self._musetalk_dir / "results" / "v15").glob("*.mp4"),
-                key=lambda f: f.stat().st_mtime,
-            )
-            if not candidates:
-                raise FileNotFoundError("MuseTalk produced no output video")
-            result_video = candidates[-1]
-
-        shutil.move(str(result_video), output_path)
-        cfg_path.unlink(missing_ok=True)
+        await self._worker_infer(avatar_path, audio_path, output_path, coord_cache)
 
         logger.info(f"MuseTalk animation done: {output_path}")
         return output_path
