@@ -232,6 +232,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 if voice_wav:
                     await websocket_manager.set_voice(session_id, voice_wav)
 
+            elif msg_type == "set_language":
+                lang = data.get("language", "en")
+                await websocket_manager.set_language(session_id, lang)
+
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
 

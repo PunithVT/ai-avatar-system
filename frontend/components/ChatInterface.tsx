@@ -4,8 +4,15 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Send, Mic, MicOff, Video, Loader2, Volume2, VolumeX,
   Sparkles, Clock, Copy, RotateCcw, Wand2,
-  MessageCircle, Zap, Activity, Download,
+  MessageCircle, Zap, Activity, Download, Globe,
 } from 'lucide-react'
+
+const CHAT_LANGUAGES = [
+  { code: 'en', label: 'EN' }, { code: 'es', label: 'ES' }, { code: 'fr', label: 'FR' },
+  { code: 'de', label: 'DE' }, { code: 'zh', label: 'ZH' }, { code: 'ja', label: 'JA' },
+  { code: 'pt', label: 'PT' }, { code: 'hi', label: 'HI' }, { code: 'it', label: 'IT' },
+  { code: 'ko', label: 'KO' },
+]
 import { useMutation } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
@@ -152,6 +159,7 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
   const [avatarImageUrl, setAvatarImageUrl] = useState<string | null>(null)
   // Streaming token accumulator — shown as a live bubble while LLM is generating
   const [streamingContent, setStreamingContent] = useState('')
+  const [language, setLanguage] = useState('en')
 
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -399,6 +407,13 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
     toast.success('Conversation exported')
   }
 
+  const changeLanguage = (lang: string) => {
+    setLanguage(lang)
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'set_language', language: lang }))
+    }
+  }
+
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -555,6 +570,21 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
             </div>
 
             <div className="flex items-center gap-2">
+              {/* Language picker */}
+              <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-surface-700/60 border border-white/10">
+                <Globe size={11} className="text-gray-500" />
+                <select
+                  value={language}
+                  onChange={(e) => changeLanguage(e.target.value)}
+                  className="bg-transparent text-xs text-gray-300 focus:outline-none cursor-pointer"
+                  title="TTS language"
+                >
+                  {CHAT_LANGUAGES.map(l => (
+                    <option key={l.code} value={l.code}>{l.label}</option>
+                  ))}
+                </select>
+              </div>
+
               {(showVideo || isProcessing) && (
                 <button onClick={resetVideo} className="btn-icon" title="Reset video">
                   <RotateCcw size={15} />

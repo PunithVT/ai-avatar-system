@@ -89,6 +89,11 @@ export const api = {
     return response.data
   },
 
+  setAvatarMetadata: async (avatarId: string, metadata: Record<string, unknown>) => {
+    const response = await apiClient.patch(`/api/v1/avatars/${avatarId}/metadata`, metadata)
+    return response.data
+  },
+
   // Sessions
   createSession: async (avatarId: string) => {
     const response = await apiClient.post('/api/v1/sessions/create', {

@@ -16,6 +16,8 @@ from typing import Optional
 import soundfile as sf
 import io
 
+from sqlalchemy import select, update
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -159,7 +161,7 @@ async def get_voice(voice_id: str):
 
 @router.delete("/{voice_id}")
 async def delete_voice(voice_id: str):
-    """Delete a voice profile and its audio file."""
+    """Delete a voice profile, its audio file, and clear any avatar references."""
     index = await _load_index()
     entry = next((e for e in index if e["id"] == voice_id), None)
     if not entry:
@@ -170,8 +172,25 @@ async def delete_voice(voice_id: str):
 
     # Remove from index
     await _save_index([e for e in index if e["id"] != voice_id])
-    logger.info(f"Voice profile deleted: {voice_id}")
-    return {"deleted": voice_id}
+
+    # Clear voice_id from any avatars that reference this profile
+    cleared = 0
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models import Avatar
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                update(Avatar)
+                .where(Avatar.voice_id == voice_id)
+                .values(voice_id=None)
+            )
+            cleared = result.rowcount or 0
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Could not clear avatar voice references for {voice_id}: {e}")
+
+    logger.info(f"Voice profile deleted: {voice_id} (cleared from {cleared} avatar(s))")
+    return {"deleted": voice_id, "avatars_cleared": cleared}
 
 
 @router.get("/{voice_id}/wav_path")
