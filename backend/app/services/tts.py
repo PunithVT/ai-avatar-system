@@ -89,20 +89,34 @@ class TTSService:
 
             logger.info(f"Synthesizing speech (coqui): {text[:100]}...")
 
+            # Validate speaker WAV exists on disk before attempting voice clone
+            if speaker_wav and not Path(speaker_wav).exists():
+                logger.warning(
+                    f"Speaker WAV not found: {speaker_wav!r} — using default TTS voice"
+                )
+                speaker_wav = None
+
             is_multilingual = getattr(self.model, 'is_multi_lingual', False)
             if speaker_wav and hasattr(self.model, 'tts_to_file'):
                 kwargs = {"text": text, "speaker_wav": speaker_wav, "file_path": output_path}
                 if is_multilingual:
                     kwargs["language"] = language
                 self.model.tts_to_file(**kwargs)
+                logger.info(f"Speech synthesized with cloned voice: {output_path}")
             else:
                 self.model.tts_to_file(text=text, file_path=output_path)
+                logger.info(f"Speech synthesized (default voice): {output_path}")
 
-            logger.info(f"Speech synthesized successfully: {output_path}")
             return output_path
 
         except Exception as e:
-            logger.warning(f"Coqui TTS failed ({e}), falling back to gTTS")
+            if speaker_wav:
+                logger.warning(
+                    f"Coqui voice-clone TTS failed — cloned voice NOT applied, "
+                    f"falling back to gTTS default voice. Error: {e}"
+                )
+            else:
+                logger.warning(f"Coqui TTS failed ({e}), falling back to gTTS")
             return await self._gtts_fallback(text, output_path, language)
 
     async def _gtts_fallback(self, text: str, output_path: str, language: str = "en") -> str:

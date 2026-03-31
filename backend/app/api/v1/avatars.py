@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
+from fastapi import APIRouter, Depends, Query, UploadFile, File, Form, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -132,7 +132,7 @@ async def get_avatar(
 @router.put("/{avatar_id}/voice", response_model=AvatarResponse)
 async def set_avatar_voice(
     avatar_id: str,
-    voice_id: str,
+    voice_id: str = Query(..., description="Voice profile ID to assign"),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):

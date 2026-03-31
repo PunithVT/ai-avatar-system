@@ -16,6 +16,19 @@ interface VoiceProfile {
   isDefault: boolean
 }
 
+const SUPPORTED_LANGUAGES: { code: string; label: string }[] = [
+  { code: 'en', label: '🇺🇸 English' },
+  { code: 'es', label: '🇪🇸 Spanish' },
+  { code: 'fr', label: '🇫🇷 French' },
+  { code: 'de', label: '🇩🇪 German' },
+  { code: 'zh', label: '🇨🇳 Chinese' },
+  { code: 'ja', label: '🇯🇵 Japanese' },
+  { code: 'pt', label: '🇧🇷 Portuguese' },
+  { code: 'hi', label: '🇮🇳 Hindi' },
+  { code: 'it', label: '🇮🇹 Italian' },
+  { code: 'ko', label: '🇰🇷 Korean' },
+]
+
 const PRESET_VOICES: VoiceProfile[] = [
   { id: 'default-en', name: 'Alex (English)', language: 'en', duration: 0, createdAt: new Date(), isDefault: true },
   { id: 'default-warm', name: 'Jordan (Warm)', language: 'en', duration: 0, createdAt: new Date(), isDefault: true },
@@ -57,6 +70,7 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [isCloning, setIsCloning] = useState(false)
   const [newVoiceName, setNewVoiceName] = useState('')
+  const [newVoiceLang, setNewVoiceLang] = useState('en')
   const [waveHeights, setWaveHeights] = useState<number[]>(Array(20).fill(4))
   const [step, setStep] = useState<'select' | 'record' | 'name'>('select')
 
@@ -74,12 +88,12 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
       .then(r => r.json())
       .then((data: Array<{ id: string; name: string; language: string; duration: number }>) => {
         if (!Array.isArray(data) || data.length === 0) return
-        const custom: VoiceProfile[] = data.map(v => ({
+        const custom: VoiceProfile[] = data.map((v: any) => ({
           id: v.id,
           name: v.name,
           language: v.language || 'en',
           duration: v.duration || 0,
-          createdAt: new Date(),
+          createdAt: v.created_at ? new Date(v.created_at) : new Date(),
           isDefault: false,
         }))
         setVoices([...PRESET_VOICES, ...custom])
@@ -170,38 +184,46 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
     }
     setIsCloning(true)
     try {
-      // POST to backend voice-clone endpoint
       const formData = new FormData()
       formData.append('audio', audioBlob, 'voice_sample.webm')
       formData.append('name', newVoiceName.trim())
+      formData.append('language', newVoiceLang)
 
       const res = await fetch(`${API_BASE}/api/v1/voices/clone`, {
         method: 'POST',
         body: formData,
       })
 
-      if (!res.ok) throw new Error('Clone failed')
+      if (!res.ok) {
+        let detail = 'Voice cloning failed'
+        try {
+          const body = await res.json()
+          detail = body.detail || detail
+        } catch {}
+        throw new Error(detail)
+      }
       const data = await res.json()
 
       const newProfile: VoiceProfile = {
-        id: data.id || `custom-${Date.now()}`,
-        name: newVoiceName.trim(),
-        language: 'en',
-        duration: recordingTime,
-        createdAt: new Date(),
+        id: data.id,
+        name: data.name,
+        language: data.language || newVoiceLang,
+        duration: data.duration || recordingTime,
+        createdAt: data.created_at ? new Date(data.created_at) : new Date(),
         isDefault: false,
       }
       setVoices(v => [...v, newProfile])
       setSelectedVoice(newProfile.id)
       onVoiceSelect?.(newProfile.id)
-      toast.success(`Voice "${newVoiceName}" cloned successfully!`, { icon: '🎙️' })
+      toast.success(`Voice "${newProfile.name}" cloned!`, { icon: '🎙️' })
       // Reset
       setAudioBlob(null)
       setAudioUrl(null)
       setNewVoiceName('')
+      setNewVoiceLang('en')
       setStep('select')
-    } catch {
-      toast.error('Voice cloning failed — check backend is running')
+    } catch (err: any) {
+      toast.error(err?.message || 'Voice cloning failed — check backend is running')
     } finally {
       setIsCloning(false)
     }
@@ -263,11 +285,18 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
 
                 <div className="flex-1 min-w-0">
                   <p className="font-semibold text-sm text-white truncate">{voice.name}</p>
-                  <div className="flex items-center gap-2 mt-0.5">
+                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                     {voice.isDefault ? (
                       <span className="badge-blue text-xs">Preset</span>
                     ) : (
-                      <span className="badge-purple text-xs">Custom · {fmtTime(voice.duration)} sample</span>
+                      <>
+                        <span className="badge-purple text-xs">Custom · {fmtTime(voice.duration)}</span>
+                        {voice.createdAt && (
+                          <span className="text-[10px] text-gray-600">
+                            {new Date(voice.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                          </span>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -443,6 +472,20 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
                 maxLength={40}
                 autoFocus
               />
+            </div>
+
+            {/* Language selector */}
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-gray-300">Language spoken in sample</label>
+              <select
+                value={newVoiceLang}
+                onChange={(e) => setNewVoiceLang(e.target.value)}
+                className="input-field appearance-none"
+              >
+                {SUPPORTED_LANGUAGES.map(l => (
+                  <option key={l.code} value={l.code}>{l.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* Clone button */}

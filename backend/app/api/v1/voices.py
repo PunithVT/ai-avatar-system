@@ -6,10 +6,11 @@ by ID when calling the TTS service.
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
+import asyncio
 import uuid
-import shutil
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 import soundfile as sf
@@ -24,23 +25,33 @@ VOICE_DIR.mkdir(parents=True, exist_ok=True)
 
 VOICE_INDEX = VOICE_DIR / "index.json"
 
+# Serialize concurrent index reads/writes to prevent corruption
+_index_lock = asyncio.Lock()
 
-def _load_index() -> list[dict]:
-    if VOICE_INDEX.exists():
-        try:
-            return json.loads(VOICE_INDEX.read_text())
-        except Exception:
-            return []
-    return []
+MIN_DURATION_SECS = 5   # Minimum sample length accepted
 
 
-def _save_index(data: list[dict]) -> None:
-    VOICE_INDEX.write_text(json.dumps(data, indent=2, default=str))
+async def _load_index() -> list[dict]:
+    async with _index_lock:
+        if VOICE_INDEX.exists():
+            try:
+                return json.loads(VOICE_INDEX.read_text())
+            except Exception:
+                return []
+        return []
+
+
+async def _save_index(data: list[dict]) -> None:
+    async with _index_lock:
+        # Write to a temp file then rename (atomic on POSIX)
+        tmp = VOICE_INDEX.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, default=str))
+        tmp.replace(VOICE_INDEX)
 
 
 @router.post("/clone")
 async def clone_voice(
-    audio: UploadFile = File(..., description="Audio sample (WAV/WebM/MP3, 5-30 seconds)"),
+    audio: UploadFile = File(..., description="Audio sample (WAV/WebM/MP3, 5–30 seconds)"),
     name: str = Form(..., description="Display name for the voice profile"),
     language: Optional[str] = Form("en"),
 ):
@@ -84,18 +95,22 @@ async def clone_voice(
                     detail=f"Could not decode audio: {ffmpeg_err}. Please upload WAV or WebM."
                 )
 
-        # Measure duration
+        # Validate the output WAV is actually readable
         try:
             info = sf.info(str(wav_path))
             duration = round(info.duration, 1)
-        except Exception:
-            duration = 0.0
+        except Exception as e:
+            wav_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=422,
+                detail=f"Converted audio file is not a valid WAV: {e}"
+            )
 
-        if duration < 3:
+        if duration < MIN_DURATION_SECS:
             wav_path.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=400,
-                detail=f"Sample too short ({duration}s). Please record at least 5 seconds."
+                detail=f"Sample too short ({duration}s). Please record at least {MIN_DURATION_SECS} seconds."
             )
 
     except HTTPException:
@@ -111,25 +126,32 @@ async def clone_voice(
         "language": language or "en",
         "wav_path": str(wav_path),
         "duration": duration,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    index = _load_index()
+    index = await _load_index()
     index.append(entry)
-    _save_index(index)
+    await _save_index(index)
 
-    logger.info(f"Voice profile created: {name} ({voice_id}, {duration}s)")
-    return JSONResponse({"id": voice_id, "name": name, "language": language, "duration": duration})
+    logger.info(f"Voice profile created: {name!r} ({voice_id}, {duration}s)")
+    return JSONResponse({
+        "id": voice_id,
+        "name": name.strip(),
+        "language": language or "en",
+        "duration": duration,
+        "created_at": entry["created_at"],
+    })
 
 
 @router.get("/")
 async def list_voices():
     """List all custom voice profiles."""
-    return _load_index()
+    return await _load_index()
 
 
 @router.get("/{voice_id}")
 async def get_voice(voice_id: str):
     """Get a single voice profile by ID."""
-    for entry in _load_index():
+    for entry in await _load_index():
         if entry["id"] == voice_id:
             return entry
     raise HTTPException(status_code=404, detail="Voice profile not found")
@@ -138,17 +160,17 @@ async def get_voice(voice_id: str):
 @router.delete("/{voice_id}")
 async def delete_voice(voice_id: str):
     """Delete a voice profile and its audio file."""
-    index = _load_index()
+    index = await _load_index()
     entry = next((e for e in index if e["id"] == voice_id), None)
     if not entry:
         raise HTTPException(status_code=404, detail="Voice profile not found")
 
     # Remove WAV file
-    wav = Path(entry["wav_path"])
-    wav.unlink(missing_ok=True)
+    Path(entry["wav_path"]).unlink(missing_ok=True)
 
     # Remove from index
-    _save_index([e for e in index if e["id"] != voice_id])
+    await _save_index([e for e in index if e["id"] != voice_id])
+    logger.info(f"Voice profile deleted: {voice_id}")
     return {"deleted": voice_id}
 
 
@@ -157,8 +179,15 @@ async def get_voice_wav_path(voice_id: str) -> str:
     """
     Internal helper: return the filesystem path to the voice WAV file
     so that the TTS service can pass it as speaker_wav.
+    Raises 404 if the voice or its file no longer exists.
     """
-    for entry in _load_index():
+    for entry in await _load_index():
         if entry["id"] == voice_id:
+            wav = Path(entry["wav_path"])
+            if not wav.exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"WAV file for voice {voice_id} is missing from disk"
+                )
             return entry["wav_path"]
     raise HTTPException(status_code=404, detail="Voice profile not found")
