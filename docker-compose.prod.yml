@@ -1,0 +1,85 @@
+# Production overrides for AWS GPU deployment.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+version: '3.8'
+
+services:
+  postgres:
+    restart: always
+    ports: []  # don't expose DB port publicly
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+
+  redis:
+    restart: always
+    ports: []  # don't expose Redis port publicly
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
+  backend:
+    restart: always
+    env_file: .env.prod
+    volumes:
+      # Production: no source-code bind-mount — use the built image
+      - avatar_cache:/tmp/avatars
+      - video_cache:/tmp/videos
+      - audio_cache:/tmp/audio
+      - voice_profiles:/app/voice_profiles
+      - musetalk_models:/app/models  # persist downloaded models across restarts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }
+
+  frontend:
+    restart: always
+    env_file: .env.prod
+    volumes:
+      # Production: no source-code bind-mount — use the built image
+      - /app/node_modules
+      - /app/.next
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+
+  celery-worker:
+    restart: always
+    env_file: .env.prod
+    volumes:
+      - avatar_cache:/tmp/avatars
+      - video_cache:/tmp/videos
+      - audio_cache:/tmp/audio
+      - voice_profiles:/app/voice_profiles
+      - musetalk_models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }
+
+  flower:
+    # Disable Flower in production (security risk)
+    profiles: ["dev"]
+
+  nginx:
+    restart: always
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+
+volumes:
+  musetalk_models:
+    driver: local
