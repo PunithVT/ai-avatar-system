@@ -151,6 +151,36 @@ async def set_avatar_voice(
     return avatar
 
 
+@router.patch("/{avatar_id}/metadata", response_model=AvatarResponse)
+async def update_avatar_metadata(
+    avatar_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """Merge arbitrary key/value pairs into avatar_metadata (e.g. system_prompt)."""
+    result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
+    avatar = result.scalar_one_or_none()
+    if not avatar:
+        raise HTTPException(status_code=404, detail="Avatar not found")
+    if avatar.user_id != _user_id(current_user):
+        raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
+
+    existing: dict = avatar.avatar_metadata or {}
+    if isinstance(existing, str):
+        import json as _json
+        try:
+            existing = _json.loads(existing)
+        except Exception:
+            existing = {}
+    existing.update(payload)
+    avatar.avatar_metadata = existing
+    await db.commit()
+    await db.refresh(avatar)
+    logger.info(f"Avatar {avatar_id} metadata updated: {list(payload.keys())}")
+    return avatar
+
+
 @router.delete("/{avatar_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_avatar(
     avatar_id: str,

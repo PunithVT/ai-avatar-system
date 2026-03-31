@@ -1,3 +1,4 @@
+import asyncio
 import os
 os.environ["COQUI_TOS_AGREED"] = "1"  # Accept Coqui non-commercial CPML license non-interactively
 
@@ -101,10 +102,10 @@ class TTSService:
                 kwargs = {"text": text, "speaker_wav": speaker_wav, "file_path": output_path}
                 if is_multilingual:
                     kwargs["language"] = language
-                self.model.tts_to_file(**kwargs)
+                await asyncio.to_thread(self.model.tts_to_file, **kwargs)
                 logger.info(f"Speech synthesized with cloned voice: {output_path}")
             else:
-                self.model.tts_to_file(text=text, file_path=output_path)
+                await asyncio.to_thread(self.model.tts_to_file, text=text, file_path=output_path)
                 logger.info(f"Speech synthesized (default voice): {output_path}")
 
             return output_path

@@ -73,12 +73,14 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   const [newVoiceLang, setNewVoiceLang] = useState('en')
   const [waveHeights, setWaveHeights] = useState<number[]>(Array(20).fill(4))
   const [step, setStep] = useState<'select' | 'record' | 'name'>('select')
+  const [recordMode, setRecordMode] = useState<'mic' | 'file'>('mic')
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const animFrameRef = useRef<number | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const MAX_RECORDING_SECS = 30
 
@@ -161,6 +163,23 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
     if (timerRef.current) clearInterval(timerRef.current)
     setIsRecording(false)
   }, [])
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('audio/')) {
+      toast.error('Please select an audio file (MP3, WAV, M4A, OGG…)')
+      return
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      toast.error('File must be under 20 MB')
+      return
+    }
+    setAudioBlob(file)
+    setAudioUrl(URL.createObjectURL(file))
+    setRecordingTime(0)
+    setStep('name')
+  }
 
   const togglePlay = () => {
     if (!audioUrl) return
@@ -360,64 +379,103 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
         {step === 'record' && (
           <div className="card flex flex-col gap-5 animate-fade-in">
             <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold text-white">Record Sample</h2>
+              <h2 className="text-xl font-bold text-white">Voice Sample</h2>
               <button onClick={() => setStep('select')} className="btn-ghost text-sm">Cancel</button>
             </div>
             <div className="divider" />
+
+            {/* Tab switcher: mic vs file */}
+            <div className="flex gap-1 p-1 rounded-xl bg-surface-800/80 border border-white/8">
+              {(['mic', 'file'] as const).map(mode => (
+                <button
+                  key={mode}
+                  onClick={() => setRecordMode(mode)}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-all duration-200
+                    ${recordMode === mode
+                      ? 'bg-gradient-to-r from-primary-600/80 to-accent-600/80 text-white shadow-glow-sm'
+                      : 'text-gray-400 hover:text-white'
+                    }`}
+                >
+                  {mode === 'mic' ? <><Mic size={14} /> Record Mic</> : <><Upload size={14} /> Upload File</>}
+                </button>
+              ))}
+            </div>
 
             {/* Instructions */}
             <div className="flex items-start gap-3 px-4 py-3 rounded-xl bg-accent-500/10 border border-accent-500/20">
               <AlertCircle size={16} className="text-accent-400 mt-0.5 flex-shrink-0" />
               <p className="text-sm text-gray-300">
-                Record at least <strong className="text-white">5 seconds</strong> of clear speech.
-                Read naturally — avoid background noise for best results.
+                {recordMode === 'mic'
+                  ? <>Record at least <strong className="text-white">5 seconds</strong> of clear speech. Read naturally — avoid background noise.</>
+                  : <>Upload an audio file (MP3, WAV, M4A, OGG) with at least <strong className="text-white">5 seconds</strong> of clear speech.</>
+                }
               </p>
             </div>
 
-            {/* Big record button */}
-            <div className="flex flex-col items-center gap-6 py-4">
-              <button
-                onClick={isRecording ? stopRecording : startRecording}
-                className={`relative w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300
-                  ${isRecording
-                    ? 'bg-red-600 shadow-[0_0_40px_rgba(239,68,68,0.5)] scale-110'
-                    : 'bg-gradient-to-br from-primary-600 to-accent-600 hover:shadow-glow hover:scale-105'
-                  }`}
-              >
+            {recordMode === 'mic' ? (
+              /* Big record button */
+              <div className="flex flex-col items-center gap-6 py-4">
+                <button
+                  onClick={isRecording ? stopRecording : startRecording}
+                  className={`relative w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300
+                    ${isRecording
+                      ? 'bg-red-600 shadow-[0_0_40px_rgba(239,68,68,0.5)] scale-110'
+                      : 'bg-gradient-to-br from-primary-600 to-accent-600 hover:shadow-glow hover:scale-105'
+                    }`}
+                >
+                  {isRecording && (
+                    <span className="absolute inset-0 rounded-full border-2 border-red-400 animate-ping" />
+                  )}
+                  {isRecording ? <MicOff size={36} className="text-white" /> : <Mic size={36} className="text-white" />}
+                </button>
+
+                <div className="text-center">
+                  <p className={`text-3xl font-mono font-black ${isRecording ? 'text-red-400' : 'text-gray-500'}`}>
+                    {fmtTime(recordingTime)}
+                    {isRecording && <span className="text-base ml-2 text-gray-500">/ {fmtTime(MAX_RECORDING_SECS)}</span>}
+                  </p>
+                  <p className="text-sm text-gray-500 mt-1">
+                    {isRecording ? 'Recording — tap to stop' : 'Tap the mic to start'}
+                  </p>
+                </div>
+
                 {isRecording && (
-                  <span className="absolute inset-0 rounded-full border-2 border-red-400 animate-ping" />
+                  <div className="flex items-center gap-1">
+                    {waveHeights.map((h, i) => <WaveformBar key={i} active={isRecording} height={h} />)}
+                  </div>
                 )}
-                {isRecording ? <MicOff size={36} className="text-white" /> : <Mic size={36} className="text-white" />}
-              </button>
 
-              {/* Timer */}
-              <div className="text-center">
-                <p className={`text-3xl font-mono font-black ${isRecording ? 'text-red-400' : 'text-gray-500'}`}>
-                  {fmtTime(recordingTime)}
-                  {isRecording && <span className="text-base ml-2 text-gray-500">/ {fmtTime(MAX_RECORDING_SECS)}</span>}
-                </p>
-                <p className="text-sm text-gray-500 mt-1">
-                  {isRecording ? 'Recording — tap to stop' : 'Tap the mic to start'}
-                </p>
+                {isRecording && (
+                  <div className="w-full max-w-xs h-1.5 rounded-full bg-surface-600 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-primary-500 to-accent-500 transition-all duration-1000"
+                      style={{ width: `${(recordingTime / MAX_RECORDING_SECS) * 100}%` }}
+                    />
+                  </div>
+                )}
               </div>
-
-              {/* Live waveform */}
-              {isRecording && (
-                <div className="flex items-center gap-1">
-                  {waveHeights.map((h, i) => <WaveformBar key={i} active={isRecording} height={h} />)}
-                </div>
-              )}
-
-              {/* Progress bar */}
-              {isRecording && (
-                <div className="w-full max-w-xs h-1.5 rounded-full bg-surface-600 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-primary-500 to-accent-500 transition-all duration-1000"
-                    style={{ width: `${(recordingTime / MAX_RECORDING_SECS) * 100}%` }}
-                  />
-                </div>
-              )}
-            </div>
+            ) : (
+              /* File upload */
+              <div className="flex flex-col items-center gap-4 py-4">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="audio/*"
+                  className="hidden"
+                  onChange={handleFileUpload}
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full max-w-xs flex flex-col items-center gap-3 py-10 rounded-2xl border-2 border-dashed
+                             border-white/15 hover:border-primary-500/50 hover:bg-primary-500/5
+                             text-gray-400 hover:text-white transition-all duration-200 cursor-pointer"
+                >
+                  <Upload size={36} className="opacity-60" />
+                  <span className="text-sm font-medium">Click to browse audio file</span>
+                  <span className="text-xs text-gray-600">MP3, WAV, M4A, OGG · max 20 MB</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 

@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Send, Mic, MicOff, Video, Loader2, Volume2, VolumeX,
   Sparkles, Clock, Copy, RotateCcw, Wand2,
-  MessageCircle, Zap, Activity,
+  MessageCircle, Zap, Activity, Download,
 } from 'lucide-react'
 import { useMutation } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
@@ -150,6 +150,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [recordingLevel, setRecordingLevel] = useState(0)
   const [avatarImageUrl, setAvatarImageUrl] = useState<string | null>(null)
+  // Streaming token accumulator — shown as a live bubble while LLM is generating
+  const [streamingContent, setStreamingContent] = useState('')
 
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -164,6 +166,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
   const isPlayingRef = useRef(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  // Hidden video element used to preload the next chunk while the current one plays
+  const preloadVideoRef = useRef<HTMLVideoElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -193,9 +197,20 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
     isPlayingRef.current = true
     setShowVideo(true)
     if (videoRef.current) {
-      videoRef.current.src = next.url
+      // If the preload element already buffered this URL, swap src instantly
+      const preload = preloadVideoRef.current
+      if (preload && preload.src === next.url && preload.readyState >= 3) {
+        videoRef.current.src = next.url
+      } else {
+        videoRef.current.src = next.url
+      }
       videoRef.current.muted = isMuted
       videoRef.current.play().catch(() => {})
+    }
+    // Preload the next chunk in queue (if any)
+    const upcoming = chunkQueueRef.current[0]
+    if (upcoming && preloadVideoRef.current) {
+      preloadVideoRef.current.src = upcoming.url
     }
   }, [isMuted])
 
@@ -276,6 +291,12 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
 
   const handleWebSocketMessage = useCallback((data: any) => {
     switch (data.type) {
+      // Live token stream — accumulate into a streaming bubble
+      case 'token':
+        setStreamingContent(prev => prev + (data.token ?? ''))
+        setIsTyping(false) // no longer showing the dots — showing real text
+        break
+
       case 'transcription':
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
@@ -284,10 +305,13 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
           timestamp: new Date(),
           emotion: detectEmotion(data.text),
         }])
+        setStreamingContent('')
         setIsTyping(true)
         break
 
       case 'message':
+        // Full message assembled — replace streaming bubble with a proper message
+        setStreamingContent('')
         setIsTyping(false)
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
@@ -307,11 +331,17 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
       case 'video_chunk': {
         const chunk: VideoChunk = { url: data.video_url, text: data.text }
         chunkQueueRef.current.push(chunk)
-        setCurrentChunkProgress({ current: data.chunk_index + 1, total: data.total_chunks })
+        setCurrentChunkProgress(prev => ({ current: data.chunk_index + 1, total: prev.total }))
         // First chunk arriving → clear processing spinner, start playback
         if (!isPlayingRef.current) {
           setIsProcessing(false)
           playNextChunk()
+        } else {
+          // Already playing — preload this incoming chunk
+          const upcoming = chunkQueueRef.current[0]
+          if (upcoming && preloadVideoRef.current && preloadVideoRef.current.src !== upcoming.url) {
+            preloadVideoRef.current.src = upcoming.url
+          }
         }
         break
       }
@@ -346,11 +376,27 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
       emotion,
     }])
     setInputText('')
+    setStreamingContent('')
     setIsProcessing(true)
     setIsTyping(true)
     chunkQueueRef.current = []
     isPlayingRef.current = false
     setShowVideo(false)
+  }
+
+  const exportConversation = () => {
+    if (messages.length === 0) return
+    const lines = messages.map(m =>
+      `[${new Date(m.timestamp).toLocaleTimeString()}] ${m.role === 'user' ? 'You' : 'Avatar'}: ${m.content}`
+    )
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `conversation-${new Date().toISOString().slice(0, 10)}.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success('Conversation exported')
   }
 
   const startRecording = async () => {
@@ -466,6 +512,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
               playsInline
               muted={isMuted}
             />
+            {/* Hidden preload video — buffers the next chunk while current plays */}
+            <video ref={preloadVideoRef} className="hidden" preload="auto" muted />
 
             {/* ── Processing overlay ── */}
             {isProcessing && (
@@ -550,9 +598,20 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
             <MessageCircle size={16} className="text-primary-400" />
             <span className="font-semibold text-white">Conversation</span>
           </div>
-          <div className="flex items-center gap-1.5 text-xs text-gray-500">
-            <Zap size={12} className="text-primary-400" />
-            <span>{messages.length} messages</span>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+              <Zap size={12} className="text-primary-400" />
+              <span>{messages.length} messages</span>
+            </div>
+            {messages.length > 0 && (
+              <button
+                onClick={exportConversation}
+                className="btn-icon"
+                title="Export conversation"
+              >
+                <Download size={13} />
+              </button>
+            )}
           </div>
         </div>
 
@@ -620,6 +679,22 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
                 </div>
               )
             })
+          )}
+          {/* Live streaming bubble — shows tokens as they arrive */}
+          {streamingContent && (
+            <div className="flex gap-2.5 animate-slide-up">
+              <div className="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold
+                              bg-gradient-to-br from-primary-600 to-primary-800">
+                AI
+              </div>
+              <div className="max-w-[85%] flex flex-col gap-1 items-start">
+                <div className="relative px-4 py-2.5 rounded-2xl rounded-tl-sm text-sm leading-relaxed
+                                bg-surface-700/80 border border-primary-500/30 text-gray-200">
+                  {streamingContent}
+                  <span className="inline-block w-1.5 h-4 bg-primary-400 ml-0.5 align-middle animate-pulse rounded-sm" />
+                </div>
+              </div>
+            </div>
           )}
           {isTyping && <TypingIndicator />}
           <div ref={messagesEndRef} />

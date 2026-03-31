@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -19,6 +20,9 @@ from app.services.tts import tts_service
 logger = logging.getLogger(__name__)
 TMPDIR = Path(tempfile.gettempdir())
 
+# Minimum sentence length (chars) to bother animating
+_MIN_SENTENCE_LEN = 8
+
 
 class ConnectionManager:
     """Manage WebSocket connections and the real-time avatar pipeline."""
@@ -38,6 +42,8 @@ class ConnectionManager:
             "avatar_image_key": None,
             "avatar_image_local": None,
             "voice_wav": None,
+            "language": "en",
+            "system_prompt": None,
             "user_id": None,
             "connected_at": datetime.now(timezone.utc),
         }
@@ -70,6 +76,19 @@ class ConnectionManager:
                     self.session_data[session_id]["avatar_image_key"] = avatar.s3_key
                     local = await self._resolve_local_image(avatar)
                     self.session_data[session_id]["avatar_image_local"] = local
+
+                    # Load per-avatar system prompt from metadata
+                    meta = avatar.avatar_metadata or {}
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except Exception:
+                            meta = {}
+                    sp = meta.get("system_prompt")
+                    if sp:
+                        self.session_data[session_id]["system_prompt"] = sp
+                        logger.info(f"Loaded system prompt for avatar {avatar.id}")
+
                     if avatar.voice_id:
                         wav = self._get_voice_wav_path(avatar.voice_id)
                         if wav:
@@ -159,80 +178,154 @@ class ConnectionManager:
             tmp_audio.unlink(missing_ok=True)
 
     async def handle_text_input(self, session_id: str, text: str):
+        """
+        Streaming pipeline:
+          1. Stream LLM tokens → send `token` events for live UI display
+          2. Detect sentence boundaries during streaming → enqueue sentences
+          3. Consumer coroutine picks up each sentence and runs TTS+animation
+             in parallel with ongoing LLM generation (first chunk starts before
+             the LLM finishes the full response)
+        """
         try:
             data = self.session_data.get(session_id, {})
             messages = data.get("messages", [])
             messages.append({"role": "user", "content": text})
 
+            # Context window trimming: keep first + last 60 messages to control cost
+            if len(messages) > 61:
+                messages = messages[:1] + messages[-60:]  # type: ignore[index]
+
+            system_prompt = data.get("system_prompt")
+
             await self.send_message(session_id, {"type": "status", "message": "Thinking…", "stage": "llm"})
 
-            response = await llm_service.generate_response(messages)
-            messages.append({"role": "assistant", "content": response})
-            data["messages"] = messages
+            # Bounded queue prevents the LLM producer from racing too far ahead
+            sentence_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=4)
 
-            await self.send_message(session_id, {
-                "type": "message", "role": "assistant", "content": response
-            })
-            await self._stream_avatar_video_chunks(session_id, response)
+            results = await asyncio.gather(
+                self._llm_producer(session_id, messages, system_prompt, sentence_queue),
+                self._animate_from_queue(session_id, sentence_queue),
+                return_exceptions=True,
+            )
+
+            # Check for errors
+            for r in results:
+                if isinstance(r, Exception):
+                    raise r
+
+            response_text = results[0] if isinstance(results[0], str) else ""
+            if response_text:
+                messages.append({"role": "assistant", "content": response_text})
+                data["messages"] = messages
 
         except Exception as e:
             logger.error(f"Text error [{session_id}]: {e}")
             await self.send_message(session_id, {"type": "error", "message": f"Processing failed: {e}"})
 
-    # ── video generation ──────────────────────────────────────────────────────
+    # ── streaming pipeline ────────────────────────────────────────────────────
 
-    @staticmethod
-    def _split_sentences(text: str) -> List[str]:
-        """Split text into sentences, keeping each chunk meaningful."""
-        # Split on sentence-ending punctuation followed by whitespace
-        raw = re.split(r'(?<=[.!?])\s+', text.strip())
-        sentences: List[str] = []
-        buf = ""
-        for s in raw:
-            s = s.strip()
-            if not s:
-                continue
-            buf = (buf + " " + s).strip() if buf else s
-            # Flush buffer when it's long enough to be worth a chunk
-            if len(buf) >= 30 or s.endswith(('.', '!', '?')):
-                sentences.append(buf)
-                buf = ""
-        if buf:
-            sentences.append(buf)
-        return sentences if sentences else [text.strip()]
+    _SENTENCE_RE = re.compile(r'(?<=[.!?])\s+')
 
-    async def _stream_avatar_video_chunks(self, session_id: str, text: str):
+    async def _llm_producer(
+        self,
+        session_id: str,
+        messages: List[dict],
+        system_prompt: Optional[str],
+        queue: "asyncio.Queue[Optional[str]]",
+    ) -> str:
         """
-        Sentence-based streaming: process each sentence independently and
-        send video_chunk messages as they complete so the frontend can play
-        them back-to-back without waiting for the full response.
+        Stream LLM tokens, emit `token` events to frontend,
+        detect sentence boundaries and push complete sentences into the queue.
+        Returns the complete response text.
+        """
+        buf = ""
+        full_text = ""
+
+        try:
+            async for token in llm_service.stream_response(messages, system_prompt):
+                if session_id not in self.active_connections:
+                    break  # client disconnected
+
+                full_text += token
+                buf += token
+
+                # Send live token to frontend
+                await self.send_message(session_id, {"type": "token", "token": token})
+
+                # Split on sentence boundaries; keep the incomplete tail in buf
+                parts = self._SENTENCE_RE.split(buf)
+                if len(parts) > 1:
+                    for sentence in parts[:-1]:
+                        sentence = sentence.strip()
+                        if len(sentence) >= _MIN_SENTENCE_LEN:
+                            await queue.put(sentence)
+                    buf = parts[-1]
+
+            # Flush remaining buffer
+            remainder = buf.strip()
+            if len(remainder) >= _MIN_SENTENCE_LEN:
+                await queue.put(remainder)
+
+        except Exception as e:
+            logger.error(f"LLM producer error [{session_id}]: {e}")
+            raise
+        finally:
+            # Always signal end so the consumer doesn't hang
+            await queue.put(None)
+
+        # Send complete assembled message
+        await self.send_message(session_id, {
+            "type": "message", "role": "assistant", "content": full_text
+        })
+        return full_text
+
+    async def _animate_from_queue(
+        self,
+        session_id: str,
+        queue: "asyncio.Queue[Optional[str]]",
+    ) -> None:
+        """
+        Consume sentences from the queue and run TTS + animation for each,
+        streaming video_chunk events to the frontend as they complete.
         """
         data = self.session_data.get(session_id, {})
         avatar_image = data.get("avatar_image_local")
         speaker_wav: Optional[str] = data.get("voice_wav")
+        language: str = data.get("language", "en")
 
+        # If no avatar image, drain queue silently
         if not avatar_image:
             logger.warning(f"No avatar image for session {session_id}")
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
             return
 
-        sentences = self._split_sentences(text)
-        total = len(sentences)
-        logger.info(f"Streaming {total} chunk(s) for session {session_id}")
+        chunk_index: int = 0
+        sent_any = False
 
         await self.send_message(session_id, {
             "type": "video_chunk_start",
-            "total_chunks": total,
+            "total_chunks": -1,  # streaming mode — total unknown up front
         })
 
-        sent_any = False
-        for i, sentence in enumerate(sentences):
+        while True:
+            sentence = await queue.get()
+            if sentence is None:
+                break
+
+            if session_id not in self.active_connections:
+                break  # client disconnected mid-stream
+
             job_id = uuid.uuid4().hex[:12]  # type: ignore[index]
             tmp_audio = TMPDIR / f"{session_id}_{job_id}_audio.wav"
             tmp_video = TMPDIR / f"{session_id}_{job_id}_video.mp4"
+
             try:
                 await self.send_message(session_id, {
                     "type": "status",
-                    "message": f"Animating part {i + 1} of {total}…",
+                    "message": "Animating…",
                     "stage": "animation",
                 })
 
@@ -240,7 +333,7 @@ class ConnectionManager:
                     text=sentence,
                     output_path=str(tmp_audio),
                     speaker_wav=speaker_wav,
-                    language="en",
+                    language=language,
                 )
 
                 await avatar_animator.animate(
@@ -250,23 +343,24 @@ class ConnectionManager:
                 )
 
                 ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-                video_key = f"videos/{session_id}/{ts}_c{i}.mp4"
+                video_key = f"videos/{session_id}/{ts}_c{chunk_index}.mp4"
                 video_url = await storage_service.upload_file(
                     tmp_video.read_bytes(), video_key, content_type="video/mp4"
                 )
 
                 await self.send_message(session_id, {
                     "type": "video_chunk",
-                    "chunk_index": i,
-                    "total_chunks": total,
+                    "chunk_index": chunk_index,
+                    "total_chunks": -1,
                     "video_url": video_url,
                     "text": sentence,
                 })
-                logger.info(f"Chunk {i + 1}/{total} ready [{session_id}]")
+                chunk_index = chunk_index + 1  # type: ignore[operator]
                 sent_any = True
+                logger.info(f"Chunk {chunk_index} ready [{session_id}]")
 
             except Exception as e:
-                logger.error(f"Chunk {i} failed [{session_id}]: {e}")
+                logger.error(f"Chunk {chunk_index} failed [{session_id}]: {e}")
 
             finally:
                 tmp_audio.unlink(missing_ok=True)
@@ -274,7 +368,7 @@ class ConnectionManager:
 
         await self.send_message(session_id, {
             "type": "video_chunk_end",
-            "sent_chunks": sum(1 for _ in sentences) if sent_any else 0,
+            "sent_chunks": chunk_index,
         })
 
         if not sent_any:
@@ -293,6 +387,12 @@ class ConnectionManager:
         if session_id in self.session_data:
             self.session_data[session_id]["voice_wav"] = voice_wav_path
             logger.info(f"Voice set [{session_id}]: {voice_wav_path}")
+
+    async def set_language(self, session_id: str, language: str):
+        """Set TTS language for the session."""
+        if session_id in self.session_data:
+            self.session_data[session_id]["language"] = language
+            logger.info(f"Language set [{session_id}]: {language}")
 
 
 websocket_manager = ConnectionManager()
