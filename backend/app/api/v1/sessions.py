@@ -1,8 +1,10 @@
+from datetime import datetime, timezone
+from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import logging
-from typing import List, Optional
 
 from app.database import get_db
 from app.models import Session, Avatar, User
@@ -11,8 +13,11 @@ from app.websocket import websocket_manager
 from app.api.v1.users import get_current_user
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
+
+
+def _user_id(current_user: Optional[User]) -> str:
+    return current_user.id if current_user else "demo-user"
 
 
 @router.post("/create", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
@@ -21,173 +26,144 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
-    """
-    Create new conversation session
-    
-    - **avatar_id**: ID of avatar to use
-    - **settings**: Optional session settings
-    """
+    """Create a new conversation session for the current user."""
     try:
-        # Verify avatar exists
-        result = await db.execute(
-            select(Avatar).where(Avatar.id == session_data.avatar_id)
-        )
+        result = await db.execute(select(Avatar).where(Avatar.id == session_data.avatar_id))
         avatar = result.scalar_one_or_none()
-        
+
         if not avatar:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Avatar not found"
-            )
-        
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Avatar not found")
+
         if avatar.status != "ready":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Avatar is not ready"
-            )
-        
-        user_id = current_user.id if current_user else "demo-user"
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Avatar is not ready")
+
+        # Ensure user owns this avatar (or is demo)
+        uid = _user_id(current_user)
+        if avatar.user_id != uid:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised to use this avatar")
 
         session = Session(
-            user_id=user_id,
+            user_id=uid,
             avatar_id=session_data.avatar_id,
             status="active",
-            settings=session_data.settings or {}
+            settings=session_data.settings or {},
         )
-        
+
         db.add(session)
         await db.commit()
         await db.refresh(session)
-        
-        logger.info(f"Session created: {session.id}")
-        
+
+        logger.info(f"Session created: {session.id} (user={uid})")
         return session
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to create session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create session"
-        )
-
-
-@router.get("/{session_id}", response_model=SessionResponse)
-async def get_session(
-    session_id: str,
-    db: AsyncSession = Depends(get_db)
-):
-    """Get session by ID"""
-    try:
-        result = await db.execute(
-            select(Session).where(Session.id == session_id)
-        )
-        session = result.scalar_one_or_none()
-        
-        if not session:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Session not found"
-            )
-        
-        return session
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to get session"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create session")
 
 
 @router.get("/", response_model=List[SessionResponse])
 async def list_sessions(
     skip: int = 0,
-    limit: int = 100,
-    db: AsyncSession = Depends(get_db)
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    """List all sessions"""
+    """List sessions belonging to the current user."""
     try:
         result = await db.execute(
-            select(Session).offset(skip).limit(limit)
+            select(Session)
+            .where(Session.user_id == _user_id(current_user))
+            .offset(skip)
+            .limit(min(limit, 200))
+            .order_by(Session.created_at.desc())
         )
-        sessions = result.scalars().all()
-        return sessions
-    
+        return result.scalars().all()
     except Exception as e:
         logger.error(f"Failed to list sessions: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to list sessions"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list sessions")
+
+
+@router.get("/{session_id}", response_model=SessionResponse)
+async def get_session(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """Get session by ID (must belong to current user)."""
+    try:
+        result = await db.execute(select(Session).where(Session.id == session_id))
+        session = result.scalar_one_or_none()
+
+        if not session:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+        if session.user_id != _user_id(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised to access this session")
+
+        return session
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get session")
 
 
 @router.post("/{session_id}/end", response_model=SessionResponse)
 async def end_session(
     session_id: str,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    """End a session"""
+    """End an active session."""
     try:
-        result = await db.execute(
-            select(Session).where(Session.id == session_id)
-        )
+        result = await db.execute(select(Session).where(Session.id == session_id))
         session = result.scalar_one_or_none()
-        
+
         if not session:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Session not found"
-            )
-        
-        from datetime import datetime, timezone
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+        if session.user_id != _user_id(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised to end this session")
+
         session.status = "ended"
         session.ended_at = datetime.now(timezone.utc)
-        
+
         await db.commit()
         await db.refresh(session)
-        
-        # Disconnect WebSocket if active
+
         await websocket_manager.disconnect(session_id)
-        
+
         logger.info(f"Session ended: {session_id}")
-        
         return session
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to end session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to end session"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to end session")
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(
     session_id: str,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    """Delete session"""
+    """Delete a session (must belong to current user)."""
     try:
-        result = await db.execute(
-            select(Session).where(Session.id == session_id)
-        )
+        result = await db.execute(select(Session).where(Session.id == session_id))
         session = result.scalar_one_or_none()
-        
+
         if not session:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Session not found"
-            )
-        
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+        if session.user_id != _user_id(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised to delete this session")
+
         await db.delete(session)
         await db.commit()
-
         logger.info(f"Session deleted: {session_id}")
 
     except HTTPException:
@@ -195,7 +171,4 @@ async def delete_session(
     except Exception as e:
         await db.rollback()
         logger.error(f"Failed to delete session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete session"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete session")

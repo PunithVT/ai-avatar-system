@@ -130,16 +130,20 @@ class ConnectionManager:
     # ── handlers ──────────────────────────────────────────────────────────────
 
     async def handle_audio_input(self, session_id: str, audio_data: str):
+        tmp_audio = TMPDIR / f"{session_id}_input.webm"
         try:
             await self.send_message(session_id, {
                 "type": "status", "message": "Transcribing audio…", "stage": "transcription"
             })
 
-            tmp_audio = TMPDIR / f"{session_id}_input.webm"
-            tmp_audio.write_bytes(base64.b64decode(audio_data))
+            try:
+                raw = base64.b64decode(audio_data)
+            except Exception:
+                await self.send_message(session_id, {"type": "error", "message": "Invalid audio data"})
+                return
 
+            tmp_audio.write_bytes(raw)
             text = await stt_service.transcribe(str(tmp_audio))
-            tmp_audio.unlink(missing_ok=True)
 
             if not text:
                 await self.send_message(session_id, {"type": "error", "message": "Could not transcribe audio"})
@@ -151,6 +155,8 @@ class ConnectionManager:
         except Exception as e:
             logger.error(f"Audio error [{session_id}]: {e}")
             await self.send_message(session_id, {"type": "error", "message": f"Audio processing failed: {e}"})
+        finally:
+            tmp_audio.unlink(missing_ok=True)
 
     async def handle_text_input(self, session_id: str, text: str):
         try:
@@ -220,16 +226,15 @@ class ConnectionManager:
 
         sent_any = False
         for i, sentence in enumerate(sentences):
+            job_id = uuid.uuid4().hex[:12]  # type: ignore[index]
+            tmp_audio = TMPDIR / f"{session_id}_{job_id}_audio.wav"
+            tmp_video = TMPDIR / f"{session_id}_{job_id}_video.mp4"
             try:
                 await self.send_message(session_id, {
                     "type": "status",
                     "message": f"Animating part {i + 1} of {total}…",
                     "stage": "animation",
                 })
-
-                job_id = uuid.uuid4().hex[:12]
-                tmp_audio = TMPDIR / f"{session_id}_{job_id}_audio.wav"
-                tmp_video = TMPDIR / f"{session_id}_{job_id}_video.mp4"
 
                 await tts_service.synthesize(
                     text=sentence,
@@ -250,9 +255,6 @@ class ConnectionManager:
                     tmp_video.read_bytes(), video_key, content_type="video/mp4"
                 )
 
-                tmp_audio.unlink(missing_ok=True)
-                tmp_video.unlink(missing_ok=True)
-
                 await self.send_message(session_id, {
                     "type": "video_chunk",
                     "chunk_index": i,
@@ -265,8 +267,10 @@ class ConnectionManager:
 
             except Exception as e:
                 logger.error(f"Chunk {i} failed [{session_id}]: {e}")
-                tmp_audio.unlink(missing_ok=True)  # type: ignore[possibly-undefined]
-                tmp_video.unlink(missing_ok=True)  # type: ignore[possibly-undefined]
+
+            finally:
+                tmp_audio.unlink(missing_ok=True)
+                tmp_video.unlink(missing_ok=True)
 
         await self.send_message(session_id, {
             "type": "video_chunk_end",

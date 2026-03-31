@@ -185,6 +185,23 @@ async def health_check():
         services["redis"] = "disconnected"
         health["status"] = "degraded"
 
+    # GPU / avatar engine info
+    try:
+        import torch
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            used_gb = torch.cuda.memory_allocated(0) / 1024 ** 3
+            total_gb = props.total_memory / 1024 ** 3
+            services["gpu"] = f"{props.name} ({used_gb:.1f}/{total_gb:.1f} GB used)"
+        else:
+            services["gpu"] = "not available (CPU mode)"
+    except ImportError:
+        services["gpu"] = "torch not installed"
+    except Exception:
+        services["gpu"] = "error"
+
+    health["avatar_engine"] = settings.AVATAR_ENGINE
+
     return health
 
 
