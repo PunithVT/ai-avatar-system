@@ -5,6 +5,8 @@ import { AvatarUpload } from '@/components/AvatarUpload'
 import { AvatarList } from '@/components/AvatarList'
 import { ChatInterface } from '@/components/ChatInterface'
 import { VoicePanel } from '@/components/VoicePanel'
+import { ConnectionStatus } from '@/components/ui/ConnectionStatus'
+import { ThemeToggle } from '@/components/ui/ThemeToggle'
 import { api } from '@/lib/api'
 import { toast } from 'react-hot-toast'
 import {
@@ -137,11 +139,9 @@ export default function Home() {
             ))}
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 text-xs text-gray-400">
-              <span className="status-dot online" />
-              <span>System Online</span>
-            </div>
+          <div className="flex items-center gap-3">
+            <ConnectionStatus />
+            <ThemeToggle />
           </div>
         </div>
         {/* nav glass blur border */}

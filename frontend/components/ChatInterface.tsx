@@ -9,6 +9,7 @@ import {
 import { useMutation } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
+import { useStore } from '@/store/useStore'
 
 interface Message {
   id: string
@@ -25,6 +26,7 @@ interface VideoChunk {
 
 interface ChatInterfaceProps {
   avatarId: string
+  voiceWavPath?: string
   onSessionCreated?: (sessionId: string) => void
 }
 
@@ -133,7 +135,9 @@ function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
   )
 }
 
-export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps) {
+export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: ChatInterfaceProps) {
+  const setWsConnected = useStore((s) => s.setWsConnected)
+
   const [messages, setMessages] = useState<Message[]>([])
   const [inputText, setInputText] = useState('')
   const [isRecording, setIsRecording] = useState(false)
@@ -146,6 +150,10 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [recordingLevel, setRecordingLevel] = useState(0)
   const [avatarImageUrl, setAvatarImageUrl] = useState<string | null>(null)
+
+  const reconnectAttemptsRef = useRef(0)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
 
   // Video playback state
   const [showVideo, setShowVideo] = useState(false)           // true while a chunk is playing
@@ -216,6 +224,7 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
     mutationFn: () => api.createSession(avatarId),
     onSuccess: (data) => {
       setSessionId(data.id)
+      sessionIdRef.current = data.id
       connectWebSocket(data.id)
       onSessionCreated?.(data.id)
     },
@@ -225,25 +234,45 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
     },
   })
 
-  const connectWebSocket = (sid: string) => {
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000'
+  const connectWebSocket = useCallback((sid: string) => {
+    // Convert http(s) URL to ws(s)
+    const rawUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000'
+    const wsUrl = rawUrl.replace(/^http/, 'ws')
     const websocket = new WebSocket(`${wsUrl}/ws/session/${sid}`)
 
     websocket.onopen = () => {
+      reconnectAttemptsRef.current = 0
       setConnectionStatus('connected')
-      toast.success('Connected to avatar!', { icon: '✨' })
+      setWsConnected(true)
+      if (reconnectAttemptsRef.current === 0) {
+        toast.success('Connected to avatar!', { icon: '✨' })
+      }
+      // Apply voice if provided
+      if (voiceWavPath) {
+        websocket.send(JSON.stringify({ type: 'set_voice', voice_wav_path: voiceWavPath }))
+      }
     }
     websocket.onmessage = (event) => {
       handleWebSocketMessage(JSON.parse(event.data))
     }
     websocket.onerror = () => {
       setConnectionStatus('disconnected')
-      toast.error('Connection error')
+      setWsConnected(false)
     }
-    websocket.onclose = () => setConnectionStatus('disconnected')
+    websocket.onclose = () => {
+      setConnectionStatus('disconnected')
+      setWsConnected(false)
+      // Exponential backoff reconnect (max 30s)
+      const sid = sessionIdRef.current
+      if (!sid) return
+      const delay = Math.min(1000 * 2 ** reconnectAttemptsRef.current, 30000)
+      reconnectAttemptsRef.current += 1
+      reconnectTimerRef.current = setTimeout(() => connectWebSocket(sid), delay)
+    }
 
     setWs(websocket)
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceWavPath, setWsConnected])
 
   const handleWebSocketMessage = useCallback((data: any) => {
     switch (data.type) {
@@ -391,7 +420,17 @@ export function ChatInterface({ avatarId, onSessionCreated }: ChatInterfaceProps
 
   useEffect(() => {
     createSessionMutation.mutate()
-    return () => { ws?.close() }
+    return () => {
+      // Cancel any pending reconnect
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+      // Prevent reconnect loop on intentional unmount
+      sessionIdRef.current = null
+      ws?.close()
+      setWsConnected(false)
+      // Best-effort session end (fire-and-forget)
+      const sid = sessionId
+      if (sid) api.endSession(sid).catch(() => {})
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
