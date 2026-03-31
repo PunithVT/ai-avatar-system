@@ -8,6 +8,7 @@ env/
 # Environment
 .env
 .env.local
+.env.prod
 .env.*.local
 
 # Next.js
@@ -52,9 +53,14 @@ uploads/
 outputs/
 voice_profiles/
 backend/voice_profiles/
+backend/uploads/
 **/voice_profiles/*.wav
 **/voice_profiles/*.webm
 **/voice_profiles/*.mp3
+
+# Temp inference outputs
+*.tmp.mp4
+*_frames/
 
 # Database
 *.db
