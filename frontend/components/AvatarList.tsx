@@ -35,6 +35,7 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
   const queryClient = useQueryClient()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draftPrompt, setDraftPrompt] = useState('')
+  const [draftName, setDraftName] = useState('')
   const [isSaving, setIsSaving] = useState(false)
 
   const { data: avatars, isLoading, refetch } = useQuery({
@@ -53,20 +54,27 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
   })
 
   const openEditor = (avatar: any) => {
-    const existing = avatar.avatar_metadata?.system_prompt ?? ''
-    setDraftPrompt(existing)
+    setDraftPrompt(avatar.avatar_metadata?.system_prompt ?? '')
+    setDraftName(avatar.name ?? '')
     setEditingId(avatar.id)
   }
 
   const savePrompt = async (avatarId: string) => {
     setIsSaving(true)
     try {
-      await api.setAvatarMetadata(avatarId, { system_prompt: draftPrompt.trim() })
+      const av = avatars?.find((a: any) => a.id === avatarId)
+      const saves: Promise<any>[] = [
+        api.setAvatarMetadata(avatarId, { system_prompt: draftPrompt.trim() }),
+      ]
+      if (draftName.trim() && draftName.trim() !== av?.name) {
+        saves.push(api.renameAvatar(avatarId, draftName.trim()))
+      }
+      await Promise.all(saves)
       queryClient.invalidateQueries({ queryKey: ['avatars'] })
-      toast.success('Personality saved', { icon: '🧠' })
+      toast.success('Saved', { icon: '✅' })
       setEditingId(null)
     } catch {
-      toast.error('Failed to save personality')
+      toast.error('Failed to save')
     } finally {
       setIsSaving(false)
     }
@@ -223,6 +231,19 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                   <button onClick={() => setEditingId(null)} className="btn-icon">
                     <X size={13} />
                   </button>
+                </div>
+
+                <div className="space-y-1.5 mb-3">
+                  <label className="text-xs font-medium text-gray-400">Display name</label>
+                  <input
+                    type="text"
+                    value={draftName}
+                    onChange={(e) => setDraftName(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-surface-700/80 border border-white/10 text-white text-sm
+                               placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-primary-500/50
+                               focus:border-primary-500/40 transition-all duration-200"
+                    placeholder="Avatar name"
+                  />
                 </div>
 
                 <p className="text-xs text-gray-500 mb-2">

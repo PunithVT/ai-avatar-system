@@ -6,6 +6,10 @@ import {
   Sparkles, Clock, Copy, RotateCcw, Wand2,
   MessageCircle, Zap, Activity, Download, Globe,
 } from 'lucide-react'
+import { useMutation } from '@tanstack/react-query'
+import { toast } from 'react-hot-toast'
+import { api } from '@/lib/api'
+import { useStore } from '@/store/useStore'
 
 const CHAT_LANGUAGES = [
   { code: 'en', label: 'EN' }, { code: 'es', label: 'ES' }, { code: 'fr', label: 'FR' },
@@ -13,10 +17,6 @@ const CHAT_LANGUAGES = [
   { code: 'pt', label: 'PT' }, { code: 'hi', label: 'HI' }, { code: 'it', label: 'IT' },
   { code: 'ko', label: 'KO' },
 ]
-import { useMutation } from '@tanstack/react-query'
-import { toast } from 'react-hot-toast'
-import { api } from '@/lib/api'
-import { useStore } from '@/store/useStore'
 
 interface Message {
   id: string
@@ -160,7 +160,9 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
   // Streaming token accumulator — shown as a live bubble while LLM is generating
   const [streamingContent, setStreamingContent] = useState('')
   const [language, setLanguage] = useState('en')
+  const [latencyMs, setLatencyMs] = useState<number | null>(null)
 
+  const sendTimeRef = useRef<number>(0)
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionIdRef = useRef<string | null>(null)
@@ -245,11 +247,27 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
   // ── WebSocket ────────────────────────────────────────────────────────────
   const createSessionMutation = useMutation({
     mutationFn: () => api.createSession(avatarId),
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setSessionId(data.id)
       sessionIdRef.current = data.id
       connectWebSocket(data.id)
       onSessionCreated?.(data.id)
+      // Restore previous messages for this session
+      try {
+        const prev = await api.getMessages(data.id)
+        if (Array.isArray(prev) && prev.length > 0) {
+          setMessages(prev
+            .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+            .map((m: any) => ({
+              id: m.id,
+              role: m.role as 'user' | 'assistant',
+              content: m.content,
+              timestamp: new Date(m.created_at),
+              emotion: detectEmotion(m.content),
+            }))
+          )
+        }
+      } catch { /* ignore — history is non-critical */ }
     },
     onError: () => {
       toast.error('Failed to start session')
@@ -340,8 +358,9 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
         const chunk: VideoChunk = { url: data.video_url, text: data.text }
         chunkQueueRef.current.push(chunk)
         setCurrentChunkProgress(prev => ({ current: data.chunk_index + 1, total: prev.total }))
-        // First chunk arriving → clear processing spinner, start playback
+        // First chunk arriving → record latency, clear spinner, start playback
         if (!isPlayingRef.current) {
+          if (sendTimeRef.current) setLatencyMs(Date.now() - sendTimeRef.current)
           setIsProcessing(false)
           playNextChunk()
         } else {
@@ -387,6 +406,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
     setStreamingContent('')
     setIsProcessing(true)
     setIsTyping(true)
+    setLatencyMs(null)
+    sendTimeRef.current = Date.now()
     chunkQueueRef.current = []
     isPlayingRef.current = false
     setShowVideo(false)
@@ -444,6 +465,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
         reader.onloadend = () => {
           const base64Audio = (reader.result as string).split(',')[1]
           if (ws) {
+            setLatencyMs(null)
+            sendTimeRef.current = Date.now()
             ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }))
             setIsProcessing(true)
             chunkQueueRef.current = []
@@ -629,6 +652,12 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
             <span className="font-semibold text-white">Conversation</span>
           </div>
           <div className="flex items-center gap-2">
+            {latencyMs !== null && (
+              <div className="flex items-center gap-1 text-xs text-primary-400">
+                <Zap size={11} />
+                <span>{(latencyMs / 1000).toFixed(1)}s</span>
+              </div>
+            )}
             <div className="flex items-center gap-1.5 text-xs text-gray-500">
               <Zap size={12} className="text-primary-400" />
               <span>{messages.length} messages</span>

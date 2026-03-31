@@ -94,6 +94,11 @@ export const api = {
     return response.data
   },
 
+  renameAvatar: async (avatarId: string, name: string) => {
+    const response = await apiClient.patch(`/api/v1/avatars/${avatarId}/name`, { name })
+    return response.data
+  },
+
   // Sessions
   createSession: async (avatarId: string) => {
     const response = await apiClient.post('/api/v1/sessions/create', {

@@ -7,8 +7,10 @@ import { ChatInterface } from '@/components/ChatInterface'
 import { VoicePanel } from '@/components/VoicePanel'
 import { ConnectionStatus } from '@/components/ui/ConnectionStatus'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
+import { AuthModal } from '@/components/AuthModal'
 import { api } from '@/lib/api'
 import { toast } from 'react-hot-toast'
+import { useStore } from '@/store/useStore'
 import {
   Camera,
   MessageCircle,
@@ -79,6 +81,7 @@ const STATS = [
 type View = 'home' | 'avatars' | 'chat' | 'voice'
 
 export default function Home() {
+  const { isAuthenticated, user, clearAuth } = useStore()
   const [selectedAvatar, setSelectedAvatar] = useState<string | null>(null)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [view, setView] = useState<View>('home')
@@ -106,6 +109,9 @@ export default function Home() {
 
   return (
     <div className="min-h-screen">
+      {/* ── Auth gate ── */}
+      {!isAuthenticated() && <AuthModal />}
+
       {/* ── Navigation ── */}
       <nav className="fixed top-0 left-0 right-0 z-50 h-16">
         <div className="h-full mx-auto max-w-7xl px-6 flex items-center justify-between">
@@ -142,6 +148,18 @@ export default function Home() {
           <div className="flex items-center gap-3">
             <ConnectionStatus />
             <ThemeToggle />
+            {user && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-400 hidden sm:block">{user.username}</span>
+                <button
+                  onClick={() => clearAuth()}
+                  className="text-xs text-gray-500 hover:text-red-400 transition-colors px-2 py-1 rounded-lg hover:bg-red-500/10"
+                  title="Sign out"
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
           </div>
         </div>
         {/* nav glass blur border */}

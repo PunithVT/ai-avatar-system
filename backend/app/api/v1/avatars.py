@@ -181,6 +181,30 @@ async def update_avatar_metadata(
     return avatar
 
 
+@router.patch("/{avatar_id}/name", response_model=AvatarResponse)
+async def rename_avatar(
+    avatar_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """Rename an avatar."""
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+    result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
+    avatar = result.scalar_one_or_none()
+    if not avatar:
+        raise HTTPException(status_code=404, detail="Avatar not found")
+    if avatar.user_id != _user_id(current_user):
+        raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
+    avatar.name = name
+    await db.commit()
+    await db.refresh(avatar)
+    logger.info(f"Avatar {avatar_id} renamed to: {name!r}")
+    return avatar
+
+
 @router.delete("/{avatar_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_avatar(
     avatar_id: str,
