@@ -32,6 +32,7 @@ class AvatarAnimator:
         self.resolution = settings.AVATAR_RESOLUTION
         self.fps = settings.AVATAR_FPS
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.use_float16 = self.device == "cuda"  # float16 on GPU = ~2× faster via Tensor Cores
         self._initialised = False
         self._musetalk_dir: Optional[Path] = None
 
@@ -40,7 +41,18 @@ class AvatarAnimator:
         self._worker_lock = asyncio.Lock()
         self._worker_env: dict = {}
 
-        logger.info(f"AvatarAnimator: engine={self.engine}, device={self.device}")
+        if self.device == "cuda":
+            gpu_name = torch.cuda.get_device_name(0)
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            logger.info(
+                f"AvatarAnimator: engine={self.engine}, device=cuda "
+                f"({gpu_name}, {vram_gb:.1f} GB VRAM), float16={self.use_float16}"
+            )
+        else:
+            logger.info(
+                f"AvatarAnimator: engine={self.engine}, device=cpu "
+                f"(no GPU — consider AWS g5/g6 instance for real-time performance)"
+            )
 
     # ── initialisation ────────────────────────────────────────────────────────
 
@@ -105,20 +117,22 @@ class AvatarAnimator:
             env=self._worker_env,
         )
 
-        # Send init config
+        # Send init config — include float16 flag so worker can optimise for GPU
         init_msg = json.dumps({
             "unet_model_path": str(musetalk_dir / "models" / "musetalkV15" / "unet.pth"),
             "unet_config":     str(musetalk_dir / "models" / "musetalkV15" / "musetalk.json"),
             "whisper_dir":     str(musetalk_dir / "models" / "whisper"),
             "vae_type":        str(musetalk_dir / "models" / "sd-vae"),
+            "use_float16":     self.use_float16,
         }) + "\n"
         proc.stdin.write(init_msg.encode())
         await proc.stdin.drain()
 
-        # Wait for READY (model loading — up to 10 min first time)
-        logger.info("Waiting for worker to finish loading models…")
+        # Wait for READY — GPU loads much faster (~60s) vs CPU (~5-10 min first time)
+        model_load_timeout = 120 if self.device == "cuda" else 600
+        logger.info(f"Waiting for worker to finish loading models (timeout={model_load_timeout}s)…")
         try:
-            ready_line = await asyncio.wait_for(proc.stdout.readline(), timeout=600)
+            ready_line = await asyncio.wait_for(proc.stdout.readline(), timeout=model_load_timeout)
         except asyncio.TimeoutError:
             proc.kill()
             raise RuntimeError("MuseTalk worker timed out while loading models")
@@ -150,14 +164,18 @@ class AvatarAnimator:
             proc.stdin.write(job.encode())
             await proc.stdin.drain()
 
+            # GPU: expect ~5-15s per sentence; CPU: up to 5 min
+            infer_timeout = 60 if self.device == "cuda" else 300
             try:
                 result_line = await asyncio.wait_for(
-                    proc.stdout.readline(), timeout=300   # 5 min per inference
+                    proc.stdout.readline(), timeout=infer_timeout
                 )
             except asyncio.TimeoutError:
                 proc.kill()
                 self._worker_proc = None
-                raise RuntimeError("MuseTalk inference timed out")
+                raise RuntimeError(
+                    f"MuseTalk inference timed out after {infer_timeout}s"
+                )
 
             result = json.loads(result_line.decode().strip())
             if result["status"] != "ok":
