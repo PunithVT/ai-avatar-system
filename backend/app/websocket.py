@@ -53,13 +53,15 @@ class ConnectionManager:
     async def _load_session_data(self, session_id: str):
         try:
             from app.database import AsyncSessionLocal
-            from app.models import Avatar
             from app.models import Session as SessionModel
             from sqlalchemy import select
+            from sqlalchemy.orm import joinedload
 
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
-                    select(SessionModel).where(SessionModel.id == session_id)
+                    select(SessionModel)
+                    .options(joinedload(SessionModel.avatar))
+                    .where(SessionModel.id == session_id)
                 )
                 session = result.scalar_one_or_none()
                 if not session:
@@ -68,10 +70,7 @@ class ConnectionManager:
                 self.session_data[session_id]["avatar_id"] = session.avatar_id
                 self.session_data[session_id]["user_id"] = session.user_id
 
-                result = await db.execute(
-                    select(Avatar).where(Avatar.id == session.avatar_id)
-                )
-                avatar = result.scalar_one_or_none()
+                avatar = session.avatar
                 if avatar:
                     self.session_data[session_id]["avatar_image_key"] = avatar.s3_key
                     local = await self._resolve_local_image(avatar)
@@ -90,7 +89,7 @@ class ConnectionManager:
                         logger.info(f"Loaded system prompt for avatar {avatar.id}")
 
                     if avatar.voice_id:
-                        wav = self._get_voice_wav_path(avatar.voice_id)
+                        wav = await self._get_voice_wav_path(avatar.voice_id)
                         if wav:
                             self.session_data[session_id]["voice_wav"] = wav
                             logger.info(f"Auto-loaded voice {avatar.voice_id} for session {session_id}")
@@ -99,13 +98,14 @@ class ConnectionManager:
         except Exception as e:
             logger.error(f"Failed to load session data for {session_id}: {e}")
 
-    def _get_voice_wav_path(self, voice_id: str) -> Optional[str]:
+    async def _get_voice_wav_path(self, voice_id: str) -> Optional[str]:
         """Return the WAV filesystem path for a voice profile, or None if not found."""
         voice_index = Path("voice_profiles") / "index.json"
         if not voice_index.exists():
             return None
         try:
-            for entry in json.loads(voice_index.read_text()):
+            text = await asyncio.to_thread(voice_index.read_text)
+            for entry in json.loads(text):
                 if entry["id"] == voice_id:
                     return entry.get("wav_path")
         except Exception as e:
