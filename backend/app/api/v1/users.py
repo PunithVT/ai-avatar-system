@@ -220,15 +220,20 @@ async def update_current_user(
 async def list_users(
     skip: int = 0,
     limit: int = 100,
+    current_user: User = Depends(require_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """List all users"""
+    """List all users — superuser only"""
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized"
+        )
     try:
         result = await db.execute(
-            select(User).offset(skip).limit(limit)
+            select(User).offset(skip).limit(min(limit, 200))
         )
-        users = result.scalars().all()
-        return users
+        return result.scalars().all()
 
     except Exception as e:
         logger.error(f"Failed to list users: {e}")
@@ -241,9 +246,15 @@ async def list_users(
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user(
     user_id: str,
+    current_user: User = Depends(require_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get user by ID"""
+    """Get user by ID — own profile or superuser only"""
+    if str(current_user.id) != user_id and not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized"
+        )
     try:
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()

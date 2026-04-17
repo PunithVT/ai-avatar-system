@@ -1,10 +1,13 @@
 from pydantic_settings import BaseSettings
+from pydantic import model_validator
 from typing import List, Optional
 from pathlib import Path
 import os
 
 # Resolve .env path relative to this file's location (always project root)
 _ENV_FILE = str(Path(__file__).resolve().parent.parent.parent / ".env")
+
+_WEAK_SECRETS = {"change-this-secret-key", "change-this-jwt-secret", "change-this-jwt-secret-key"}
 
 
 class Settings(BaseSettings):
@@ -13,7 +16,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
-    SECRET_KEY: str = "change-this-secret-key"
+    SECRET_KEY: str
     
     # Database
     DATABASE_URL: str = "postgresql://avatar_user:password@localhost:5432/avatar_db"
@@ -66,7 +69,7 @@ class Settings(BaseSettings):
     
     # Security
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8000"]
-    JWT_SECRET_KEY: str = "change-this-jwt-secret"
+    JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     
@@ -100,6 +103,15 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:3000"
     BACKEND_URL: str = "http://localhost:8000"
     
+    @model_validator(mode="after")
+    def _validate_secrets(self) -> "Settings":
+        for field, value in (("SECRET_KEY", self.SECRET_KEY), ("JWT_SECRET_KEY", self.JWT_SECRET_KEY)):
+            if value in _WEAK_SECRETS:
+                raise ValueError(f"{field} is set to an insecure default — set a strong random value in .env")
+            if len(value) < 32:
+                raise ValueError(f"{field} must be at least 32 characters")
+        return self
+
     model_config = {
         "env_file": _ENV_FILE,
         "case_sensitive": True,
