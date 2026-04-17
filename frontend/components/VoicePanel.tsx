@@ -6,6 +6,7 @@ import {
   Volume2, Wand2, Music, AlertCircle, PlusCircle, RefreshCw,
 } from 'lucide-react'
 import { toast } from 'react-hot-toast'
+import type { VoiceApiResponse, ApiError } from '@/lib/types'
 
 interface VoiceProfile {
   id: string
@@ -88,9 +89,9 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   useEffect(() => {
     fetch(`${API_BASE}/api/v1/voices/`)
       .then(r => r.json())
-      .then((data: Array<{ id: string; name: string; language: string; duration: number }>) => {
+      .then((data: VoiceApiResponse[]) => {
         if (!Array.isArray(data) || data.length === 0) return
-        const custom: VoiceProfile[] = data.map((v: any) => ({
+        const custom: VoiceProfile[] = data.map((v: VoiceApiResponse) => ({
           id: v.id,
           name: v.name,
           language: v.language || 'en',
@@ -241,8 +242,8 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
       setNewVoiceName('')
       setNewVoiceLang('en')
       setStep('select')
-    } catch (err: any) {
-      toast.error(err?.message || 'Voice cloning failed — check backend is running')
+    } catch (err: unknown) {
+      toast.error((err as ApiError)?.message || 'Voice cloning failed — check backend is running')
     } finally {
       setIsCloning(false)
     }

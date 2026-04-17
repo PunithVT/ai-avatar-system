@@ -6,6 +6,7 @@ import { Trash2, Check, User, Loader2, RefreshCw, Play, Settings2, Save, X } fro
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
 import Image from 'next/image'
+import type { Avatar } from '@/lib/types'
 
 interface AvatarListProps {
   selectedAvatar: string | null
@@ -53,7 +54,7 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
     onError: () => toast.error('Failed to delete avatar'),
   })
 
-  const openEditor = (avatar: any) => {
+  const openEditor = (avatar: Avatar) => {
     setDraftPrompt(avatar.avatar_metadata?.system_prompt ?? '')
     setDraftName(avatar.name ?? '')
     setEditingId(avatar.id)
@@ -62,8 +63,8 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
   const savePrompt = async (avatarId: string) => {
     setIsSaving(true)
     try {
-      const av = avatars?.find((a: any) => a.id === avatarId)
-      const saves: Promise<any>[] = [
+      const av = avatars?.find((a: Avatar) => a.id === avatarId)
+      const saves: Promise<void>[] = [
         api.setAvatarMetadata(avatarId, { system_prompt: draftPrompt.trim() }),
       ]
       if (draftName.trim() && draftName.trim() !== av?.name) {
@@ -114,7 +115,7 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
       ) : (
         <div className="space-y-3 overflow-y-auto max-h-[28rem] messages-scroll">
           <div className="grid grid-cols-2 gap-4">
-            {avatars.map((avatar: any, idx: number) => {
+            {avatars.map((avatar: Avatar, idx: number) => {
               const isSelected = selectedAvatar === avatar.id
               const status = STATUS_CONFIG[avatar.status] ?? STATUS_CONFIG.pending
 
@@ -217,7 +218,7 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
 
           {/* ── Inline Personality Editor ── */}
           {editingId && (() => {
-            const av = avatars.find((a: any) => a.id === editingId)
+            const av = avatars.find((a: Avatar) => a.id === editingId)
             if (!av) return null
             return (
               <div className="glass-card rounded-xl p-4 border border-primary-500/30 animate-slide-up">

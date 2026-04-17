@@ -10,6 +10,7 @@ import { useMutation } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { useStore } from '@/store/useStore'
+import type { Avatar, ChatMessage, WsMessage } from '@/lib/types'
 
 const CHAT_LANGUAGES = [
   { code: 'en', label: 'EN' }, { code: 'es', label: 'ES' }, { code: 'fr', label: 'FR' },
@@ -187,8 +188,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
   // ── Fetch avatar image on mount ──────────────────────────────────────────
   useEffect(() => {
     api.getAvatars()
-      .then((avatars: any[]) => {
-        const av = avatars.find((a: any) => a.id === avatarId)
+      .then((avatars: Avatar[]) => {
+        const av = avatars.find((a: Avatar) => a.id === avatarId)
         if (av) {
           setAvatarImageUrl(av.thumbnail_url || av.image_url || null)
         }
@@ -257,8 +258,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
         const prev = await api.getMessages(data.id)
         if (Array.isArray(prev) && prev.length > 0) {
           setMessages(prev
-            .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-            .map((m: any) => ({
+            .filter((m: ChatMessage) => m.role === 'user' || m.role === 'assistant')
+            .map((m: ChatMessage) => ({
               id: m.id,
               role: m.role as 'user' | 'assistant',
               content: m.content,
@@ -315,7 +316,7 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voiceWavPath, setWsConnected])
 
-  const handleWebSocketMessage = useCallback((data: any) => {
+  const handleWebSocketMessage = useCallback((data: WsMessage) => {
     switch (data.type) {
       // Live token stream — accumulate into a streaming bubble
       case 'token':
@@ -323,41 +324,45 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
         setIsTyping(false) // no longer showing the dots — showing real text
         break
 
-      case 'transcription':
+      case 'transcription': {
+        const text = data.text ?? ''
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
           role: 'user',
-          content: data.text,
+          content: text,
           timestamp: new Date(),
-          emotion: detectEmotion(data.text),
+          emotion: detectEmotion(text),
         }])
         setStreamingContent('')
         setIsTyping(true)
         break
+      }
 
-      case 'message':
+      case 'message': {
         // Full message assembled — replace streaming bubble with a proper message
+        const content = data.content ?? ''
         setStreamingContent('')
         setIsTyping(false)
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
           role: 'assistant',
-          content: data.content,
+          content,
           timestamp: new Date(),
-          emotion: detectEmotion(data.content),
+          emotion: detectEmotion(content),
         }])
         // Keep isProcessing=true — spinner stays until first video chunk arrives
         break
+      }
 
       case 'video_chunk_start':
         chunkQueueRef.current = []
-        setCurrentChunkProgress({ current: 0, total: data.total_chunks })
+        setCurrentChunkProgress({ current: 0, total: data.total_chunks ?? 0 })
         break
 
       case 'video_chunk': {
-        const chunk: VideoChunk = { url: data.video_url, text: data.text }
+        const chunk: VideoChunk = { url: data.video_url ?? '', text: data.text ?? '' }
         chunkQueueRef.current.push(chunk)
-        setCurrentChunkProgress(prev => ({ current: data.chunk_index + 1, total: prev.total }))
+        setCurrentChunkProgress(prev => ({ current: (data.chunk_index ?? 0) + 1, total: prev.total }))
         // First chunk arriving → record latency, clear spinner, start playback
         if (!isPlayingRef.current) {
           if (sendTimeRef.current) setLatencyMs(Date.now() - sendTimeRef.current)
@@ -384,7 +389,7 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
         break
 
       case 'error':
-        toast.error(data.message)
+        toast.error(data.message ?? 'An error occurred')
         setIsProcessing(false)
         setIsTyping(false)
         break

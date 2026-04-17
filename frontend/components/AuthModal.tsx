@@ -5,6 +5,7 @@ import { Sparkles, Loader2, Eye, EyeOff, UserPlus, LogIn, User } from 'lucide-re
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { useStore } from '@/store/useStore'
+import type { ApiError } from '@/lib/types'
 
 export function AuthModal() {
   const { setAuth } = useStore()
@@ -31,8 +32,8 @@ export function AuthModal() {
       const profile = await api.getProfile()
       setAuth(data.access_token, profile)
       toast.success(`Welcome back, ${profile.username}!`, { icon: '👋' })
-    } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Invalid credentials')
+    } catch (err: unknown) {
+      toast.error((err as ApiError)?.response?.data?.detail || 'Invalid credentials')
     } finally {
       setIsLoading(false)
     }
@@ -49,8 +50,8 @@ export function AuthModal() {
       const profile = await api.getProfile()
       setAuth(data.access_token, profile)
       toast.success(`Account created! Welcome, ${profile.username}!`, { icon: '🎉' })
-    } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Registration failed')
+    } catch (err: unknown) {
+      toast.error((err as ApiError)?.response?.data?.detail || 'Registration failed')
     } finally {
       setIsLoading(false)
     }
