@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import logging
@@ -65,8 +65,8 @@ async def send_message(
 @router.get("/session/{session_id}", response_model=List[MessageResponse])
 async def list_session_messages(
     session_id: str,
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
@@ -78,7 +78,7 @@ async def list_session_messages(
             select(Message)
             .where(Message.session_id == session_id)
             .offset(skip)
-            .limit(min(limit, 500))
+            .limit(limit)
             .order_by(Message.created_at)
         )
         return result.scalars().all()

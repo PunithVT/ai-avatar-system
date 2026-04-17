@@ -69,7 +69,7 @@ async def upload_avatar(
         raise
     except Exception as e:
         logger.error(f"Avatar processing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process avatar: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process avatar")
     finally:
         temp_orig.unlink(missing_ok=True)
         temp_processed.unlink(missing_ok=True)
@@ -97,8 +97,8 @@ async def upload_avatar(
 
 @router.get("/", response_model=List[AvatarResponse])
 async def list_avatars(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
@@ -108,7 +108,7 @@ async def list_avatars(
         select(Avatar)
         .where(Avatar.user_id == uid)
         .offset(skip)
-        .limit(min(limit, 200))
+        .limit(limit)
         .order_by(Avatar.created_at.desc())
     )
     return result.scalars().all()
@@ -144,11 +144,15 @@ async def set_avatar_voice(
     if avatar.user_id != _user_id(current_user):
         raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
 
-    avatar.voice_id = voice_id if voice_id else None
-    await db.commit()
-    await db.refresh(avatar)
-    logger.info(f"Avatar {avatar_id} voice set to: {voice_id!r}")
-    return avatar
+    try:
+        avatar.voice_id = voice_id if voice_id else None
+        await db.commit()
+        await db.refresh(avatar)
+        logger.info(f"Avatar {avatar_id} voice set to: {voice_id!r}")
+        return avatar
+    except Exception as e:
+        logger.error(f"Failed to set voice for avatar {avatar_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update avatar voice")
 
 
 @router.patch("/{avatar_id}/metadata", response_model=AvatarResponse)
@@ -173,12 +177,16 @@ async def update_avatar_metadata(
             existing = _json.loads(existing)
         except Exception:
             existing = {}
-    existing.update(payload)
-    avatar.avatar_metadata = existing
-    await db.commit()
-    await db.refresh(avatar)
-    logger.info(f"Avatar {avatar_id} metadata updated: {list(payload.keys())}")
-    return avatar
+    try:
+        existing.update(payload)
+        avatar.avatar_metadata = existing
+        await db.commit()
+        await db.refresh(avatar)
+        logger.info(f"Avatar {avatar_id} metadata updated: {list(payload.keys())}")
+        return avatar
+    except Exception as e:
+        logger.error(f"Failed to update metadata for avatar {avatar_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update avatar metadata")
 
 
 @router.patch("/{avatar_id}/name", response_model=AvatarResponse)
@@ -198,11 +206,15 @@ async def rename_avatar(
         raise HTTPException(status_code=404, detail="Avatar not found")
     if avatar.user_id != _user_id(current_user):
         raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
-    avatar.name = name
-    await db.commit()
-    await db.refresh(avatar)
-    logger.info(f"Avatar {avatar_id} renamed to: {name!r}")
-    return avatar
+    try:
+        avatar.name = name
+        await db.commit()
+        await db.refresh(avatar)
+        logger.info(f"Avatar {avatar_id} renamed to: {name!r}")
+        return avatar
+    except Exception as e:
+        logger.error(f"Failed to rename avatar {avatar_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to rename avatar")
 
 
 @router.delete("/{avatar_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -218,9 +230,12 @@ async def delete_avatar(
     if avatar.user_id != _user_id(current_user):
         raise HTTPException(status_code=403, detail="Not authorised to delete this avatar")
 
-    await storage_service.delete_file(avatar.s3_key)
-    await storage_service.delete_file(avatar.s3_key.replace("image.jpg", "thumbnail.jpg"))
-
-    await db.delete(avatar)
-    await db.commit()
-    logger.info(f"Avatar deleted: {avatar_id}")
+    try:
+        await storage_service.delete_file(avatar.s3_key)
+        await storage_service.delete_file(avatar.s3_key.replace("image.jpg", "thumbnail.jpg"))
+        await db.delete(avatar)
+        await db.commit()
+        logger.info(f"Avatar deleted: {avatar_id}")
+    except Exception as e:
+        logger.error(f"Failed to delete avatar {avatar_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete avatar")

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import logging
@@ -65,8 +65,8 @@ async def create_session(
 
 @router.get("/", response_model=List[SessionResponse])
 async def list_sessions(
-    skip: int = 0,
-    limit: int = 50,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
@@ -76,7 +76,7 @@ async def list_sessions(
             select(Session)
             .where(Session.user_id == _user_id(current_user))
             .offset(skip)
-            .limit(min(limit, 200))
+            .limit(limit)
             .order_by(Session.created_at.desc())
         )
         return result.scalars().all()
