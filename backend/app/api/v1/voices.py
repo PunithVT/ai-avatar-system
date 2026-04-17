@@ -7,6 +7,7 @@ by ID when calling the TTS service.
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 import asyncio
+import subprocess
 import uuid
 import json
 import logging
@@ -31,6 +32,8 @@ VOICE_INDEX = VOICE_DIR / "index.json"
 _index_lock = asyncio.Lock()
 
 MIN_DURATION_SECS = 5   # Minimum sample length accepted
+_ALLOWED_LANGUAGES = {"en", "es", "fr", "de", "it", "pt", "pl", "tr", "ru", "nl", "cs", "ar", "zh", "ja", "ko"}
+_NAME_MAX_LEN = 100
 
 
 async def _load_index() -> list[dict]:
@@ -61,6 +64,14 @@ async def clone_voice(
     Accept an audio sample and create a named voice profile that the TTS
     service can later use as a speaker reference for voice cloning.
     """
+    name = name.strip()
+    if not name or len(name) > _NAME_MAX_LEN:
+        raise HTTPException(status_code=400, detail=f"Name must be 1–{_NAME_MAX_LEN} characters")
+
+    lang = (language or "en").strip().lower()
+    if lang not in _ALLOWED_LANGUAGES:
+        raise HTTPException(status_code=400, detail=f"Unsupported language '{lang}'")
+
     voice_id = str(uuid.uuid4())
     audio_bytes = await audio.read()
 
@@ -82,20 +93,22 @@ async def clone_voice(
             raw_path = VOICE_DIR / f"{voice_id}_raw"
             raw_path.write_bytes(audio_bytes)
             try:
-                import subprocess
-                subprocess.run(
+                await asyncio.to_thread(
+                    subprocess.run,
                     ["ffmpeg", "-y", "-i", str(raw_path), "-ar", "22050", "-ac", "1", str(wav_path)],
                     capture_output=True,
                     check=True,
                     timeout=30,
                 )
                 raw_path.unlink(missing_ok=True)
-            except Exception as ffmpeg_err:
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"ffmpeg conversion failed for {voice_id}: {e.stderr.decode(errors='replace')}")
                 raw_path.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Could not decode audio: {ffmpeg_err}. Please upload WAV or WebM."
-                )
+                raise HTTPException(status_code=422, detail="Could not decode audio. Please upload WAV or WebM.")
+            except Exception as ffmpeg_err:
+                logger.warning(f"ffmpeg error for {voice_id}: {ffmpeg_err}")
+                raw_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=422, detail="Could not decode audio. Please upload WAV or WebM.")
 
         # Validate the output WAV is actually readable
         try:
@@ -124,8 +137,8 @@ async def clone_voice(
     # Persist to index
     entry = {
         "id": voice_id,
-        "name": name.strip(),
-        "language": language or "en",
+        "name": name,
+        "language": lang,
         "wav_path": str(wav_path),
         "duration": duration,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -137,8 +150,8 @@ async def clone_voice(
     logger.info(f"Voice profile created: {name!r} ({voice_id}, {duration}s)")
     return JSONResponse({
         "id": voice_id,
-        "name": name.strip(),
-        "language": language or "en",
+        "name": name,
+        "language": lang,
         "duration": duration,
         "created_at": entry["created_at"],
     })
