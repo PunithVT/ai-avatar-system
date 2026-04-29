@@ -614,7 +614,7 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
               </div>
 
               {(showVideo || isProcessing) && (
-                <button onClick={resetVideo} className="btn-icon" title="Reset video">
+                <button onClick={resetVideo} className="btn-icon" title="Reset video" aria-label="Reset video">
                   <RotateCcw size={15} />
                 </button>
               )}
@@ -622,6 +622,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
                 onClick={() => setIsMuted(m => !m)}
                 className={`btn-icon ${isMuted ? 'text-red-400 border-red-500/30' : ''}`}
                 title={isMuted ? 'Unmute' : 'Mute'}
+                aria-label={isMuted ? 'Unmute avatar' : 'Mute avatar'}
+                aria-pressed={isMuted}
               >
                 {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
               </button>
@@ -672,6 +674,7 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
                 onClick={exportConversation}
                 className="btn-icon"
                 title="Export conversation"
+                aria-label="Export conversation as JSON"
               >
                 <Download size={13} />
               </button>
@@ -724,6 +727,7 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
                                    border border-white/10 flex items-center justify-center
                                    opacity-0 group-hover:opacity-100 transition-opacity"
                         title="Copy"
+                        aria-label="Copy message"
                       >
                         <Copy size={10} className="text-gray-400" />
                       </button>
@@ -785,6 +789,8 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
             <button
               onClick={isRecording ? stopRecording : startRecording}
               disabled={isProcessing}
+              aria-label={isRecording ? 'Stop recording' : 'Start voice recording'}
+              aria-pressed={isRecording}
               className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
                 transition-all duration-200 active:scale-95
                 ${isRecording
@@ -808,6 +814,7 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
                 }}
                 placeholder={isRecording ? 'Recording…' : 'Message your avatar… (Enter to send)'}
+                aria-label="Message your avatar"
                 disabled={isProcessing || isRecording}
                 rows={1}
                 className="w-full px-4 py-2.5 rounded-xl bg-surface-700/80 border border-white/10 text-white text-sm
@@ -820,6 +827,7 @@ export function ChatInterface({ avatarId, voiceWavPath, onSessionCreated }: Chat
             <button
               onClick={sendMessage}
               disabled={!inputText.trim() || isProcessing || isRecording}
+              aria-label={isProcessing ? 'Sending message' : 'Send message'}
               className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600
                          flex items-center justify-center text-white hover:shadow-glow
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-95"
