@@ -48,8 +48,11 @@ class Settings(BaseSettings):
     ELEVENLABS_API_KEY: Optional[str] = None
     
     # LLM Configuration
+    # Anthropic models (2026): claude-opus-4-7 (most capable), claude-sonnet-4-6
+    # (balanced — current default), claude-haiku-4-5 (fastest). OpenAI users
+    # should override LLM_MODEL via .env (e.g. gpt-4o, gpt-4o-mini).
     LLM_PROVIDER: str = "anthropic"  # anthropic, openai
-    LLM_MODEL: str = "claude-sonnet-4-20250514"
+    LLM_MODEL: str = "claude-sonnet-4-6"
     LLM_TEMPERATURE: float = 0.7
     LLM_MAX_TOKENS: int = 2000
     
@@ -60,8 +63,10 @@ class Settings(BaseSettings):
     MUSETALK_PATH: str = "models/MuseTalk"
 
     # STT Configuration
+    # large-v3-turbo: best 2026 sweet spot — ~216x real-time on GPU, multilingual,
+    # only ~1% lower WER than large-v3. Falls back to base/small if VRAM is tight.
     STT_PROVIDER: str = "whisper"  # whisper, google, azure
-    WHISPER_MODEL: str = "base"  # tiny, base, small, medium, large
+    WHISPER_MODEL: str = "large-v3-turbo"  # tiny, base, small, medium, large-v3, large-v3-turbo
     
     # TTS Configuration
     TTS_PROVIDER: str = "coqui"  # coqui, elevenlabs, bark

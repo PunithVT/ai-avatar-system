@@ -55,13 +55,17 @@ class LLMService:
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
                 system=system_prompt or "You are a helpful AI assistant in an avatar conversation system.",
-                messages=messages
+                messages=messages,
+                # Auto-cache the largest cacheable prefix (system + early conversation).
+                # Cache reads cost ~10% of base input — substantial savings for repeat
+                # avatar sessions that share a system prompt.
+                cache_control={"type": "ephemeral"},
             )
 
             if not response.content or not hasattr(response.content[0], "text"):
                 raise ValueError("Unexpected response structure from Anthropic API")
             return response.content[0].text
-        
+
         except Exception as e:
             logger.error(f"Anthropic API error: {e}")
             raise
@@ -120,11 +124,12 @@ class LLMService:
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
                 system=system_prompt or "You are a helpful AI assistant.",
-                messages=messages
+                messages=messages,
+                cache_control={"type": "ephemeral"},
             ) as stream:
                 async for text in stream.text_stream:
                     yield text
-        
+
         except Exception as e:
             logger.error(f"Anthropic streaming error: {e}")
             raise
