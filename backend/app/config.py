@@ -69,7 +69,8 @@ class Settings(BaseSettings):
     WHISPER_MODEL: str = "large-v3-turbo"  # tiny, base, small, medium, large-v3, large-v3-turbo
     
     # TTS Configuration
-    TTS_PROVIDER: str = "coqui"  # coqui, elevenlabs, bark
+    # chatterbox: Resemble AI's open-source SOTA TTS (default, voice cloning + 23 langs)
+    TTS_PROVIDER: str = "chatterbox"
     TTS_VOICE: str = "default"
     
     # Security

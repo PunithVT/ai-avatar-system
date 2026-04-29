@@ -31,8 +31,13 @@ VOICE_INDEX = VOICE_DIR / "index.json"
 # Serialize concurrent index reads/writes to prevent corruption
 _index_lock = asyncio.Lock()
 
-MIN_DURATION_SECS = 5   # Minimum sample length accepted
-_ALLOWED_LANGUAGES = {"en", "es", "fr", "de", "it", "pt", "pl", "tr", "ru", "nl", "cs", "ar", "zh", "ja", "ko"}
+MIN_DURATION_SECS = 10  # Chatterbox recommends ≥10s reference audio for clean cloning
+# Chatterbox Multilingual supports 23 languages — keep this in sync with
+# https://www.resemble.ai/introducing-chatterbox-multilingual-open-source-tts-for-23-languages/
+_ALLOWED_LANGUAGES = {
+    "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja",
+    "ko", "ms", "nl", "no", "pl", "pt", "ru", "sv", "sw", "tr", "zh",
+}
 _NAME_MAX_LEN = 100
 
 
@@ -56,7 +61,7 @@ async def _save_index(data: list[dict]) -> None:
 
 @router.post("/clone")
 async def clone_voice(
-    audio: UploadFile = File(..., description="Audio sample (WAV/WebM/MP3, 5–30 seconds)"),
+    audio: UploadFile = File(..., description="Audio sample (WAV/WebM/MP3, 10–30 seconds)"),
     name: str = Form(..., description="Display name for the voice profile"),
     language: Optional[str] = Form("en"),
 ):
@@ -95,7 +100,8 @@ async def clone_voice(
             try:
                 await asyncio.to_thread(
                     subprocess.run,
-                    ["ffmpeg", "-y", "-i", str(raw_path), "-ar", "22050", "-ac", "1", str(wav_path)],
+                    # 24kHz mono — matches Chatterbox's recommended reference format
+                    ["ffmpeg", "-y", "-i", str(raw_path), "-ar", "24000", "-ac", "1", str(wav_path)],
                     capture_output=True,
                     check=True,
                     timeout=30,

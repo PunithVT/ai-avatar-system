@@ -47,7 +47,10 @@ scipy==1.12.0
 faster-whisper>=1.0.0
 
 # TTS
-coqui-tts>=0.24.0
+# Chatterbox by Resemble AI — fastest open-source TTS w/ voice cloning + 23 langs
+# (en, es, fr, de, it, pt, pl, tr, ru, nl, ar, zh, ja, ko, da, el, fi, he, hi,
+# ms, no, sv, sw). Replaces deprecated Coqui XTTS v2.
+chatterbox-tts>=0.1.4
 gtts==2.5.1
 pydub==0.25.1
 
