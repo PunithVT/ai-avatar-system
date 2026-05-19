@@ -22,11 +22,10 @@ from app.services.storage import storage_service
 from app.services.cache import cache_service
 from app.middleware.rate_limiter import RateLimitMiddleware
 from app.middleware.security import SecurityHeadersMiddleware, RequestLoggingMiddleware
+from app.logging_config import configure_logging
 
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure logging FIRST — every import below may log on module load.
+configure_logging()
 logger = logging.getLogger(__name__)
 
 # Initialize Sentry if DSN is configured

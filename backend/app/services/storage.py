@@ -111,11 +111,29 @@ class S3StorageService:
                           content_type: str = "application/octet-stream",
                           metadata: Optional[dict] = None) -> str:
         async with self.session.client("s3") as s3:
-            extra: dict = {"ContentType": content_type, "ACL": "public-read"}
+            # Private by default — keeps avatar images, voice references, and
+            # generated session videos from being world-readable via guessable
+            # URLs. Callers that need a public-facing link should call
+            # `presigned_url(key, ttl_seconds=...)` and pass the result to
+            # the client. CloudFront with origin-access can serve these too.
+            extra: dict = {"ContentType": content_type, "ACL": "private"}
             if metadata:
                 extra["Metadata"] = metadata
             await s3.put_object(Bucket=self.bucket_name, Key=key, Body=file_data, **extra)
         return self.get_url(key)
+
+    async def presigned_url(self, key: str, ttl_seconds: int = 3600) -> str:
+        """
+        Generate a time-limited signed URL for an S3 object. Used by the
+        WebSocket pipeline when handing video chunk URLs to the client —
+        clients get a short-lived token instead of a permanent reference.
+        """
+        # boto3's generate_presigned_url is sync but cheap (no network call).
+        return self.s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket_name, "Key": key},
+            ExpiresIn=ttl_seconds,
+        )
 
     async def download_file(self, key: str) -> bytes:
         async with self.session.client("s3") as s3:

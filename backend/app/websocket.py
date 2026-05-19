@@ -2,7 +2,9 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
+import stat
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +21,39 @@ from app.services.tts import tts_service
 
 logger = logging.getLogger(__name__)
 TMPDIR = Path(tempfile.gettempdir())
+
+# Owner-only file/dir modes — keep another user on a shared host from
+# eavesdropping on raw audio inputs or in-flight video chunks.
+_OWNER_ONLY_FILE = stat.S_IRUSR | stat.S_IWUSR              # 0o600
+_OWNER_ONLY_DIR = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR  # 0o700
+
+
+def _private_session_dir(session_id: str) -> Path:
+    """
+    Return (creating if needed) a per-session subdirectory of TMPDIR with
+    mode 0o700. Anything written inside is invisible to other UNIX users —
+    cheaper than chmod'ing each tmp file after creation.
+    """
+    d = TMPDIR / f"avatar-session-{session_id}"
+    d.mkdir(mode=_OWNER_ONLY_DIR, exist_ok=True)
+    try:
+        os.chmod(str(d), _OWNER_ONLY_DIR)
+    except OSError:
+        pass
+    return d
+
+
+def _write_private_bytes(path: Path, data: bytes) -> None:
+    """Atomically write bytes to `path` with file mode 0o600 (owner-only)."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _OWNER_ONLY_FILE)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(str(path), _OWNER_ONLY_FILE)
+    except OSError:
+        pass
 
 # Minimum sentence length (chars) to bother animating
 _MIN_SENTENCE_LEN = 8
@@ -145,6 +180,20 @@ class ConnectionManager:
             logger.warning(f"Could not read voice index: {e}")
         return None
 
+    async def _get_voice_entry(self, voice_id: str) -> Optional[dict]:
+        """Return the full voice-index entry (including `user_id`) for ownership checks."""
+        voice_index = Path("voice_profiles") / "index.json"
+        if not voice_index.exists():
+            return None
+        try:
+            raw = await asyncio.to_thread(voice_index.read_text)
+            for entry in json.loads(raw):
+                if entry["id"] == voice_id:
+                    return entry
+        except Exception as e:
+            logger.warning(f"Could not read voice index: {e}")
+        return None
+
     async def _resolve_local_image(self, avatar) -> str:
         """Return a local FS path to the avatar image, downloading from S3 if needed."""
         cache_path = TMPDIR / "avatars" / f"{avatar.id}.jpg"
@@ -168,6 +217,15 @@ class ConnectionManager:
     async def disconnect(self, session_id: str):
         self.active_connections.pop(session_id, None)
         self.session_data.pop(session_id, None)
+        # Best-effort wipe of the per-session temp dir to ensure no in-flight
+        # audio/video chunks linger on disk after the client disconnects.
+        session_dir = TMPDIR / f"avatar-session-{session_id}"
+        if session_dir.exists():
+            try:
+                import shutil
+                await asyncio.to_thread(shutil.rmtree, str(session_dir), True)
+            except Exception as e:
+                logger.warning(f"Could not clean session tmp dir for {session_id}: {e}")
         logger.info(f"WebSocket disconnected: {session_id}")
 
     async def send_message(self, session_id: str, message: dict):
@@ -247,7 +305,7 @@ class ConnectionManager:
     # ── handlers ──────────────────────────────────────────────────────────────
 
     async def handle_audio_input(self, session_id: str, audio_data: str):
-        tmp_audio = TMPDIR / f"{session_id}_input.webm"
+        tmp_audio = _private_session_dir(session_id) / "input.webm"
         try:
             await self.send_message(session_id, {
                 "type": "status", "message": "Transcribing audio…", "stage": "transcription"
@@ -264,7 +322,7 @@ class ConnectionManager:
                 await self.send_message(session_id, {"type": "error", "message": "Audio payload too large"})
                 return
 
-            await asyncio.to_thread(tmp_audio.write_bytes, raw)
+            await asyncio.to_thread(_write_private_bytes, tmp_audio, raw)
             text = await stt_service.transcribe(str(tmp_audio))
 
             if not text:
@@ -448,8 +506,9 @@ class ConnectionManager:
                 break  # client disconnected mid-stream
 
             job_id = uuid.uuid4().hex[:12]
-            tmp_audio = TMPDIR / f"{session_id}_{job_id}_audio.wav"
-            tmp_video = TMPDIR / f"{session_id}_{job_id}_video.mp4"
+            session_dir = _private_session_dir(session_id)
+            tmp_audio = session_dir / f"{job_id}_audio.wav"
+            tmp_video = session_dir / f"{job_id}_video.mp4"
 
             try:
                 await self.send_message(session_id, {
@@ -529,13 +588,27 @@ class ConnectionManager:
     async def set_voice_by_id(self, session_id: str, voice_id: str) -> bool:
         """
         Resolve a voice ID to its on-disk WAV and attach it to the session.
-        Returns True if the voice was found and assigned.
-        Accepts voice IDs only — raw filesystem paths are NEVER accepted from
-        WebSocket clients (path-disclosure / arbitrary-read risk).
+        Returns True if the voice was found, owned by the requester, and
+        assigned. Accepts voice IDs only — raw filesystem paths are NEVER
+        accepted from WebSocket clients (path-disclosure / arbitrary-read).
         """
         if session_id not in self.session_data:
             return False
-        wav = await self._get_voice_wav_path(voice_id)
+        entry = await self._get_voice_entry(voice_id)
+        if not entry:
+            return False
+        # Cross-tenant guard: only the voice's owner can attach it to their
+        # session. Otherwise user A could guess user B's voice UUID and
+        # surreptitiously use their cloned voice.
+        session_user = self.session_data[session_id].get("user_id")
+        voice_user = entry.get("user_id", "demo-user")
+        if session_user and voice_user != session_user:
+            logger.warning(
+                f"WS set_voice rejected: voice {voice_id} owned by "
+                f"{voice_user!r} but session belongs to {session_user!r}"
+            )
+            return False
+        wav = entry.get("wav_path")
         if not wav:
             return False
         self.session_data[session_id]["voice_wav"] = wav
