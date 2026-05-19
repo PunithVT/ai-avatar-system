@@ -130,7 +130,9 @@ async def login(
         result = await db.execute(select(User).where(User.email == form_data.username))
         user = result.scalar_one_or_none()
 
-        if not user or not verify_password(form_data.password, user.hashed_password):
+        # Reject empty passwords explicitly — the demo user is seeded with an
+        # empty hash and would otherwise become a passwordless backdoor.
+        if not form_data.password or not user or not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",

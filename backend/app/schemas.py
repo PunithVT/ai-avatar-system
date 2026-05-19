@@ -100,6 +100,25 @@ class ConversationResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AvatarRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class AvatarMetadataUpdate(BaseModel):
+    """Allowed editable metadata fields for an avatar.
+
+    Restrict to a known allowlist so users cannot stuff arbitrary keys into
+    the JSON column (which would otherwise let them shadow internal flags or
+    bloat the row).
+    """
+    system_prompt: Optional[str] = Field(default=None, max_length=8000)
+    personality: Optional[str] = Field(default=None, max_length=2000)
+    background_color: Optional[str] = Field(default=None, max_length=32)
+    animation_style: Optional[str] = Field(default=None, max_length=32)
+
+    model_config = {"extra": "forbid"}
+
+
 # Token Schema
 class Token(BaseModel):
     access_token: str

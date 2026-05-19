@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models import User, Avatar
-from app.schemas import AvatarResponse
+from app.schemas import AvatarResponse, AvatarRename, AvatarMetadataUpdate
 from app.services.storage import storage_service
 from app.services.avatar_processor import avatar_processor
 from app.api.v1.users import get_current_user
@@ -22,6 +22,14 @@ TMPDIR = Path(tempfile.gettempdir())
 
 def _user_id(current_user: Optional[User]) -> str:
     return current_user.id if current_user else "demo-user"
+
+
+def _validate_uuid(avatar_id: str) -> None:
+    """Reject anything that isn't a UUID to keep S3 keys + filesystem paths safe."""
+    try:
+        uuid.UUID(avatar_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid avatar ID")
 
 
 @router.post("/upload", response_model=AvatarResponse, status_code=status.HTTP_201_CREATED)
@@ -120,6 +128,7 @@ async def get_avatar(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
+    _validate_uuid(avatar_id)
     result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
     avatar = result.scalar_one_or_none()
     if not avatar:
@@ -132,11 +141,15 @@ async def get_avatar(
 @router.put("/{avatar_id}/voice", response_model=AvatarResponse)
 async def set_avatar_voice(
     avatar_id: str,
-    voice_id: str = Query(..., description="Voice profile ID to assign"),
+    voice_id: Optional[str] = Query(
+        default=None,
+        description="Voice profile ID to assign. Omit or pass an empty string to unassign.",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
-    """Assign a voice profile to an avatar (persisted for all future sessions)."""
+    """Assign (or clear) a voice profile on an avatar."""
+    _validate_uuid(avatar_id)
     result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
     avatar = result.scalar_one_or_none()
     if not avatar:
@@ -145,12 +158,14 @@ async def set_avatar_voice(
         raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
 
     try:
-        avatar.voice_id = voice_id if voice_id else None
+        normalized = (voice_id or "").strip() or None
+        avatar.voice_id = normalized
         await db.commit()
         await db.refresh(avatar)
-        logger.info(f"Avatar {avatar_id} voice set to: {voice_id!r}")
+        logger.info(f"Avatar {avatar_id} voice set to: {normalized!r}")
         return avatar
     except Exception as e:
+        await db.rollback()
         logger.error(f"Failed to set voice for avatar {avatar_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to update avatar voice")
 
@@ -158,11 +173,12 @@ async def set_avatar_voice(
 @router.patch("/{avatar_id}/metadata", response_model=AvatarResponse)
 async def update_avatar_metadata(
     avatar_id: str,
-    payload: dict,
+    payload: AvatarMetadataUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
-    """Merge arbitrary key/value pairs into avatar_metadata (e.g. system_prompt)."""
+    """Merge an allowlist of metadata fields into avatar_metadata."""
+    _validate_uuid(avatar_id)
     result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
     avatar = result.scalar_one_or_none()
     if not avatar:
@@ -177,14 +193,19 @@ async def update_avatar_metadata(
             existing = _json.loads(existing)
         except Exception:
             existing = {}
+
+    # Only merge fields the caller actually set (exclude_unset=True keeps the
+    # PATCH semantics — omitted fields are left untouched, not nulled out).
+    update_data = payload.model_dump(exclude_unset=True)
     try:
-        existing.update(payload)
+        existing.update(update_data)
         avatar.avatar_metadata = existing
         await db.commit()
         await db.refresh(avatar)
-        logger.info(f"Avatar {avatar_id} metadata updated: {list(payload.keys())}")
+        logger.info(f"Avatar {avatar_id} metadata updated: {list(update_data.keys())}")
         return avatar
     except Exception as e:
+        await db.rollback()
         logger.error(f"Failed to update metadata for avatar {avatar_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to update avatar metadata")
 
@@ -192,12 +213,13 @@ async def update_avatar_metadata(
 @router.patch("/{avatar_id}/name", response_model=AvatarResponse)
 async def rename_avatar(
     avatar_id: str,
-    payload: dict,
+    payload: AvatarRename,
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
     """Rename an avatar."""
-    name = (payload.get("name") or "").strip()
+    _validate_uuid(avatar_id)
+    name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name cannot be empty")
     result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
@@ -213,6 +235,7 @@ async def rename_avatar(
         logger.info(f"Avatar {avatar_id} renamed to: {name!r}")
         return avatar
     except Exception as e:
+        await db.rollback()
         logger.error(f"Failed to rename avatar {avatar_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to rename avatar")
 
@@ -223,6 +246,7 @@ async def delete_avatar(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
+    _validate_uuid(avatar_id)
     result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
     avatar = result.scalar_one_or_none()
     if not avatar:

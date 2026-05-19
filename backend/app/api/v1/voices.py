@@ -1,11 +1,14 @@
 """
 Voice management endpoints — clone, list, and delete voice profiles.
-Voice profiles are stored as WAV reference files on disk and referenced
-by ID when calling the TTS service.
+
+Voice profiles are stored as WAV reference files on disk plus an index.json
+metadata file. Each profile is owned by the user who created it (or `demo-user`
+in unauthenticated dev mode); the list/get/delete endpoints filter by owner so
+users cannot see or mutate someone else's voices.
 """
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 import asyncio
 import subprocess
 import uuid
@@ -19,6 +22,9 @@ import io
 
 from sqlalchemy import select, update
 
+from app.api.v1.users import get_current_user
+from app.models import User
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -31,7 +37,12 @@ VOICE_INDEX = VOICE_DIR / "index.json"
 # Serialize concurrent index reads/writes to prevent corruption
 _index_lock = asyncio.Lock()
 
-MIN_DURATION_SECS = 10  # Chatterbox recommends ≥10s reference audio for clean cloning
+# Chatterbox recommends ≥10s reference audio for clean cloning, and most
+# cloning quality plateaus well before 60s — anything longer just wastes disk
+# and creates a DoS vector for large uploads.
+MIN_DURATION_SECS = 10
+MAX_DURATION_SECS = 60
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB hard cap
 # Chatterbox Multilingual supports 23 languages — keep this in sync with
 # https://www.resemble.ai/introducing-chatterbox-multilingual-open-source-tts-for-23-languages/
 _ALLOWED_LANGUAGES = {
@@ -39,6 +50,10 @@ _ALLOWED_LANGUAGES = {
     "ko", "ms", "nl", "no", "pl", "pt", "ru", "sv", "sw", "tr", "zh",
 }
 _NAME_MAX_LEN = 100
+
+
+def _user_id(current_user: Optional[User]) -> str:
+    return current_user.id if current_user else "demo-user"
 
 
 async def _load_index() -> list[dict]:
@@ -59,15 +74,22 @@ async def _save_index(data: list[dict]) -> None:
         tmp.replace(VOICE_INDEX)
 
 
+def _owned(entry: dict, uid: str) -> bool:
+    """Treat legacy entries (no user_id) as belonging to demo-user."""
+    return entry.get("user_id", "demo-user") == uid
+
+
 @router.post("/clone")
 async def clone_voice(
-    audio: UploadFile = File(..., description="Audio sample (WAV/WebM/MP3, 10–30 seconds)"),
+    audio: UploadFile = File(..., description="Audio sample (WAV/WebM/MP3, 10–60 seconds)"),
     name: str = Form(..., description="Display name for the voice profile"),
     language: Optional[str] = Form("en"),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     """
-    Accept an audio sample and create a named voice profile that the TTS
-    service can later use as a speaker reference for voice cloning.
+    Accept an audio sample and create a named voice profile owned by the
+    current user. The TTS service can later use the stored WAV as a speaker
+    reference for zero-shot voice cloning.
     """
     name = name.strip()
     if not name or len(name) > _NAME_MAX_LEN:
@@ -82,6 +104,11 @@ async def clone_voice(
 
     if len(audio_bytes) < 1000:
         raise HTTPException(status_code=400, detail="Audio sample too short or empty")
+    if len(audio_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Audio file too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+        )
 
     # Convert to WAV if needed and save as reference file
     try:
@@ -133,27 +160,35 @@ async def clone_voice(
                 status_code=400,
                 detail=f"Sample too short ({duration}s). Please record at least {MIN_DURATION_SECS} seconds."
             )
+        if duration > MAX_DURATION_SECS:
+            wav_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sample too long ({duration}s). Maximum {MAX_DURATION_SECS} seconds allowed."
+            )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Voice cloning storage error")
-        raise HTTPException(status_code=500, detail=f"Failed to process audio: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process audio")
 
     # Persist to index
+    uid = _user_id(current_user)
     entry = {
         "id": voice_id,
         "name": name,
         "language": lang,
         "wav_path": str(wav_path),
         "duration": duration,
+        "user_id": uid,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     index = await _load_index()
     index.append(entry)
     await _save_index(index)
 
-    logger.info(f"Voice profile created: {name!r} ({voice_id}, {duration}s)")
+    logger.info(f"Voice profile created: {name!r} ({voice_id}, {duration}s, user={uid})")
     return JSONResponse({
         "id": voice_id,
         "name": name,
@@ -164,27 +199,66 @@ async def clone_voice(
 
 
 @router.get("/")
-async def list_voices():
-    """List all custom voice profiles."""
-    return await _load_index()
+async def list_voices(current_user: Optional[User] = Depends(get_current_user)):
+    """List voice profiles owned by the current user."""
+    uid = _user_id(current_user)
+    return [
+        {k: v for k, v in e.items() if k != "wav_path"}
+        for e in await _load_index()
+        if _owned(e, uid)
+    ]
 
 
 @router.get("/{voice_id}")
-async def get_voice(voice_id: str):
-    """Get a single voice profile by ID."""
+async def get_voice(
+    voice_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """Get a single voice profile by ID (must own it)."""
+    uid = _user_id(current_user)
     for entry in await _load_index():
         if entry["id"] == voice_id:
-            return entry
+            if not _owned(entry, uid):
+                raise HTTPException(status_code=403, detail="Not authorised to access this voice")
+            return {k: v for k, v in entry.items() if k != "wav_path"}
+    raise HTTPException(status_code=404, detail="Voice profile not found")
+
+
+@router.get("/{voice_id}/preview")
+async def preview_voice(
+    voice_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """Stream the original reference WAV so the UI can preview a cloned voice."""
+    uid = _user_id(current_user)
+    for entry in await _load_index():
+        if entry["id"] == voice_id:
+            if not _owned(entry, uid):
+                raise HTTPException(status_code=403, detail="Not authorised to access this voice")
+            wav = Path(entry["wav_path"])
+            if not wav.exists():
+                raise HTTPException(status_code=404, detail="WAV file missing")
+            return FileResponse(
+                str(wav),
+                media_type="audio/wav",
+                filename=f"{entry['name']}.wav",
+            )
     raise HTTPException(status_code=404, detail="Voice profile not found")
 
 
 @router.delete("/{voice_id}")
-async def delete_voice(voice_id: str):
-    """Delete a voice profile, its audio file, and clear any avatar references."""
+async def delete_voice(
+    voice_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """Delete a voice profile (owner only), its audio file, and clear any avatar references."""
+    uid = _user_id(current_user)
     index = await _load_index()
     entry = next((e for e in index if e["id"] == voice_id), None)
     if not entry:
         raise HTTPException(status_code=404, detail="Voice profile not found")
+    if not _owned(entry, uid):
+        raise HTTPException(status_code=403, detail="Not authorised to delete this voice")
 
     # Remove WAV file
     Path(entry["wav_path"]).unlink(missing_ok=True)
@@ -210,22 +284,3 @@ async def delete_voice(voice_id: str):
 
     logger.info(f"Voice profile deleted: {voice_id} (cleared from {cleared} avatar(s))")
     return {"deleted": voice_id, "avatars_cleared": cleared}
-
-
-@router.get("/{voice_id}/wav_path")
-async def get_voice_wav_path(voice_id: str) -> str:
-    """
-    Internal helper: return the filesystem path to the voice WAV file
-    so that the TTS service can pass it as speaker_wav.
-    Raises 404 if the voice or its file no longer exists.
-    """
-    for entry in await _load_index():
-        if entry["id"] == voice_id:
-            wav = Path(entry["wav_path"])
-            if not wav.exists():
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"WAV file for voice {voice_id} is missing from disk"
-                )
-            return entry["wav_path"]
-    raise HTTPException(status_code=404, detail="Voice profile not found")

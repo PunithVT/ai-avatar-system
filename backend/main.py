@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from sqlalchemy import text
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
+from sqlalchemy import text, select
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -9,11 +9,12 @@ from pathlib import Path
 import logging
 from datetime import datetime, timezone
 
+from jose import JWTError, jwt
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import settings
 from app.database import engine, Base, AsyncSessionLocal
-from app.models import User
+from app.models import User, Session as SessionModel
 from app.api.v1 import avatars, conversations, messages, sessions, users
 from app.api.v1 import voices
 from app.websocket import websocket_manager
@@ -65,23 +66,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Cache service init failed: {e}")
 
-    # Seed demo user (needed for unauthenticated dev uploads)
-    try:
-        from sqlalchemy import select
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(User).where(User.id == "demo-user"))
-            if result.scalar_one_or_none() is None:
-                session.add(User(
-                    id="demo-user",
-                    email="demo@localhost",
-                    username="demo",
-                    hashed_password="",
-                    full_name="Demo User",
-                ))
-                await session.commit()
-                logger.info("Demo user created")
-    except Exception as e:
-        logger.warning(f"Could not seed demo user: {e}")
+    # Seed demo user ONLY in DEBUG/development mode. An empty-password user
+    # in production would be a critical auth bypass.
+    if settings.DEBUG:
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(select(User).where(User.id == "demo-user"))
+                if result.scalar_one_or_none() is None:
+                    session.add(User(
+                        id="demo-user",
+                        email="demo@localhost",
+                        username="demo",
+                        hashed_password="",  # disabled — login route rejects empty passwords
+                        full_name="Demo User",
+                    ))
+                    await session.commit()
+                    logger.info("Demo user created (DEBUG mode)")
+        except Exception as e:
+            logger.warning(f"Could not seed demo user: {e}")
 
     # Mount local uploads directory so the browser can fetch images/videos
     if getattr(settings, "USE_LOCAL_STORAGE", True):
@@ -138,11 +140,13 @@ app.include_router(voices.router,        prefix="/api/v1/voices",        tags=["
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error", "error": str(exc)},
-    )
+    logger.error(f"Unhandled exception on {request.url.path}: {exc}", exc_info=True)
+    content: dict = {"detail": "Internal server error"}
+    if settings.DEBUG:
+        # Only surface the raw exception text in development — in production
+        # it can leak API keys, DB DSNs, file paths, etc.
+        content["error"] = str(exc)
+    return JSONResponse(status_code=500, content=content)
 
 
 @app.get("/")
@@ -205,9 +209,61 @@ async def health_check():
     return health
 
 
+async def _verify_ws_session(session_id: str, token: str | None) -> str | None:
+    """
+    Validate the WebSocket handshake. Returns the user_id that owns the session
+    or None if the session is unknown / token invalid / token user doesn't own
+    the session.
+
+    In DEBUG mode (single-user dev) we fall back to the seeded `demo-user`
+    when no token is supplied.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(SessionModel).where(SessionModel.id == session_id)
+            )
+            sess = result.scalar_one_or_none()
+            if not sess:
+                return None
+
+            if token:
+                try:
+                    payload = jwt.decode(
+                        token,
+                        settings.JWT_SECRET_KEY,
+                        algorithms=[settings.JWT_ALGORITHM],
+                    )
+                    user_id = payload.get("sub")
+                except JWTError:
+                    return None
+                if user_id and user_id == sess.user_id:
+                    return user_id
+                return None
+
+            # No token: only allowed for the demo session in DEBUG mode
+            if settings.DEBUG and sess.user_id == "demo-user":
+                return "demo-user"
+            return None
+    except Exception as e:
+        logger.error(f"WS session verification failed: {e}")
+        return None
+
+
 @app.websocket("/ws/session/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    await websocket_manager.connect(session_id, websocket)
+async def websocket_endpoint(
+    websocket: WebSocket,
+    session_id: str,
+    token: str | None = Query(default=None),
+):
+    user_id = await _verify_ws_session(session_id, token)
+    if user_id is None:
+        # 4401 is a custom WebSocket close code we use for auth failures
+        await websocket.close(code=4401)
+        logger.warning(f"WS auth rejected for session {session_id}")
+        return
+
+    await websocket_manager.connect(session_id, websocket, user_id=user_id)
     try:
         while True:
             data = await websocket.receive_json()
@@ -228,9 +284,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await websocket_manager.handle_text_input(session_id, text_data)
 
             elif msg_type == "set_voice":
-                voice_wav = data.get("voice_wav_path")
-                if voice_wav:
-                    await websocket_manager.set_voice(session_id, voice_wav)
+                # Accept voice_id only — never a raw filesystem path from the client.
+                voice_id = data.get("voice_id")
+                if not voice_id or not isinstance(voice_id, str):
+                    await websocket.send_json({"type": "error", "message": "Missing voice_id"})
+                    continue
+                ok = await websocket_manager.set_voice_by_id(session_id, voice_id)
+                if not ok:
+                    await websocket.send_json({"type": "error", "message": "Voice profile not found"})
 
             elif msg_type == "set_language":
                 lang = data.get("language", "en")

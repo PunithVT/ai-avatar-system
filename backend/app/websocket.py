@@ -23,6 +23,13 @@ TMPDIR = Path(tempfile.gettempdir())
 # Minimum sentence length (chars) to bother animating
 _MIN_SENTENCE_LEN = 8
 
+# Per-message input cap. Long inputs waste LLM tokens and create DoS surface.
+MAX_TEXT_INPUT_LEN = 4000
+
+# Conversation memory cap — keep the most recent N user/assistant pairs.
+# System prompt is stored separately so it survives trimming.
+MAX_CONTEXT_MESSAGES = 60
+
 
 class ConnectionManager:
     """Manage WebSocket connections and the real-time avatar pipeline."""
@@ -33,7 +40,7 @@ class ConnectionManager:
 
     # ── connection lifecycle ──────────────────────────────────────────────────
 
-    async def connect(self, session_id: str, websocket: WebSocket):
+    async def connect(self, session_id: str, websocket: WebSocket, user_id: Optional[str] = None):
         await websocket.accept()
         self.active_connections[session_id] = websocket
         self.session_data[session_id] = {
@@ -44,11 +51,11 @@ class ConnectionManager:
             "voice_wav": None,
             "language": "en",
             "system_prompt": None,
-            "user_id": None,
+            "user_id": user_id,
             "connected_at": datetime.now(timezone.utc),
         }
         await self._load_session_data(session_id)
-        logger.info(f"WebSocket connected: {session_id}")
+        logger.info(f"WebSocket connected: {session_id} (user={user_id})")
 
     async def _load_session_data(self, session_id: str):
         try:
@@ -68,7 +75,9 @@ class ConnectionManager:
                     return
 
                 self.session_data[session_id]["avatar_id"] = session.avatar_id
-                self.session_data[session_id]["user_id"] = session.user_id
+                # Trust DB owner over caller-supplied claim
+                if session.user_id:
+                    self.session_data[session_id]["user_id"] = session.user_id
 
                 avatar = session.avatar
                 if avatar:
@@ -104,8 +113,8 @@ class ConnectionManager:
         if not voice_index.exists():
             return None
         try:
-            text = await asyncio.to_thread(voice_index.read_text)
-            for entry in json.loads(text):
+            raw = await asyncio.to_thread(voice_index.read_text)
+            for entry in json.loads(raw):
                 if entry["id"] == voice_id:
                     return entry.get("wav_path")
         except Exception as e:
@@ -156,12 +165,17 @@ class ConnectionManager:
             })
 
             try:
-                raw = base64.b64decode(audio_data)
+                raw = base64.b64decode(audio_data, validate=False)
             except Exception:
                 await self.send_message(session_id, {"type": "error", "message": "Invalid audio data"})
                 return
 
-            tmp_audio.write_bytes(raw)
+            # 50 MB hard cap so a malicious client cannot OOM the server
+            if len(raw) > 50 * 1024 * 1024:
+                await self.send_message(session_id, {"type": "error", "message": "Audio payload too large"})
+                return
+
+            await asyncio.to_thread(tmp_audio.write_bytes, raw)
             text = await stt_service.transcribe(str(tmp_audio))
 
             if not text:
@@ -173,7 +187,7 @@ class ConnectionManager:
 
         except Exception as e:
             logger.error(f"Audio error [{session_id}]: {e}")
-            await self.send_message(session_id, {"type": "error", "message": f"Audio processing failed: {e}"})
+            await self.send_message(session_id, {"type": "error", "message": "Audio processing failed"})
         finally:
             tmp_audio.unlink(missing_ok=True)
 
@@ -186,14 +200,26 @@ class ConnectionManager:
              in parallel with ongoing LLM generation (first chunk starts before
              the LLM finishes the full response)
         """
+        text = (text or "").strip()
+        if not text:
+            await self.send_message(session_id, {"type": "error", "message": "Empty message"})
+            return
+        if len(text) > MAX_TEXT_INPUT_LEN:
+            await self.send_message(session_id, {
+                "type": "error",
+                "message": f"Message too long ({len(text)} chars). Limit is {MAX_TEXT_INPUT_LEN}.",
+            })
+            return
+
         try:
             data = self.session_data.get(session_id, {})
-            messages = data.get("messages", [])
+            messages: list[dict] = data.get("messages", [])
             messages.append({"role": "user", "content": text})
 
-            # Context window trimming: keep first + last 60 messages to control cost
-            if len(messages) > 61:
-                messages = messages[:1] + messages[-60:]  # type: ignore[index]
+            # Cap the conversation window. The system prompt is passed
+            # separately to the LLM so we don't need to keep it in `messages`.
+            if len(messages) > MAX_CONTEXT_MESSAGES:
+                messages = messages[-MAX_CONTEXT_MESSAGES:]
 
             system_prompt = data.get("system_prompt")
 
@@ -220,7 +246,7 @@ class ConnectionManager:
 
         except Exception as e:
             logger.error(f"Text error [{session_id}]: {e}")
-            await self.send_message(session_id, {"type": "error", "message": f"Processing failed: {e}"})
+            await self.send_message(session_id, {"type": "error", "message": "Processing failed"})
 
     # ── streaming pipeline ────────────────────────────────────────────────────
 
@@ -318,7 +344,7 @@ class ConnectionManager:
             if session_id not in self.active_connections:
                 break  # client disconnected mid-stream
 
-            job_id = uuid.uuid4().hex[:12]  # type: ignore[index]
+            job_id = uuid.uuid4().hex[:12]
             tmp_audio = TMPDIR / f"{session_id}_{job_id}_audio.wav"
             tmp_video = TMPDIR / f"{session_id}_{job_id}_video.mp4"
 
@@ -355,7 +381,7 @@ class ConnectionManager:
                     "video_url": video_url,
                     "text": sentence,
                 })
-                chunk_index = chunk_index + 1  # type: ignore[operator]
+                chunk_index = chunk_index + 1
                 sent_any = True
                 logger.info(f"Chunk {chunk_index} ready [{session_id}]")
 
@@ -382,17 +408,35 @@ class ConnectionManager:
         if session_id in self.session_data:
             self.session_data[session_id]["avatar_id"] = avatar_id
 
-    async def set_voice(self, session_id: str, voice_wav_path: str):
-        """Attach a cloned-voice WAV file to the session for TTS synthesis."""
-        if session_id in self.session_data:
-            self.session_data[session_id]["voice_wav"] = voice_wav_path
-            logger.info(f"Voice set [{session_id}]: {voice_wav_path}")
+    async def set_voice_by_id(self, session_id: str, voice_id: str) -> bool:
+        """
+        Resolve a voice ID to its on-disk WAV and attach it to the session.
+        Returns True if the voice was found and assigned.
+        Accepts voice IDs only — raw filesystem paths are NEVER accepted from
+        WebSocket clients (path-disclosure / arbitrary-read risk).
+        """
+        if session_id not in self.session_data:
+            return False
+        wav = await self._get_voice_wav_path(voice_id)
+        if not wav:
+            return False
+        self.session_data[session_id]["voice_wav"] = wav
+        logger.info(f"Voice set [{session_id}]: voice_id={voice_id}")
+        return True
 
     async def set_language(self, session_id: str, language: str):
-        """Set TTS language for the session."""
+        """Set TTS language for the session. Falls back to 'en' on unknown codes."""
+        # Match voices.py allowed list
+        allowed = {
+            "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it",
+            "ja", "ko", "ms", "nl", "no", "pl", "pt", "ru", "sv", "sw", "tr", "zh",
+        }
+        lang = (language or "en").lower()
+        if lang not in allowed:
+            lang = "en"
         if session_id in self.session_data:
-            self.session_data[session_id]["language"] = language
-            logger.info(f"Language set [{session_id}]: {language}")
+            self.session_data[session_id]["language"] = lang
+            logger.info(f"Language set [{session_id}]: {lang}")
 
 
 websocket_manager = ConnectionManager()
