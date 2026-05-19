@@ -36,6 +36,7 @@ def _private_session_dir(session_id: str) -> Path:
     """
     d = TMPDIR / f"avatar-session-{session_id}"
     d.mkdir(mode=_OWNER_ONLY_DIR, exist_ok=True)
+    # If the dir already existed with a looser mode, tighten it now.
     try:
         os.chmod(str(d), _OWNER_ONLY_DIR)
     except OSError:
@@ -45,6 +46,9 @@ def _private_session_dir(session_id: str) -> Path:
 
 def _write_private_bytes(path: Path, data: bytes) -> None:
     """Atomically write bytes to `path` with file mode 0o600 (owner-only)."""
+    # os.open lets us set the mode at create time so there's no readable window
+    # between create and chmod. O_CREAT|O_TRUNC|O_WRONLY is the standard "open
+    # for writing, truncate, create if missing" combination.
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _OWNER_ONLY_FILE)
     try:
         os.write(fd, data)
@@ -76,6 +80,13 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         self.session_data: Dict[str, dict] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
+        # Serializes connect/disconnect/cleanup-snapshot so the stale-session
+        # reaper can't race a fresh connection for the same session id.
+        self._mutation_lock = asyncio.Lock()
+        # Per-session handle to the currently-running turn task, used for
+        # barge-in: when a fresh user input arrives we cancel the in-flight
+        # task instead of queueing.
+        self._active_turns: Dict[str, asyncio.Task] = {}
 
     # ── connection lifecycle ──────────────────────────────────────────────────
 
@@ -122,12 +133,16 @@ class ConnectionManager:
                 # Rehydrate the LLM context window from persisted messages so
                 # a reconnect (refresh, network blip, etc.) resumes the same
                 # conversation instead of starting fresh. We pull the most
-                # recent MAX_CONTEXT_MESSAGES rows to bound memory.
+                # recent MAX_CONTEXT_MESSAGES rows to bound memory. Order by
+                # (created_at, id) so ties (when several rows share a
+                # sub-millisecond timestamp on bulk insert) are still stable
+                # — message IDs are monotonic UUIDs assigned in insertion order
+                # per session, so they make a reliable secondary key.
                 hist_result = await db.execute(
                     select(Message.role, Message.content)
                     .where(Message.session_id == session_id)
                     .where(Message.role.in_(("user", "assistant")))
-                    .order_by(Message.created_at.desc())
+                    .order_by(Message.created_at.desc(), Message.id.desc())
                     .limit(MAX_CONTEXT_MESSAGES)
                 )
                 # Reverse to chronological order for the LLM
@@ -215,10 +230,16 @@ class ConnectionManager:
         return str(cache_path)
 
     async def disconnect(self, session_id: str):
+        # Cancel any in-flight LLM/TTS/animation task for this session so it
+        # doesn't keep churning after the client is gone (wasted tokens + GPU).
+        task = self._active_turns.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+
         self.active_connections.pop(session_id, None)
         self.session_data.pop(session_id, None)
-        # Best-effort wipe of the per-session temp dir to ensure no in-flight
-        # audio/video chunks linger on disk after the client disconnects.
+        # Best-effort wipe of the per-session temp dir. We use shutil.rmtree
+        # via to_thread because rmtree on a large dir can briefly block.
         session_dir = TMPDIR / f"avatar-session-{session_id}"
         if session_dir.exists():
             try:
@@ -227,6 +248,25 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning(f"Could not clean session tmp dir for {session_id}: {e}")
         logger.info(f"WebSocket disconnected: {session_id}")
+
+    async def interrupt_active_turn(self, session_id: str) -> bool:
+        """
+        Cancel any in-flight turn for this session ("barge-in"). Returns
+        True if a turn was actually interrupted. Used when fresh user audio
+        arrives mid-response — modern voice-AI UX expects sub-100 ms cutoff
+        so the user doesn't keep hearing the previous response while talking.
+        """
+        task = self._active_turns.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+            # Tell the client to stop playing the queued video chunks too —
+            # otherwise they'd keep arriving from the buffer.
+            await self.send_message(session_id, {
+                "type": "interrupted",
+                "message": "Previous response interrupted",
+            })
+            return True
+        return False
 
     async def send_message(self, session_id: str, message: dict):
         ws = self.active_connections.get(session_id)
@@ -305,6 +345,11 @@ class ConnectionManager:
     # ── handlers ──────────────────────────────────────────────────────────────
 
     async def handle_audio_input(self, session_id: str, audio_data: str):
+        # Barge-in: if a previous turn is still streaming TTS/video, kill it
+        # before starting a new one. This matches the 2026 voice-AI UX
+        # convention — users expect the assistant to stop talking the moment
+        # they start.
+        await self.interrupt_active_turn(session_id)
         tmp_audio = _private_session_dir(session_id) / "input.webm"
         try:
             await self.send_message(session_id, {
@@ -346,6 +391,9 @@ class ConnectionManager:
           3. Consumer coroutine picks up each sentence and runs TTS+animation
              in parallel with ongoing LLM generation (first chunk starts before
              the LLM finishes the full response)
+
+        The actual work runs inside a tracked task so a subsequent user input
+        (text or audio) can cancel it cleanly for barge-in.
         """
         text = (text or "").strip()
         if not text:
@@ -358,6 +406,25 @@ class ConnectionManager:
             })
             return
 
+        # If a previous turn for this session is still streaming, cut it off.
+        await self.interrupt_active_turn(session_id)
+
+        async def _run_turn() -> None:
+            await self._handle_text_input_inner(session_id, text)
+
+        task = asyncio.create_task(_run_turn(), name=f"turn-{session_id}")
+        self._active_turns[session_id] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info(f"Turn for {session_id} cancelled (barge-in or disconnect)")
+        finally:
+            # Only clear the slot if it still points at us (a new turn may
+            # have already replaced it during cancellation).
+            if self._active_turns.get(session_id) is task:
+                self._active_turns.pop(session_id, None)
+
+    async def _handle_text_input_inner(self, session_id: str, text: str):
         started_at = datetime.now(timezone.utc)
 
         try:
@@ -632,16 +699,26 @@ class ConnectionManager:
     # ── stale session cleanup ─────────────────────────────────────────────────
 
     async def cleanup_stale(self) -> int:
-        """Reap sessions whose websocket is gone or that have been idle too long."""
+        """
+        Reap sessions whose websocket is gone or that have been idle too long.
+
+        We snapshot the candidate list under a lock, then drop the lock while
+        calling `disconnect()` for each (disconnect involves async file I/O
+        and shouldn't be serialized). The lock prevents the snapshot from
+        racing with a fresh `connect()` for the same session id — without it,
+        the cleanup loop could observe a half-built session and rip it down
+        right after the new connection finished setting up.
+        """
         now = datetime.now(timezone.utc)
-        stale: list[str] = []
-        for sid, data in list(self.session_data.items()):
-            last = data.get("last_activity") or data.get("connected_at") or now
-            if sid not in self.active_connections:
-                stale.append(sid)
-                continue
-            if (now - last).total_seconds() > STALE_SESSION_TTL_SECS:
-                stale.append(sid)
+        async with self._mutation_lock:
+            stale: list[str] = []
+            for sid, data in self.session_data.items():
+                last = data.get("last_activity") or data.get("connected_at") or now
+                if sid not in self.active_connections:
+                    stale.append(sid)
+                    continue
+                if (now - last).total_seconds() > STALE_SESSION_TTL_SECS:
+                    stale.append(sid)
         for sid in stale:
             await self.disconnect(sid)
         return len(stale)

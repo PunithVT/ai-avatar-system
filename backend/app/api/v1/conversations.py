@@ -242,16 +242,32 @@ async def summarize_conversation(
             "or 'The user'. No preamble.\n\n"
             f"{transcript}"
         )
+        from app.services.llm import LLMRateLimited, LLMAuthError, LLMUnavailable, LLMError
         try:
             summary = await llm_service.generate_response(
                 messages=[{"role": "user", "content": summary_prompt}],
                 system_prompt="You write concise neutral summaries.",
             )
-        except Exception as e:
-            logger.error(f"LLM summary call failed: {e}")
+        except LLMRateLimited:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Summary service rate-limited — try again in a moment",
+            )
+        except LLMAuthError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Summary service is misconfigured",
+            )
+        except LLMUnavailable:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Summary service unavailable",
+            )
+        except LLMError as e:
+            logger.error("summarize_failed", extra={"reason": str(e)})
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Summary service error",
             )
 
         conversation.summary = (summary or "").strip()

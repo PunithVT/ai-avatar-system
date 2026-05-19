@@ -146,13 +146,23 @@ async def end_session(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to end session")
 
 
+_EXPORT_MAX_MESSAGES = 5000
+
+
 @router.get("/{session_id}/export")
 async def export_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
-    """Export a session and its messages as a downloadable JSON file."""
+    """
+    Export a session and its messages as a downloadable JSON file.
+
+    Capped at _EXPORT_MAX_MESSAGES so a 50k-message session can't be used
+    as a DoS amplifier (5 MB response per request × repeated calls).
+    For larger sessions the user should narrow the export by date range
+    once that endpoint exists.
+    """
     try:
         result = await db.execute(select(Session).where(Session.id == session_id))
         session = result.scalar_one_or_none()
@@ -162,9 +172,15 @@ async def export_session(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised")
 
         msgs_result = await db.execute(
-            select(Message).where(Message.session_id == session_id).order_by(Message.created_at)
+            select(Message)
+            .where(Message.session_id == session_id)
+            .order_by(Message.created_at, Message.id)
+            .limit(_EXPORT_MAX_MESSAGES + 1)  # +1 so we can detect truncation
         )
         messages = msgs_result.scalars().all()
+        truncated = len(messages) > _EXPORT_MAX_MESSAGES
+        if truncated:
+            messages = messages[:_EXPORT_MAX_MESSAGES]
 
         payload = {
             "session": {
@@ -186,9 +202,12 @@ async def export_session(
                 for m in messages
             ],
             "exported_at": datetime.now(timezone.utc).isoformat(),
+            "truncated": truncated,
+            "max_messages": _EXPORT_MAX_MESSAGES if truncated else None,
         }
         headers = {
             "Content-Disposition": f'attachment; filename="session-{session.id[:8]}.json"',
+            "Cache-Control": "no-store",
         }
         return JSONResponse(content=payload, headers=headers)
     except HTTPException:
