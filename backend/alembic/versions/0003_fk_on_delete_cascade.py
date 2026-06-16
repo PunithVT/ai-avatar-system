@@ -36,6 +36,12 @@ _FKS = [
 
 
 def upgrade() -> None:
+    # SQLite's unnamed FKs (created via plain sa.ForeignKey) aren't reachable by
+    # name through batch mode, and the ORM's delete-orphan cascades already give
+    # SQLite the same behavior at the application level — so this migration is a
+    # Postgres-only DDL change.
+    if op.get_bind().dialect.name == "sqlite":
+        return
     for table, constraint, column, ref_table in _FKS:
         op.drop_constraint(constraint, table, type_="foreignkey")
         op.create_foreign_key(
@@ -44,6 +50,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == "sqlite":
+        return
     for table, constraint, column, ref_table in _FKS:
         op.drop_constraint(constraint, table, type_="foreignkey")
         op.create_foreign_key(constraint, table, ref_table, [column], ["id"])
