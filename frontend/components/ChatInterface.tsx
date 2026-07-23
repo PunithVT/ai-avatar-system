@@ -245,14 +245,24 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
     isPlayingRef.current = true
     setShowVideo(true)
     if (videoRef.current) {
-      videoRef.current.src = next.url
-      videoRef.current.muted = isMuted
-      // A rejected play() (autoplay policy, decode error) must not strand the
-      // queue — skip to the next chunk so playback can't hang on one bad clip.
-      videoRef.current.play().catch(() => {
-        if (chunkQueueRef.current.length > 0) playNextChunk()
-        else { isPlayingRef.current = false; setShowVideo(false) }
-      })
+      const video = videoRef.current
+      video.src = next.url
+      // Always START muted — browsers always allow muted autoplay, even
+      // outside a user gesture. Starting unmuted gets silently rejected by
+      // Chrome/Edge once the LLM+TTS+animation pipeline (several seconds) has
+      // eaten the brief post-gesture window that permits unmuted autoplay —
+      // which would needlessly skip this clip via the catch below. Unmuting an
+      // element that's ALREADY playing needs no fresh gesture, so we restore
+      // the user's mute choice right after play() resolves.
+      video.muted = true
+      video.play()
+        .then(() => { video.muted = isMuted })
+        // A rejected play() (decode error, bad clip) must not strand the
+        // queue — skip to the next chunk so playback can't hang on one bad clip.
+        .catch(() => {
+          if (chunkQueueRef.current.length > 0) playNextChunk()
+          else { isPlayingRef.current = false; setShowVideo(false) }
+        })
     }
     // Preload the next chunk in queue (if any)
     const upcoming = chunkQueueRef.current[0]
@@ -460,8 +470,15 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
         break
 
       case 'status':
-        setIsProcessing(true)
-        setStatusMsg(data.message || 'Processing…')
+        // The backend sends an "Animating…" status before EVERY sentence
+        // chunk, not just the first. Once a chunk has already started playing,
+        // re-showing the full-screen spinner on every subsequent chunk just
+        // covers the video that's still going — the user sees the spinner
+        // "stuck" and never the avatar. Only block the view pre-first-chunk.
+        if (!isPlayingRef.current) {
+          setIsProcessing(true)
+          setStatusMsg(data.message || 'Processing…')
+        }
         break
 
       case 'error':

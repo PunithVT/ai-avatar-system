@@ -85,6 +85,7 @@ class TTSService:
             provider = _LEGACY_PROVIDER_ALIASES[provider]
         self.provider = provider
         self.model = None
+        self._init_lock = asyncio.Lock()
 
     def _check_cuda(self) -> bool:
         try:
@@ -93,26 +94,37 @@ class TTSService:
             return False
 
     async def initialize(self):
-        """Load the Chatterbox model (downloaded from HuggingFace on first run)."""
+        """Load the Chatterbox model (downloaded from HuggingFace on first run).
+
+        Guarded by a lock — without it, concurrent WebSocket sessions each
+        call initialize() before the first one finishes, and they all race
+        to download/load the same multi-GB model at once, fighting over the
+        same HuggingFace cache lock files (worse on Windows, where the cache
+        already runs in degraded no-symlink mode).
+        """
         if self.model is not None:
             return
 
-        if self.provider != "chatterbox":
-            raise ValueError(f"Unsupported TTS provider: {self.provider}")
+        async with self._init_lock:
+            if self.model is not None:  # re-check: another coroutine may have just finished
+                return
 
-        try:
-            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+            if self.provider != "chatterbox":
+                raise ValueError(f"Unsupported TTS provider: {self.provider}")
 
-            device = "cuda" if self._check_cuda() else "cpu"
-            logger.info(f"Loading Chatterbox multilingual TTS on {device}...")
-            self.model = await asyncio.to_thread(
-                ChatterboxMultilingualTTS.from_pretrained, device=device
-            )
-            logger.info(f"Chatterbox loaded (sr={self.model.sr}, device={device})")
+            try:
+                from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-        except Exception as e:
-            logger.error(f"Failed to load Chatterbox: {e}")
-            raise
+                device = "cuda" if self._check_cuda() else "cpu"
+                logger.info(f"Loading Chatterbox multilingual TTS on {device}...")
+                self.model = await asyncio.to_thread(
+                    ChatterboxMultilingualTTS.from_pretrained, device=device
+                )
+                logger.info(f"Chatterbox loaded (sr={self.model.sr}, device={device})")
+
+            except Exception as e:
+                logger.error(f"Failed to load Chatterbox: {e}")
+                raise
 
     async def synthesize(
         self,

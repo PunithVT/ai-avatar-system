@@ -66,6 +66,15 @@ export const useStore = create<AppState>()(
     }),
     {
       name: 'avatar-system-storage',
+      // Don't auto-rehydrate from localStorage during client module init —
+      // that happens synchronously, BEFORE React's first client render, so
+      // if a persisted value (e.g. theme) differs from the default used in
+      // the server-rendered HTML, the client's first render mismatches it
+      // and React throws "Hydration failed". Rehydrating manually after
+      // mount (see Providers component) means the first client render
+      // matches the server, and the persisted value applies in a normal
+      // post-hydration update instead.
+      skipHydration: true,
       partialize: (state) => ({
         token: state.token,
         user: state.user,

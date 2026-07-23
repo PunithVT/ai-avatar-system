@@ -38,6 +38,7 @@ class AvatarAnimator:
         self._worker_proc: Optional[asyncio.subprocess.Process] = None
         self._worker_lock = asyncio.Lock()
         self._worker_env: dict = {}
+        self._worker_stderr_path: Optional[Path] = None
 
         if self.device == "cuda":
             gpu_name = torch.cuda.get_device_name(0)
@@ -130,15 +131,25 @@ class AvatarAnimator:
         worker_script = self._resolve_worker_script(musetalk_dir)
 
         logger.info("Starting persistent MuseTalk worker (loading models once)…")
+        # stderr -> a file, NOT a pipe. The worker's model loading (tqdm progress,
+        # HF "Loading weights" bars, library warnings) writes a lot of stderr
+        # output; with stderr=PIPE and nobody ever draining it, the OS pipe
+        # buffer (~64KB on Windows) fills up and the worker process BLOCKS on
+        # its next stderr write — indefinitely, since nothing reads it. That
+        # looked like "loading is just slow" but was actually a silent deadlock
+        # that always ended in a timeout. File writes never block on a reader.
+        self._worker_stderr_path = musetalk_dir / "worker_stderr.log"
+        stderr_file = open(self._worker_stderr_path, "ab")
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             str(worker_script),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=stderr_file,
             cwd=str(musetalk_dir),
             env=self._worker_env,
         )
+        stderr_file.close()  # child has its own fd now; safe to close our handle
 
         # Send init config — include float16 flag so worker can optimise for GPU
         init_msg = (
@@ -156,8 +167,11 @@ class AvatarAnimator:
         proc.stdin.write(init_msg.encode())
         await proc.stdin.drain()
 
-        # Wait for READY — GPU loads much faster (~60s) vs CPU (~5-10 min first time)
-        model_load_timeout = 120 if self.device == "cuda" else 600
+        # Wait for READY — GPU loads much faster (~60s) vs CPU (~5-10 min first time).
+        # Bumped from 120s: cold-cache disk I/O for ~8.8GB of weights (UNet, VAE,
+        # Whisper, BiSeNet) right after a fresh worker spawn was measured timing
+        # out at 120s on this machine even on GPU.
+        model_load_timeout = 300 if self.device == "cuda" else 600
         logger.info(f"Waiting for worker to finish loading models (timeout={model_load_timeout}s)…")
         try:
             ready_line = await asyncio.wait_for(proc.stdout.readline(), timeout=model_load_timeout)
@@ -166,10 +180,10 @@ class AvatarAnimator:
             raise RuntimeError("MuseTalk worker timed out while loading models")
 
         if not ready_line.decode().strip().startswith("READY"):
-            stderr_out = await proc.stderr.read()
             proc.kill()
+            stderr_out = self._worker_stderr_path.read_text(errors="replace")[-4000:]
             raise RuntimeError(
-                f"Worker failed to start. stderr:\n{stderr_out.decode(errors='replace')}"
+                f"Worker failed to start. stderr (tail):\n{stderr_out}"
             )
 
         logger.info("MuseTalk worker ready — models loaded")
