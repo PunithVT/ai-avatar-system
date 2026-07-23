@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "claude-sonnet-4-6"
     LLM_TEMPERATURE: float = 0.7
     LLM_MAX_TOKENS: int = 2000
+    # For OpenAI-compatible reasoning ("thinking") models — notably Ollama
+    # cloud models like glm-*:cloud / kimi-*:cloud — set to "none" to disable
+    # the reasoning phase. Without it those models emit their text as
+    # `reasoning` and leave `content` empty, so the real-time pipeline gets
+    # nothing. Forwarded verbatim in the request body; leave empty for normal
+    # (non-reasoning) models so nothing is sent.
+    LLM_REASONING_EFFORT: str = ""
 
     # Avatar Engine
     AVATAR_ENGINE: str = "musetalk"  # musetalk, simple

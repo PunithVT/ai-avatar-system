@@ -105,6 +105,10 @@ class LLMService:
         self.model = settings.LLM_MODEL
         self.temperature = settings.LLM_TEMPERATURE
         self.max_tokens = settings.LLM_MAX_TOKENS
+        # Opt-in reasoning cap for OpenAI-compatible "thinking" models (e.g.
+        # Ollama cloud glm-*:cloud / kimi-*:cloud). "none" disables reasoning
+        # so they return normal `content`. Empty → not sent (default behavior).
+        self.reasoning_effort = settings.LLM_REASONING_EFFORT or None
 
         if self.provider == "anthropic":
             self.client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -180,6 +184,18 @@ class LLMService:
 
         raise LLMError("Anthropic response contained no text block")
 
+    def _openai_extra(self) -> dict:
+        """Extra request params for the OpenAI-compatible path.
+
+        `reasoning_effort` is forwarded via `extra_body` (not a named kwarg) so
+        it lands in the raw request body regardless of SDK version and is a
+        no-op for servers that ignore it. Needed for Ollama cloud thinking
+        models — see LLM_REASONING_EFFORT.
+        """
+        if self.reasoning_effort:
+            return {"extra_body": {"reasoning_effort": self.reasoning_effort}}
+        return {}
+
     async def _generate_openai(
         self,
         messages: List[Dict[str, str]],
@@ -194,6 +210,7 @@ class LLMService:
                 messages=messages,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                **self._openai_extra(),
             )
         except Exception as e:
             mapped = _map_openai_exception(e)
@@ -253,6 +270,7 @@ class LLMService:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 stream=True,
+                **self._openai_extra(),
             )
             async for chunk in stream:
                 content = chunk.choices[0].delta.content
