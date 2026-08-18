@@ -585,8 +585,8 @@ MIT © 2026 — see [LICENSE](LICENSE) for details.
 
 <br/><br/>
 
-<a href="https://star-history.com/#PunithVT/ai-avatar-system&Date">
-  <img src="https://api.star-history.com/svg?repos=PunithVT/ai-avatar-system&type=Date" width="600" alt="Star History Chart" />
+<a href="https://star-history.dera.page/#PunithVT/ai-avatar-system&Date">
+  <img src="https://star-history.dera.page/svg?repos=PunithVT/ai-avatar-system&type=Date" width="600" alt="Star History Chart" />
 </a>
 
 <br/><br/>
