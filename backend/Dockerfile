@@ -3,8 +3,22 @@ FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-# Install Python 3.10 + system dependencies
-RUN apt-get update && apt-get install -y \
+# Install Python 3.10 + system dependencies.
+#
+# Retries/timeouts are not optional here: this layer pulls ~270 packages
+# (ffmpeg's dependency tree is most of it) over plain HTTP from
+# archive.ubuntu.com, and a single dropped connection aborts a build that
+# takes ~15 minutes to reach this point. A CI run failed exactly that way on
+# one .deb after 868 seconds.
+#
+# Deliberately NOT using --no-install-recommends: it would shrink the image,
+# but ffmpeg's recommended packages carry optional codecs, and a missing codec
+# fails at runtime in the video pipeline rather than at build time — the worst
+# place to discover it.
+RUN apt-get update -o Acquire::Retries=5 \
+    && apt-get install -y \
+    -o Acquire::Retries=5 \
+    -o Acquire::http::Timeout=30 \
     python3.10 \
     python3.10-dev \
     python3-pip \
