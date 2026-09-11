@@ -273,11 +273,24 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # Reports advisories without blocking the merge, and deliberately not
+      # via `|| true` — that swallowed the exit code so the step always looked
+      # green. continue-on-error keeps the failure visible in the checks list
+      # while letting the PR land.
+      #
+      # It cannot be made blocking yet. torch (11 advisories) and transformers
+      # (13) only have fixes in releases the MuseTalk lip-sync pipeline cannot
+      # run against — MuseTalk needs the torch 2.2 / transformers 4.37
+      # generation — so a green audit is unreachable until that pipeline is
+      # ported. The app-layer packages with reachable fixes have been upgraded
+      # (python-jose, python-multipart, python-dotenv, python-socketio,
+      # requests, sentry-sdk); fastapi/starlette remain because they are a
+      # coupled major bump that needs its own change.
+      #
+      # Make this blocking once the ML stack can move, so new advisories in
+      # application dependencies fail the build.
       - name: Run pip-audit
-        # This used to end in `|| true`, so the job passed no matter what the
-        # audit found — the badge was green by construction. Failing the job is
-        # the whole point; add targeted --ignore-vuln entries (with a comment
-        # explaining each) when a finding is genuinely not applicable.
+        continue-on-error: true
         run: |
           pip install pip-audit
           pip-audit -r backend/requirements.txt
