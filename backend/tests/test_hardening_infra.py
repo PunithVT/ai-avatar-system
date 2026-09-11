@@ -96,14 +96,31 @@ async def test_health_returns_503_when_a_dependency_is_down(client: AsyncClient,
     monkeypatch.setattr(main, "engine", _Boom())
     r = await client.get("/health")
     assert r.status_code == 503
-    assert r.json()["status"] == "degraded"
+    assert r.json()["status"] == "unhealthy"
     assert r.json()["services"]["database"] == "disconnected"
 
 
-async def test_health_is_200_when_healthy(client: AsyncClient):
+async def test_health_is_200_when_reachable(client: AsyncClient):
+    """
+    A reachable instance serves traffic even when misconfigured.
+
+    "degraded" is the state for a config problem — CI, for instance, runs
+    with no LLM API key. Returning 503 for that would turn a misconfiguration
+    into a full outage by pulling every replica from rotation.
+    """
     r = await client.get("/health")
     assert r.status_code == 200
+    assert r.json()["status"] in ("healthy", "degraded")
     assert r.json()["services"]["database"] == "connected"
+
+
+async def test_missing_llm_key_degrades_but_keeps_serving(client: AsyncClient, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    r = await client.get("/health")
+    assert r.status_code == 200, "a missing API key must not take the instance out of rotation"
+    assert r.json()["status"] == "degraded"
+    assert "missing ANTHROPIC_API_KEY" in r.json()["services"]["llm"]
 
 
 # ── middleware ordering ──────────────────────────────────────────────────

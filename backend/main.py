@@ -175,13 +175,21 @@ async def root():
 @app.get("/health")
 async def health_check(response: Response):
     """
-    Liveness/readiness probe.
+    Liveness/readiness probe with three states:
 
-    Returns 503 when any dependency is down. Previously this always replied
-    200 with `{"status": "degraded"}` in the body, so Docker healthchecks,
-    Kubernetes probes and load-balancer target groups — all of which look at
-    the status code, not the payload — kept routing traffic to an instance
-    that could not reach Postgres or Redis.
+      healthy   — everything reachable                        -> 200
+      degraded  — a soft/configuration problem, still serving -> 200
+      unhealthy — a hard dependency is down                   -> 503
+
+    Only Postgres and Redis are hard dependencies. This used to always reply
+    200, even with `{"status": "degraded"}` in the body, so Docker
+    healthchecks, Kubernetes probes and load-balancer target groups — all of
+    which read the status code, not the payload — kept routing traffic to an
+    instance that could not reach its database.
+
+    A missing LLM API key is deliberately NOT a 503: it is a config error the
+    operator needs to see, but taking every replica out of rotation for it
+    would turn a misconfiguration into a full outage.
     """
     services: dict[str, str] = {}
     health: dict[str, object] = {
@@ -198,7 +206,7 @@ async def health_check(response: Response):
         services["database"] = "connected"
     except Exception:
         services["database"] = "disconnected"
-        health["status"] = "degraded"
+        health["status"] = "unhealthy"  # hard dependency
 
     # Check Redis
     try:
@@ -209,7 +217,7 @@ async def health_check(response: Response):
             services["redis"] = "not configured"
     except Exception:
         services["redis"] = "disconnected"
-        health["status"] = "degraded"
+        health["status"] = "unhealthy"  # hard dependency
 
     # GPU / avatar engine info
     try:
@@ -233,12 +241,12 @@ async def health_check(response: Response):
         services["llm"] = (
             "ready (anthropic)" if settings.ANTHROPIC_API_KEY else "missing ANTHROPIC_API_KEY"
         )
-        if not settings.ANTHROPIC_API_KEY:
-            health["status"] = "degraded"
+        if not settings.ANTHROPIC_API_KEY and health["status"] == "healthy":
+            health["status"] = "degraded"  # misconfigured, not down
     elif settings.LLM_PROVIDER == "openai":
         services["llm"] = "ready (openai)" if settings.OPENAI_API_KEY else "missing OPENAI_API_KEY"
-        if not settings.OPENAI_API_KEY:
-            health["status"] = "degraded"
+        if not settings.OPENAI_API_KEY and health["status"] == "healthy":
+            health["status"] = "degraded"  # misconfigured, not down
     elif settings.LLM_PROVIDER == "ollama":
         # Local OpenAI-compatible server — no API key needed.
         services["llm"] = (
@@ -246,7 +254,8 @@ async def health_check(response: Response):
         )
     else:
         services["llm"] = f"unknown provider: {settings.LLM_PROVIDER}"
-        health["status"] = "degraded"
+        if health["status"] == "healthy":
+            health["status"] = "degraded"  # misconfigured, not down
 
     # STT / TTS model state — lazy-loaded, so just report whether warmed
     try:
@@ -261,7 +270,8 @@ async def health_check(response: Response):
     health["avatar_engine"] = settings.AVATAR_ENGINE
     health["active_ws_sessions"] = len(websocket_manager.active_connections)
 
-    if health["status"] != "healthy":
+    # Only a hard-dependency failure takes the instance out of rotation.
+    if health["status"] == "unhealthy":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return health
 
