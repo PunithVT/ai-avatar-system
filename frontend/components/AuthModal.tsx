@@ -106,10 +106,24 @@ export function AuthModal() {
     }
   }
 
-  const continueAsGuest = () => {
-    // Set a synthetic guest user — backend falls back to "demo-user" when no JWT
-    setAuth('guest', { id: 'demo-user', email: 'guest@local', username: 'Guest' })
-    toast('Continuing as guest — data may not persist', { icon: '👤' })
+  const continueAsGuest = async () => {
+    // Ask the backend for a real (throwaway) account instead of faking a
+    // client-side user. Guests used to share one global `demo-user` row,
+    // which meant every guest could see every other guest's avatars and
+    // transcripts — and it failed outright in production, where that row is
+    // never seeded. A per-guest identity is what makes the "private to you"
+    // promise below actually true.
+    setIsLoading(true)
+    try {
+      const data = await api.createGuest()
+      const profile = await api.getProfile()
+      setAuth(data.access_token, profile)
+      toast('Continuing as guest — sign up to keep your data', { icon: '👤' })
+    } catch (err: unknown) {
+      toast.error((err as ApiError)?.response?.data?.detail || 'Could not start a guest session')
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -267,13 +281,14 @@ export function AuthModal() {
         {/* Guest mode */}
         <button
           onClick={continueAsGuest}
-          className="btn-secondary w-full py-2.5 rounded-xl text-sm"
+          disabled={isLoading}
+          className="btn-secondary w-full py-2.5 rounded-xl text-sm disabled:opacity-60"
         >
           <User size={15} />
           Continue as Guest
         </button>
         <p className="text-xs text-center text-gray-600 mt-3">
-          Guest data is scoped to this browser session only.
+          Guest data is private to you and is deleted after 48 hours of inactivity.
         </p>
       </div>
     </div>

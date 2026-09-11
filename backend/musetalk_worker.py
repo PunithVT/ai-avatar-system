@@ -18,17 +18,25 @@ Lifecycle:
 
 All paths may be absolute or relative to cwd (the MuseTalk repo root).
 """
-import sys, os, json, copy, pickle, shutil, traceback
-from typing import Any, List
-import cv2, numpy as np, torch
-from omegaconf import OmegaConf
-from transformers import WhisperModel
 
+import copy
+import json
+import os
+import pickle
+import shutil
+import sys
+import traceback
+from typing import Any, List
+
+import cv2
+import numpy as np
+import torch
+from musetalk.utils.audio_processor import AudioProcessor
 from musetalk.utils.blending import get_image
 from musetalk.utils.face_parsing import FaceParsing
-from musetalk.utils.audio_processor import AudioProcessor
-from musetalk.utils.utils import get_file_type, get_video_fps, datagen, load_all_model
-from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs, coord_placeholder
+from musetalk.utils.preprocessing import coord_placeholder, get_landmark_and_bbox, read_imgs
+from musetalk.utils.utils import datagen, load_all_model
+from transformers import WhisperModel
 
 FPS = 25
 EXTRA_MARGIN = 10
@@ -43,10 +51,10 @@ def _reply(obj: dict):
 
 
 def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device):
-    image_path   = job["image"]
-    audio_path   = job["audio"]
-    output_path  = job["output"]
-    coord_cache  = job.get("coord_cache")
+    image_path = job["image"]
+    audio_path = job["audio"]
+    output_path = job["output"]
+    coord_cache = job.get("coord_cache")
 
     input_img_list = [image_path]
 
@@ -72,7 +80,11 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
     weight_dtype = unet.model.dtype
     whisper_input_features, librosa_length = audio_processor.get_audio_feature(audio_path)
     whisper_chunks = audio_processor.get_whisper_chunk(
-        whisper_input_features, device, weight_dtype, whisper, librosa_length,
+        whisper_input_features,
+        device,
+        weight_dtype,
+        whisper,
+        librosa_length,
         fps=FPS,
         audio_padding_length_left=AUDIO_PAD_L,
         audio_padding_length_right=AUDIO_PAD_R,
@@ -91,8 +103,8 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
     if not input_latent_list:
         raise RuntimeError("No valid face crops produced")
 
-    frame_list_cycle: List[Any]  = frame_list  + list(reversed(frame_list))   # type: ignore[operator]
-    coord_list_cycle: List[Any]  = coord_list  + list(reversed(coord_list))   # type: ignore[operator]
+    frame_list_cycle: List[Any] = frame_list + list(reversed(frame_list))  # type: ignore[operator]
+    coord_list_cycle: List[Any] = coord_list + list(reversed(coord_list))  # type: ignore[operator]
     latent_list_cycle: List[Any] = input_latent_list + list(reversed(input_latent_list))
 
     # ── UNet inference ───────────────────────────────────────────────────────
@@ -116,11 +128,11 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
     os.makedirs(frames_dir, exist_ok=True)
     for i, res_frame in enumerate(res_frame_list):
         bbox = coord_list_cycle[i % len(coord_list_cycle)]
-        ori  = copy.deepcopy(frame_list_cycle[i % len(frame_list_cycle)])
+        ori = copy.deepcopy(frame_list_cycle[i % len(frame_list_cycle)])
         x1, y1, x2, y2 = bbox
         y2 = min(y2 + EXTRA_MARGIN, ori.shape[0])
         try:
-            res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
+            res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
         except Exception:
             continue
         combined = get_image(ori, res_frame, [x1, y1, x2, y2], mode="jaw", fp=fp)
@@ -128,9 +140,11 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
 
     # ── assemble video ───────────────────────────────────────────────────────
     tmp_vid = output_path + ".tmp.mp4"
-    os.system(f"ffmpeg -y -v warning -r {FPS} -f image2 "
-              f"-i {frames_dir}/%08d.png "
-              f"-vcodec libx264 -vf format=yuv420p -crf 18 {tmp_vid}")
+    os.system(
+        f"ffmpeg -y -v warning -r {FPS} -f image2 "
+        f"-i {frames_dir}/%08d.png "
+        f"-vcodec libx264 -vf format=yuv420p -crf 18 {tmp_vid}"
+    )
     os.system(f"ffmpeg -y -v warning -i {audio_path} -i {tmp_vid} {output_path}")
     shutil.rmtree(frames_dir)
     os.remove(tmp_vid)
@@ -153,14 +167,14 @@ def main():
 
     # float16 on GPU = ~2× faster via Tensor Cores (A10G / L4 / V100 all support it)
     if use_float16 and device.type == "cuda":
-        pe         = pe.half()
-        vae.vae    = vae.vae.half()
+        pe = pe.half()
+        vae.vae = vae.vae.half()
         unet.model = unet.model.half()
         sys.stderr.write("INFO: float16 enabled — ~2× faster on GPU\n")
         sys.stderr.flush()
 
-    pe         = pe.to(device)
-    vae.vae    = vae.vae.to(device)
+    pe = pe.to(device)
+    vae.vae = vae.vae.to(device)
     unet.model = unet.model.to(device)
 
     weight_dtype = unet.model.dtype

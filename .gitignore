@@ -34,7 +34,9 @@ build/
 *.tsbuildinfo
 
 # Lock files
-package-lock.json
+# package-lock.json is deliberately NOT ignored: committing it is what makes
+# `npm ci` (and therefore reproducible installs in CI and production images)
+# possible. Without it every build silently re-resolves the dependency tree.
 yarn.lock
 pnpm-lock.yaml
 

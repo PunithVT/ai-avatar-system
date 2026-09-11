@@ -7,6 +7,10 @@ Usage:
     python scripts/seed_demo.py                 # 3 demo avatars
     python scripts/seed_demo.py --with-voices   # + a cloned demo voice each
     python scripts/seed_demo.py --api http://localhost:8000
+    python scripts/seed_demo.py --token "$JWT"  # seed into a real account
+
+With no --token the script claims a throwaway guest account and seeds into
+that, so it works against a fresh install with no signup step.
 
 Avatars use AI-generated faces from thispersondoesnotexist.com (no real
 person, no copyright). If that service is unreachable, a stylized placeholder
@@ -111,12 +115,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--api", default="http://localhost:8000", help="Backend base URL")
     ap.add_argument("--with-voices", action="store_true", help="Also clone a demo voice")
-    ap.add_argument("--token", default=None, help="Bearer token (omit for DEBUG demo-user mode)")
+    ap.add_argument(
+        "--token",
+        default=None,
+        help="Bearer token. Omitted, the script creates a throwaway guest account.",
+    )
     args = ap.parse_args()
 
     s = requests.Session()
-    if args.token:
-        s.headers["Authorization"] = f"Bearer {args.token}"
 
     # Sanity: backend reachable?
     try:
@@ -124,6 +130,25 @@ def main() -> int:
         print(f"Backend OK ({health.get('environment')}, status={health.get('status')})")
     except Exception as e:
         sys.exit(f"Backend not reachable at {args.api} — is it running? ({e})")
+
+    # Every resource endpoint requires an authenticated identity — there is no
+    # anonymous fallback to a shared demo account any more. With no token
+    # supplied, claim a guest account so the script still works out of the box;
+    # the seeded avatars then belong to that guest and are reaped with it.
+    if args.token:
+        s.headers["Authorization"] = f"Bearer {args.token}"
+    else:
+        try:
+            r = s.post(f"{args.api}/api/v1/users/guest", timeout=15)
+            r.raise_for_status()
+            s.headers["Authorization"] = f"Bearer {r.json()['access_token']}"
+            print("Using a throwaway guest account (pass --token to seed a real one)")
+        except Exception as e:
+            sys.exit(
+                f"Could not create a guest account ({e}).\n"
+                f"Either enable guests (GUEST_ACCOUNTS_ENABLED=true) or pass "
+                f"--token with a bearer token from POST /api/v1/users/login."
+            )
 
     existing = {a["name"] for a in s.get(f"{args.api}/api/v1/avatars/", timeout=15).json()}
 

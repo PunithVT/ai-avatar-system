@@ -1,4 +1,5 @@
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -176,7 +177,11 @@ async def login(
     not readable by JS, so XSS can't steal it).
     """
     try:
-        result = await db.execute(select(User).where(User.email == form_data.username))
+        # Registration lower-cases the address before storing it, so the
+        # lookup has to match — otherwise typing your email back with the
+        # capitalisation you signed up with would fail to find the account.
+        email = form_data.username.strip().lower()
+        result = await db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
 
         # Reject empty passwords explicitly — the demo user is seeded with an
@@ -207,6 +212,50 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Login failed"
         )
+
+
+@router.post("/guest", response_model=Token, status_code=status.HTTP_201_CREATED)
+async def create_guest(response: Response, db: AsyncSession = Depends(get_db)):
+    """
+    Mint a throwaway account for "Continue as Guest" and return its JWT.
+
+    Guests get a real (if anonymous) user row rather than sharing one global
+    account. That is what makes the UI's promise true: every ownership check
+    in the API compares against this row, so one guest can never see
+    another's avatars, sessions or transcripts.
+
+    The row carries an unusable password hash, so the account can only ever
+    be reached through the token issued here — there is no password to guess
+    and no way to log into it later. Guests are reaped by the
+    `cleanup_guest_accounts` task once idle past GUEST_RETENTION_HOURS.
+    """
+    if not settings.GUEST_ACCOUNTS_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Guest access is disabled on this deployment",
+        )
+
+    # Collision-proof identifiers: the `guest-` prefix is what the reaper and
+    # the UI both key off, and the uuid4 suffix keeps email/username unique.
+    marker = uuid.uuid4().hex
+    user = User(
+        id=f"guest-{marker}",
+        email=f"guest-{marker}@guests.example.com",
+        username=f"guest-{marker[:12]}",
+        full_name="Guest",
+        # "*" is not a valid bcrypt hash, so verify_password can never match
+        # it — the account is unreachable via /login by construction.
+        hashed_password="*",
+        is_guest=True,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    access_token = create_access_token(data={"sub": user.id})
+    _set_auth_cookie(response, access_token)
+    logger.info(f"Guest account created: {user.id}")
+    return Token(access_token=access_token, token_type="bearer")
 
 
 @router.post("/logout")

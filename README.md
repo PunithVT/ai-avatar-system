@@ -357,15 +357,32 @@ curl -X POST http://localhost:8000/api/v1/voices/clone \
 ```bash
 POST /api/v1/users/register   { "email": "...", "username": "...", "password": "..." }
 POST /api/v1/users/login      form: username=... password=...   → { "access_token": "..." }
+POST /api/v1/users/guest      (no body)                         → { "access_token": "..." }
+POST /api/v1/users/logout     clears the httpOnly auth cookie
 
-# All protected routes:
+# Every resource route requires an identity — pass the bearer token:
 Authorization: Bearer <access_token>
+# ...or rely on the httpOnly cookie that /login and /guest set for browsers.
 ```
+
+`/guest` backs the UI's **Continue as Guest** button. It creates a real but
+anonymous account, so a guest's avatars and transcripts are scoped to them
+alone — guests never share data with each other. Guest accounts have no
+usable password (they are reachable only via the token above) and are deleted
+after `GUEST_RETENTION_HOURS` of inactivity by the `cleanup_guest_accounts`
+task. Set `GUEST_ACCOUNTS_ENABLED=false` to require sign-up.
+
+Registration rules: passwords are 8–128 characters, usernames are 3–39
+characters of `[A-Za-z0-9_-]` (must start and end alphanumeric), and email
+addresses are normalised to lower case so `User@x.com` and `user@x.com` are
+the same account.
 
 ### Avatars
 
 ```
 POST   /api/v1/avatars/upload        Upload photo (multipart: file + name)
+                                     limits: MAX_UPLOAD_SIZE (413 if over),
+                                     ALLOWED_EXTENSIONS, name ≤ 200 chars
 GET    /api/v1/avatars/              List avatars
 DELETE /api/v1/avatars/{id}          Delete avatar
 PUT    /api/v1/avatars/{id}/voice    Assign voice to avatar

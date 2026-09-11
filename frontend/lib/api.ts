@@ -11,8 +11,10 @@ function readToken(): string | null {
     if (!stored) return null
     const { state } = JSON.parse(stored)
     const token = state?.token
-    // Treat the synthetic guest token as "no auth" — the backend falls
-    // back to demo-user when no Authorization header is present.
+    // Guests hold a real JWT now (POST /api/v1/users/guest), so there is no
+    // longer a synthetic 'guest' sentinel to filter out. The old sentinel is
+    // still discarded so a browser holding stale persisted state re-registers
+    // as a guest instead of sending an unusable token forever.
     if (!token || token === 'guest') return null
     return token
   } catch {
@@ -77,6 +79,16 @@ export const api = {
     const response = await apiClient.post('/api/v1/users/login', formData, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     })
+    return response.data
+  },
+
+  /**
+   * Start an anonymous session. The backend creates a real (throwaway) user
+   * row and returns its JWT, so a guest's avatars and transcripts are scoped
+   * to them alone rather than pooled into one shared account.
+   */
+  createGuest: async () => {
+    const response = await apiClient.post('/api/v1/users/guest')
     return response.data
   },
 

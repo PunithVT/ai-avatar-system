@@ -136,9 +136,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if cache_service.redis is not None:
             try:
                 return await self._consume_redis(identity)
+            except _RateLimited:
+                # A hit limit is the ANSWER, not a backend failure. This must
+                # re-raise before the generic handler below: _RateLimited is an
+                # Exception subclass, so `except Exception` used to swallow it
+                # and fall through to the in-process buckets, whose counters
+                # start empty. The effective limit became 2x the configured
+                # rate (Redis allowed N, then local allowed another N) and
+                # every rejection was mislogged as "Redis unavailable".
+                raise
             except Exception as e:
-                # If Redis hiccups, fall through to local — better degraded
-                # than 500ing every request.
+                # If Redis genuinely hiccups, fall through to local — better
+                # degraded than 500ing every request.
                 logger.warning(f"Redis rate-limit unavailable, falling back to in-process: {e}")
 
         return self._consume_local(identity)

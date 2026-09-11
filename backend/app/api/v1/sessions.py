@@ -1,13 +1,13 @@
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import get_current_user
+from app.api.v1.users import require_current_user
 from app.database import get_db
 from app.models import Avatar, Message, Session, User
 from app.schemas import SessionCreate, SessionResponse
@@ -17,15 +17,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _user_id(current_user: Optional[User]) -> str:
-    return current_user.id if current_user else "demo-user"
-
-
 @router.post("/create", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
 async def create_session(
     session_data: SessionCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Create a new conversation session for the current user."""
     try:
@@ -41,7 +37,7 @@ async def create_session(
             )
 
         # Ensure user owns this avatar (or is demo)
-        uid = _user_id(current_user)
+        uid = current_user.id
         if avatar.user_id != uid:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised to use this avatar"
@@ -75,13 +71,13 @@ async def list_sessions(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """List sessions belonging to the current user."""
     try:
         result = await db.execute(
             select(Session)
-            .where(Session.user_id == _user_id(current_user))
+            .where(Session.user_id == current_user.id)
             .offset(skip)
             .limit(limit)
             .order_by(Session.started_at.desc())
@@ -98,7 +94,7 @@ async def list_sessions(
 async def get_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Get session by ID (must belong to current user)."""
     try:
@@ -108,7 +104,7 @@ async def get_session(
         if not session:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
-        if session.user_id != _user_id(current_user):
+        if session.user_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not authorised to access this session",
@@ -128,7 +124,7 @@ async def get_session(
 async def end_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """End an active session."""
     try:
@@ -138,7 +134,7 @@ async def end_session(
         if not session:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
-        if session.user_id != _user_id(current_user):
+        if session.user_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised to end this session"
             )
@@ -170,7 +166,7 @@ _EXPORT_MAX_MESSAGES = 5000
 async def export_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """
     Export a session and its messages as a downloadable JSON file.
@@ -185,7 +181,7 @@ async def export_session(
         session = result.scalar_one_or_none()
         if not session:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-        if session.user_id != _user_id(current_user):
+        if session.user_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised")
 
         msgs_result = await db.execute(
@@ -241,7 +237,7 @@ async def export_session(
 async def delete_session(
     session_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Delete a session (must belong to current user)."""
     try:
@@ -251,7 +247,7 @@ async def delete_session(
         if not session:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
-        if session.user_id != _user_id(current_user):
+        if session.user_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not authorised to delete this session",

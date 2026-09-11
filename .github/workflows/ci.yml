@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main, develop]
+  push:
+    branches: [main]
 
 env:
   PYTHON_VERSION: '3.10'
@@ -45,10 +47,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: backend/requirements-dev.txt
 
       - name: Install linters
-        run: pip install ruff
+        # Pinned via requirements-dev.txt so a new ruff release cannot turn
+        # this job red on code nobody touched.
+        run: pip install -r requirements-dev.txt
 
       - name: Ruff lint
         run: ruff check .
@@ -140,13 +144,42 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: frontend/package.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        # `npm ci` installs exactly the tree in package-lock.json and fails if
+        # the lockfile and manifest disagree. `npm install` re-resolved on every
+        # run, so CI could pass against dependency versions no one had tested.
+        run: npm ci
 
       - name: ESLint
         run: npm run lint
+
+  # ── Frontend typecheck ──────────────────────────────────────────────────
+  frontend-typecheck:
+    name: Frontend Typecheck
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `next build` does typecheck, but it also needs env vars and takes far
+      # longer. Running tsc on its own gives a fast, unambiguous type signal.
+      - name: Typecheck
+        run: npm run typecheck
 
   # ── Frontend build ──────────────────────────────────────────────────────
   frontend-build:
@@ -164,10 +197,13 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: frontend/package.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        # `npm ci` installs exactly the tree in package-lock.json and fails if
+        # the lockfile and manifest disagree. `npm install` re-resolved on every
+        # run, so CI could pass against dependency versions no one had tested.
+        run: npm ci
 
       - name: Build
         run: npm run build
@@ -179,7 +215,7 @@ jobs:
   # Runs only after lint passes; skipped jobs are treated as success.
   docker-build:
     name: Docker Build
-    needs: [changes, backend-lint, frontend-lint]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-typecheck]
     if: |
       always() &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true') &&
@@ -211,6 +247,10 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Run pip-audit
+        # This used to end in `|| true`, so the job passed no matter what the
+        # audit found — the badge was green by construction. Failing the job is
+        # the whole point; add targeted --ignore-vuln entries (with a comment
+        # explaining each) when a finding is genuinely not applicable.
         run: |
           pip install pip-audit
-          pip-audit -r backend/requirements.txt --ignore-vuln PYSEC-2024-* || true
+          pip-audit -r backend/requirements.txt
