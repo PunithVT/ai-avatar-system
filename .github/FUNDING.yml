@@ -1,0 +1,22 @@
+# Renders the "Sponsor" button on the repository page and in the sidebar.
+#
+# IMPORTANT: the github: entry below stays inert until GitHub Sponsors is
+# actually enabled for the account. Enrolment cannot be done from a config
+# file — complete it at https://github.com/sponsors (identity verification,
+# payout details via Stripe Connect, and a tax form). Once the listing is
+# live, this file needs no further change.
+#
+# Uncomment and fill in any of the other platforms you actually hold an
+# account on; leave the rest out rather than guessing handles, since a wrong
+# value renders a broken link on the repo page.
+
+github: [PunithVT]
+
+# ko_fi:            # Ko-fi username, e.g. punithvt
+# buy_me_a_coffee:  # Buy Me a Coffee username
+# patreon:          # Patreon username
+# open_collective:  # Open Collective slug
+# liberapay:        # Liberapay username
+# polar:            # Polar username
+# thanks_dev:       # thanks.dev username
+# custom: ['https://your-donation-page.example']
