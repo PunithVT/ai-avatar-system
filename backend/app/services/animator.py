@@ -182,9 +182,7 @@ class AvatarAnimator:
         if not ready_line.decode().strip().startswith("READY"):
             proc.kill()
             stderr_out = self._worker_stderr_path.read_text(errors="replace")[-4000:]
-            raise RuntimeError(
-                f"Worker failed to start. stderr (tail):\n{stderr_out}"
-            )
+            raise RuntimeError(f"Worker failed to start. stderr (tail):\n{stderr_out}")
 
         logger.info("MuseTalk worker ready — models loaded")
         self._worker_proc = proc

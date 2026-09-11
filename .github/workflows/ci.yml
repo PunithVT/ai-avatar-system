@@ -3,10 +3,13 @@ name: CI
 on:
   pull_request:
     branches: [main, develop]
+  push:
+    branches: [main]
 
 env:
   PYTHON_VERSION: '3.10'
-  NODE_VERSION: '18'
+  # next@16 requires Node >=20.9.0 — Node 18 fails the build outright.
+  NODE_VERSION: '22'
 
 jobs:
   # ── Detect which folders changed ────────────────────────────────────────
@@ -45,10 +48,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: backend/requirements-dev.txt
 
       - name: Install linters
-        run: pip install ruff
+        # Pinned via requirements-dev.txt so a new ruff release cannot turn
+        # this job red on code nobody touched.
+        run: pip install -r requirements-dev.txt
 
       - name: Ruff lint
         run: ruff check .
@@ -140,13 +145,42 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: frontend/package.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        # `npm ci` installs exactly the tree in package-lock.json and fails if
+        # the lockfile and manifest disagree. `npm install` re-resolved on every
+        # run, so CI could pass against dependency versions no one had tested.
+        run: npm ci
 
       - name: ESLint
         run: npm run lint
+
+  # ── Frontend typecheck ──────────────────────────────────────────────────
+  frontend-typecheck:
+    name: Frontend Typecheck
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `next build` does typecheck, but it also needs env vars and takes far
+      # longer. Running tsc on its own gives a fast, unambiguous type signal.
+      - name: Typecheck
+        run: npm run typecheck
 
   # ── Frontend build ──────────────────────────────────────────────────────
   frontend-build:
@@ -164,10 +198,13 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: frontend/package.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        # `npm ci` installs exactly the tree in package-lock.json and fails if
+        # the lockfile and manifest disagree. `npm install` re-resolved on every
+        # run, so CI could pass against dependency versions no one had tested.
+        run: npm ci
 
       - name: Build
         run: npm run build
@@ -179,7 +216,7 @@ jobs:
   # Runs only after lint passes; skipped jobs are treated as success.
   docker-build:
     name: Docker Build
-    needs: [changes, backend-lint, frontend-lint]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-typecheck]
     if: |
       always() &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true') &&
@@ -197,9 +234,35 @@ jobs:
         if: needs.changes.outputs.frontend == 'true'
         run: docker build -t avatar-frontend ./frontend
 
+  # ── Frontend dependency audit ───────────────────────────────────────────
+  frontend-audit:
+    name: Frontend Audit
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Counterpart to the backend's pip-audit. Fails on high/critical only —
+      # low/moderate advisories are reported but don't block a merge.
+      - name: npm audit
+        run: npm audit --audit-level=high
+
   # ── Security scan ───────────────────────────────────────────────────────
   security-scan:
-    name: Security Scan
+    name: Backend Audit
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
@@ -210,7 +273,24 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # Reports advisories without blocking the merge, and deliberately not
+      # via `|| true` — that swallowed the exit code so the step always looked
+      # green. continue-on-error keeps the failure visible in the checks list
+      # while letting the PR land.
+      #
+      # It cannot be made blocking yet. torch (11 advisories) and transformers
+      # (13) only have fixes in releases the MuseTalk lip-sync pipeline cannot
+      # run against — MuseTalk needs the torch 2.2 / transformers 4.37
+      # generation — so a green audit is unreachable until that pipeline is
+      # ported. The app-layer packages with reachable fixes have been upgraded
+      # (python-jose, python-multipart, python-dotenv, python-socketio,
+      # requests, sentry-sdk); fastapi/starlette remain because they are a
+      # coupled major bump that needs its own change.
+      #
+      # Make this blocking once the ML stack can move, so new advisories in
+      # application dependencies fail the build.
       - name: Run pip-audit
+        continue-on-error: true
         run: |
           pip install pip-audit
-          pip-audit -r backend/requirements.txt --ignore-vuln PYSEC-2024-* || true
+          pip-audit -r backend/requirements.txt

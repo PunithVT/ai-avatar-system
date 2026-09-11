@@ -1,0 +1,17 @@
+# Development / CI tooling. Kept separate from requirements.txt so the runtime
+# image doesn't ship linters.
+#
+# ruff is PINNED deliberately. Its formatter is not stability-guaranteed
+# across releases: with an unpinned `pip install ruff`, CI's
+# `ruff format --check` could start failing on untouched code the day a new
+# version ships, and local runs would disagree with CI. Bump this
+# intentionally, then run `ruff format .` in the same commit.
+ruff==0.15.15
+
+# Test stack (also pulled in by requirements.txt, repeated here so
+# `pip install -r requirements-dev.txt` alone is enough for a test run).
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+httpx==0.26.0
+aiosqlite==0.19.0

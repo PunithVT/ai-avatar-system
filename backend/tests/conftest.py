@@ -48,8 +48,21 @@ async def db_session(test_engine):
 
 
 @pytest.fixture
-async def client(db_session):
-    """Async test client with the DB dependency overridden to the test session."""
+async def client(db_session, test_engine, monkeypatch):
+    """
+    Async test client with the DB dependency overridden to the test session.
+
+    `main.engine` is also redirected at the per-test engine. It is a
+    module-level pool pointed at the real Postgres, and asyncpg connections
+    are bound to the event loop that created them — so /health (which uses
+    `engine` directly rather than the injected session) would reuse a pooled
+    connection from a previous test's loop and report the database as
+    disconnected. That was invisible while /health always returned 200; now
+    that a hard-dependency failure is a real 503, it has to be deterministic.
+    """
+    import main
+
+    monkeypatch.setattr(main, "engine", test_engine)
 
     async def override_get_db():
         yield db_session

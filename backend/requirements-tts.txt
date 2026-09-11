@@ -1,0 +1,36 @@
+# Optional: Chatterbox TTS (Resemble AI) — voice cloning across 23 languages.
+#
+# WHY THIS IS A SEPARATE FILE
+# Chatterbox pins a newer ML stack than the MuseTalk lip-sync pipeline in
+# requirements.txt can run against:
+#
+#              requirements.txt   chatterbox-tts 0.1.7
+#   torch            2.2.0                2.6.0
+#   torchaudio       2.2.0                2.6.0
+#   transformers     4.37.2               5.2.0
+#   librosa          0.10.1               0.11.0
+#
+# Those are mutually exclusive, so the two cannot share one environment.
+# Installing this file over requirements.txt WILL break MuseTalk.
+#
+# HOW TO USE IT
+# Give Chatterbox its own virtualenv and run it as a separate TTS service, or
+# accept that this environment does lip-sync OR cloned-voice TTS, not both:
+#
+#   python -m venv venv-tts
+#   ./venv-tts/bin/pip install -r requirements-tts.txt
+#
+# WITHOUT IT
+# Nothing breaks. app/services/tts.py imports chatterbox inside a try/except
+# and falls through to Edge TTS (free Microsoft neural voices, CPU-only) and
+# then gTTS. Voice cloning is the only feature you lose; set
+# TTS_PROVIDER=chatterbox only when this file is actually installed.
+
+chatterbox-tts==0.1.7
+
+# Pinned to match what chatterbox-tts 0.1.7 itself requires, so this file
+# resolves on its own rather than relying on pip to backtrack.
+torch==2.6.0
+torchaudio==2.6.0
+transformers==5.2.0
+librosa==0.11.0

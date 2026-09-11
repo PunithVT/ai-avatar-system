@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 
 from fastapi import WebSocket
 
+from app.config import settings
 from app.services.animator import avatar_animator
 from app.services.llm import llm_service
 from app.services.storage import storage_service
@@ -133,6 +134,7 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         self.session_data: Dict[str, dict] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._keepalive_task: Optional[asyncio.Task] = None
         # Serializes connect/disconnect/cleanup-snapshot so the stale-session
         # reaper can't race a fresh connection for the same session id.
         self._mutation_lock = asyncio.Lock()
@@ -146,6 +148,18 @@ class ConnectionManager:
         self._send_locks: Dict[str, asyncio.Lock] = {}
 
     # ── connection lifecycle ──────────────────────────────────────────────────
+
+    async def at_capacity(self) -> bool:
+        """
+        True when WS_MAX_CONNECTIONS live connections are already open.
+
+        Each connection pins session state, a send lock, a private temp dir
+        and potentially a GPU inference pipeline, so the cap is what keeps a
+        connection flood from exhausting the box. Reconnecting to a session
+        that is already open does not count against it — that replaces an
+        existing entry rather than adding one.
+        """
+        return len(self.active_connections) >= settings.WS_MAX_CONNECTIONS
 
     async def connect(self, session_id: str, websocket: WebSocket, user_id: Optional[str] = None):
         await websocket.accept()
@@ -920,17 +934,51 @@ class ConnectionManager:
                 except Exception as e:
                     logger.warning(f"WS cleanup task error: {e}")
 
+        async def _keepalive():
+            """
+            Ping every live connection on WS_PING_INTERVAL and drop the ones
+            that fail to accept the frame.
+
+            A client that vanishes without a close handshake (laptop lid,
+            dropped mobile link) otherwise leaves a socket that looks live
+            until the two-hour stale reaper notices. Pinging surfaces the
+            dead peer within one interval and frees its slot against the
+            connection cap.
+            """
+            while True:
+                try:
+                    await asyncio.sleep(settings.WS_PING_INTERVAL)
+                    for session_id in list(self.active_connections):
+                        ws = self.active_connections.get(session_id)
+                        if ws is None:
+                            continue
+                        try:
+                            await asyncio.wait_for(
+                                self.send_message(session_id, {"type": "ping"}),
+                                timeout=settings.WS_PING_TIMEOUT,
+                            )
+                        except (asyncio.TimeoutError, Exception):
+                            logger.info(f"WS keepalive failed for {session_id} — disconnecting")
+                            await self.disconnect(session_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"WS keepalive task error: {e}")
+
         self._cleanup_task = asyncio.create_task(_loop(), name="ws-cleanup")
+        self._keepalive_task = asyncio.create_task(_keepalive(), name="ws-keepalive")
 
     async def stop_cleanup_task(self) -> None:
-        if self._cleanup_task is None:
-            return
-        self._cleanup_task.cancel()
-        try:
-            await self._cleanup_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        self._cleanup_task = None
+        for attr in ("_cleanup_task", "_keepalive_task"):
+            task = getattr(self, attr, None)
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            setattr(self, attr, None)
 
 
 websocket_manager = ConnectionManager()

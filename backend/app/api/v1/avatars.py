@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import get_current_user
+from app.api.v1.users import require_current_user
+from app.config import settings
 from app.database import get_db
 from app.models import Avatar, User
 from app.schemas import AvatarMetadataUpdate, AvatarRename, AvatarResponse
@@ -18,10 +19,6 @@ from app.services.storage import storage_service
 logger = logging.getLogger(__name__)
 router = APIRouter()
 TMPDIR = Path(tempfile.gettempdir())
-
-
-def _user_id(current_user: Optional[User]) -> str:
-    return current_user.id if current_user else "demo-user"
 
 
 def _validate_uuid(avatar_id: str) -> None:
@@ -38,23 +35,66 @@ def _validate_uuid(avatar_id: str) -> None:
         raise HTTPException(status_code=404, detail="Avatar not found")
 
 
+async def _read_capped(file: UploadFile, limit: int) -> bytes:
+    """
+    Read an upload in chunks, aborting as soon as it exceeds `limit`.
+
+    `await file.read()` with a size check afterwards buffers the entire body
+    first, so a client could force the server to hold an arbitrarily large
+    payload in memory before we ever rejected it. Reading incrementally caps
+    peak memory at `limit` + one chunk regardless of what the client sends.
+    """
+    chunk_size = 64 * 1024
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File must be under {limit // (1024 * 1024)} MB",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validate_extension(filename: Optional[str]) -> str:
+    """
+    Check the filename's extension against the configured allowlist and
+    return the suffix to use for the temp file.
+
+    Content-Type is client-supplied and trivially spoofed, so it is only a
+    first filter; the authoritative check is that PIL can actually decode
+    the bytes (see the UnidentifiedImageError branch below).
+    """
+    allowed = {e.lower().lstrip(".") for e in settings.ALLOWED_EXTENSIONS}
+    suffix = Path(filename or "avatar.jpg").suffix.lower()
+    if suffix.lstrip(".") not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(sorted(allowed))}",
+        )
+    return suffix
+
+
 @router.post("/upload", response_model=AvatarResponse, status_code=status.HTTP_201_CREATED)
 async def upload_avatar(
-    name: str = Form(...),
+    name: str = Form(..., min_length=1, max_length=settings.MAX_AVATAR_NAME_LEN),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Upload and process an avatar image."""
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image (JPG, PNG, WEBP)")
 
-    file_data: bytes = await file.read()  # type: ignore[assignment]
-    if len(file_data) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File must be under 10 MB")
+    suffix = _validate_extension(file.filename)
+    file_data = await _read_capped(file, settings.MAX_UPLOAD_SIZE)
 
     avatar_id = str(uuid.uuid4())
-    suffix = Path(file.filename or "avatar.jpg").suffix or ".jpg"
     temp_orig = TMPDIR / f"{avatar_id}_original{suffix}"
     temp_processed = TMPDIR / f"{avatar_id}_processed.jpg"
     metadata: dict = {}
@@ -110,7 +150,7 @@ async def upload_avatar(
 
     avatar = Avatar(
         id=avatar_id,
-        user_id=_user_id(current_user),
+        user_id=current_user.id,
         name=name,
         image_url=image_url,
         thumbnail_url=thumbnail_url,
@@ -122,7 +162,7 @@ async def upload_avatar(
     await db.commit()
     await db.refresh(avatar)
 
-    logger.info(f"Avatar created: {avatar_id} for user {_user_id(current_user)}")
+    logger.info(f"Avatar created: {avatar_id} for user {current_user.id}")
     return avatar
 
 
@@ -131,10 +171,10 @@ async def list_avatars(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """List avatars belonging to the current user."""
-    uid = _user_id(current_user)
+    uid = current_user.id
     result = await db.execute(
         select(Avatar)
         .where(Avatar.user_id == uid)
@@ -149,14 +189,14 @@ async def list_avatars(
 async def get_avatar(
     avatar_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     _validate_uuid(avatar_id)
     result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
     avatar = result.scalar_one_or_none()
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    if avatar.user_id != _user_id(current_user):
+    if avatar.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorised to access this avatar")
     return avatar
 
@@ -169,7 +209,7 @@ async def set_avatar_voice(
         description="Voice profile ID to assign. Omit or pass an empty string to unassign.",
     ),
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Assign (or clear) a voice profile on an avatar."""
     _validate_uuid(avatar_id)
@@ -177,7 +217,7 @@ async def set_avatar_voice(
     avatar = result.scalar_one_or_none()
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    if avatar.user_id != _user_id(current_user):
+    if avatar.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
 
     try:
@@ -198,7 +238,7 @@ async def update_avatar_metadata(
     avatar_id: str,
     payload: AvatarMetadataUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Merge an allowlist of metadata fields into avatar_metadata."""
     _validate_uuid(avatar_id)
@@ -206,7 +246,7 @@ async def update_avatar_metadata(
     avatar = result.scalar_one_or_none()
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    if avatar.user_id != _user_id(current_user):
+    if avatar.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
 
     existing: dict = avatar.avatar_metadata or {}
@@ -242,7 +282,7 @@ async def rename_avatar(
     avatar_id: str,
     payload: AvatarRename,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Rename an avatar."""
     _validate_uuid(avatar_id)
@@ -253,7 +293,7 @@ async def rename_avatar(
     avatar = result.scalar_one_or_none()
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    if avatar.user_id != _user_id(current_user):
+    if avatar.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
     try:
         avatar.name = name
@@ -271,14 +311,14 @@ async def rename_avatar(
 async def delete_avatar(
     avatar_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     _validate_uuid(avatar_id)
     result = await db.execute(select(Avatar).where(Avatar.id == avatar_id))
     avatar = result.scalar_one_or_none()
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    if avatar.user_id != _user_id(current_user):
+    if avatar.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorised to delete this avatar")
 
     # Delete the DB row first (sessions/messages/conversations cascade), THEN

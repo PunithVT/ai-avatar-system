@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -19,7 +19,6 @@ from app.logging_config import configure_logging
 from app.middleware.rate_limiter import RateLimitMiddleware
 from app.middleware.security import RequestLoggingMiddleware, SecurityHeadersMiddleware
 from app.models import Session as SessionModel
-from app.models import User
 from app.services.cache import cache_service
 from app.services.storage import storage_service
 from app.telemetry import init_telemetry
@@ -79,27 +78,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Cache service init failed: {e}")
 
-    # Seed demo user ONLY in DEBUG/development mode. An empty-password user
-    # in production would be a critical auth bypass.
-    if settings.DEBUG:
-        try:
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(select(User).where(User.id == "demo-user"))
-                if result.scalar_one_or_none() is None:
-                    session.add(
-                        User(
-                            id="demo-user",
-                            email="demo@localhost",
-                            username="demo",
-                            hashed_password="",  # disabled — login route rejects empty passwords
-                            full_name="Demo User",
-                        )
-                    )
-                    await session.commit()
-                    logger.info("Demo user created (DEBUG mode)")
-        except Exception as e:
-            logger.warning(f"Could not seed demo user: {e}")
-
     # Mount local uploads directory so the browser can fetch images/videos
     if getattr(settings, "USE_LOCAL_STORAGE", True):
         uploads_dir = Path(settings.LOCAL_STORAGE_PATH)
@@ -129,9 +107,23 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
 )
 
-# Middleware (order matters — outermost first)
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(RequestLoggingMiddleware)
+# Middleware. `add_middleware` INSERTS AT THE FRONT of the stack, so the
+# LAST one registered here is the OUTERMOST layer at request time. The
+# registrations below therefore read inside-out: GZip is innermost,
+# SecurityHeaders outermost.
+#
+# The ordering is load-bearing:
+#   * SecurityHeaders must be outermost so the hardening headers are applied
+#     to EVERY response — including a 429 short-circuited by the rate
+#     limiter and CORS preflight replies, which never reach inner layers.
+#   * RequestLogging sits above the rate limiter so rejected requests still
+#     produce a log line; below it, 429s were dropped silently and rate-limit
+#     abuse was invisible in the logs.
+#   * CORS also sits above the rate limiter, so a 429 carries the
+#     Access-Control-Allow-Origin header. Without that a browser reports an
+#     opaque CORS failure instead of surfacing the actual 429 and its
+#     Retry-After to the user.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -140,7 +132,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Prometheus metrics
 if settings.PROMETHEUS_ENABLED:
@@ -180,7 +173,24 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+async def health_check(response: Response):
+    """
+    Liveness/readiness probe with three states:
+
+      healthy   — everything reachable                        -> 200
+      degraded  — a soft/configuration problem, still serving -> 200
+      unhealthy — a hard dependency is down                   -> 503
+
+    Only Postgres and Redis are hard dependencies. This used to always reply
+    200, even with `{"status": "degraded"}` in the body, so Docker
+    healthchecks, Kubernetes probes and load-balancer target groups — all of
+    which read the status code, not the payload — kept routing traffic to an
+    instance that could not reach its database.
+
+    A missing LLM API key is deliberately NOT a 503: it is a config error the
+    operator needs to see, but taking every replica out of rotation for it
+    would turn a misconfiguration into a full outage.
+    """
     services: dict[str, str] = {}
     health: dict[str, object] = {
         "status": "healthy",
@@ -196,7 +206,7 @@ async def health_check():
         services["database"] = "connected"
     except Exception:
         services["database"] = "disconnected"
-        health["status"] = "degraded"
+        health["status"] = "unhealthy"  # hard dependency
 
     # Check Redis
     try:
@@ -207,7 +217,7 @@ async def health_check():
             services["redis"] = "not configured"
     except Exception:
         services["redis"] = "disconnected"
-        health["status"] = "degraded"
+        health["status"] = "unhealthy"  # hard dependency
 
     # GPU / avatar engine info
     try:
@@ -231,12 +241,12 @@ async def health_check():
         services["llm"] = (
             "ready (anthropic)" if settings.ANTHROPIC_API_KEY else "missing ANTHROPIC_API_KEY"
         )
-        if not settings.ANTHROPIC_API_KEY:
-            health["status"] = "degraded"
+        if not settings.ANTHROPIC_API_KEY and health["status"] == "healthy":
+            health["status"] = "degraded"  # misconfigured, not down
     elif settings.LLM_PROVIDER == "openai":
         services["llm"] = "ready (openai)" if settings.OPENAI_API_KEY else "missing OPENAI_API_KEY"
-        if not settings.OPENAI_API_KEY:
-            health["status"] = "degraded"
+        if not settings.OPENAI_API_KEY and health["status"] == "healthy":
+            health["status"] = "degraded"  # misconfigured, not down
     elif settings.LLM_PROVIDER == "ollama":
         # Local OpenAI-compatible server — no API key needed.
         services["llm"] = (
@@ -244,7 +254,8 @@ async def health_check():
         )
     else:
         services["llm"] = f"unknown provider: {settings.LLM_PROVIDER}"
-        health["status"] = "degraded"
+        if health["status"] == "healthy":
+            health["status"] = "degraded"  # misconfigured, not down
 
     # STT / TTS model state — lazy-loaded, so just report whether warmed
     try:
@@ -259,6 +270,9 @@ async def health_check():
     health["avatar_engine"] = settings.AVATAR_ENGINE
     health["active_ws_sessions"] = len(websocket_manager.active_connections)
 
+    # Only a hard-dependency failure takes the instance out of rotation.
+    if health["status"] == "unhealthy":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return health
 
 
@@ -268,8 +282,9 @@ async def _verify_ws_session(session_id: str, token: str | None) -> str | None:
     or None if the session is unknown / token invalid / token user doesn't own
     the session.
 
-    In DEBUG mode (single-user dev) we fall back to the seeded `demo-user`
-    when no token is supplied.
+    A token is always required. There used to be a DEBUG fallback to a seeded
+    `demo-user`, but sessions can no longer be created anonymously, so nothing
+    can resolve to that identity.
     """
     try:
         async with AsyncSessionLocal() as db:
@@ -292,9 +307,7 @@ async def _verify_ws_session(session_id: str, token: str | None) -> str | None:
                     return user_id
                 return None
 
-            # No token: only allowed for the demo session in DEBUG mode
-            if settings.DEBUG and sess.user_id == "demo-user":
-                return "demo-user"
+            # No credentials presented — reject the handshake.
             return None
     except Exception as e:
         logger.error(f"WS session verification failed: {e}")
@@ -316,6 +329,20 @@ async def websocket_endpoint(
         # 4401 is a custom WebSocket close code we use for auth failures
         await websocket.close(code=4401)
         logger.warning(f"WS auth rejected for session {session_id}")
+        return
+
+    # Refuse new sockets once WS_MAX_CONNECTIONS is reached. A reconnect to a
+    # session that is already open is allowed through — it replaces the
+    # existing entry rather than consuming another slot. 1013 ("try again
+    # later") is the standard code for a temporary capacity refusal.
+    if session_id not in websocket_manager.active_connections and (
+        await websocket_manager.at_capacity()
+    ):
+        await websocket.close(code=1013)
+        logger.warning(
+            f"WS connection refused for session {session_id}: "
+            f"at capacity ({settings.WS_MAX_CONNECTIONS})"
+        )
         return
 
     await websocket_manager.connect(session_id, websocket, user_id=user_id)

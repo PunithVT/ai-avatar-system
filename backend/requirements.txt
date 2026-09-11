@@ -1,11 +1,15 @@
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
-python-multipart==0.0.6
-python-jose[cryptography]==3.3.0
+# Parses every multipart upload (avatar images). 0.0.6 carried 7 advisories,
+# several of them parser DoS in exactly that request path.
+python-multipart==0.0.31
+# Signs and verifies every JWT. 3.3.0 carried algorithm-confusion and DoS
+# advisories (PYSEC-2024-232 / -233); 3.4.0 is the fixed release.
+python-jose[cryptography]==3.4.0
 # bcrypt used directly for password hashing — passlib 1.7.4 (2020) is
 # incompatible with bcrypt 5.x and is unmaintained, so we dropped it.
 bcrypt>=4.1.0
-python-dotenv==1.0.0
+python-dotenv==1.2.2
 pydantic[email]==2.5.3
 pydantic-settings==2.1.0
 
@@ -25,7 +29,7 @@ aioboto3==12.3.0
 
 # WebSocket
 websockets==12.0
-python-socketio==5.11.0
+python-socketio==5.16.2
 
 # AI/ML
 # anthropic >=0.45 supports Claude 4.x models (Opus 4.7, Sonnet 4.6, Haiku 4.5)
@@ -49,12 +53,19 @@ scipy==1.12.0
 faster-whisper>=1.0.0
 
 # TTS
-# Chatterbox by Resemble AI — fastest open-source TTS w/ voice cloning + 23 langs
-# (en, es, fr, de, it, pt, pl, tr, ru, nl, ar, zh, ja, ko, da, el, fi, he, hi,
-# ms, no, sv, sw). Replaces deprecated Coqui XTTS v2.
-chatterbox-tts>=0.1.4
-# Edge TTS — free Microsoft neural voices used as the first fallback when
-# Chatterbox is unavailable (no API key, no GPU). gTTS remains the last resort.
+# NOTE: chatterbox-tts is intentionally NOT pinned here — install it from
+# requirements-tts.txt into its own environment. It cannot coexist with the
+# pinned stack above: chatterbox 0.1.7 requires librosa==0.11.0, torch==2.6.0
+# and transformers==5.2.0, while MuseTalk needs torch 2.2 / transformers 4.37,
+# and chatterbox <=0.1.6 requires numpy<1.26 against our numpy==1.26.3. Listing
+# it made `pip install -r requirements.txt` unresolvable, which broke the
+# install for everyone — including CI, where both backend jobs failed on it.
+#
+# app/services/tts.py imports chatterbox inside a try/except, so without it
+# synthesis transparently uses the Edge TTS path below. See README → TTS.
+#
+# Edge TTS — free Microsoft neural voices; the default path when Chatterbox is
+# not installed (no API key, no GPU). gTTS remains the last resort.
 edge-tts>=6.1.0
 gtts==2.5.1
 pydub==0.25.1
@@ -76,14 +87,14 @@ flower==2.0.1
 # Monitoring & Logging
 prometheus-client==0.19.0
 prometheus-fastapi-instrumentator==6.1.0
-sentry-sdk==1.40.0
+sentry-sdk==2.8.0
 
 # Utilities
 httpx==0.26.0
 aiofiles==23.2.1
 tenacity==8.2.3
 pyyaml==6.0.1
-requests==2.31.0
+requests==2.33.0
 
 # Testing
 pytest==7.4.4

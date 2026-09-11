@@ -1,12 +1,12 @@
 import logging
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import get_current_user
+from app.api.v1.users import require_current_user
 from app.database import get_db
 from app.models import Conversation, Message, Session, User
 from app.schemas import ConversationResponse
@@ -15,10 +15,6 @@ from app.services.llm import llm_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _user_id(current_user: Optional[User]) -> str:
-    return current_user.id if current_user else "demo-user"
 
 
 async def _get_owned_session(session_id: str, uid: str, db: AsyncSession) -> Session:
@@ -57,11 +53,11 @@ async def list_conversations(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """List conversations for the current user (joined via session)."""
     try:
-        uid = _user_id(current_user)
+        uid = current_user.id
         result = await db.execute(
             select(Conversation)
             .join(Session, Conversation.session_id == Session.id)
@@ -85,7 +81,7 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Get conversation by ID (must own parent session)."""
     try:
@@ -96,7 +92,7 @@ async def get_conversation(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        await _get_owned_session(conversation.session_id, _user_id(current_user), db)
+        await _get_owned_session(conversation.session_id, current_user.id, db)
         await _attach_live_counts([conversation], db)
         return conversation
     except HTTPException:
@@ -113,11 +109,11 @@ async def get_conversation(
 async def list_session_conversations(
     session_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """List conversations for a session (must own it)."""
     try:
-        await _get_owned_session(session_id, _user_id(current_user), db)
+        await _get_owned_session(session_id, current_user.id, db)
         result = await db.execute(
             select(Conversation)
             .where(Conversation.session_id == session_id)
@@ -144,11 +140,11 @@ async def list_session_conversations(
 async def create_conversation(
     session_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Create a new conversation for a session."""
     try:
-        session = await _get_owned_session(session_id, _user_id(current_user), db)
+        session = await _get_owned_session(session_id, current_user.id, db)
         if session.status != "active":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -185,7 +181,7 @@ async def rename_conversation(
     conversation_id: str,
     payload: ConversationRenamePayload,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Rename a conversation."""
     try:
@@ -196,7 +192,7 @@ async def rename_conversation(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        await _get_owned_session(conversation.session_id, _user_id(current_user), db)
+        await _get_owned_session(conversation.session_id, current_user.id, db)
         conversation.title = payload.title.strip()
         await db.commit()
         await db.refresh(conversation)
@@ -221,7 +217,7 @@ _SUMMARY_MAX_INPUT_CHARS = 32_000
 async def summarize_conversation(
     conversation_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """
     Generate a short LLM summary of the conversation and persist it to
@@ -235,7 +231,7 @@ async def summarize_conversation(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        await _get_owned_session(conversation.session_id, _user_id(current_user), db)
+        await _get_owned_session(conversation.session_id, current_user.id, db)
 
         # Fetch the conversation's messages
         msgs_result = await db.execute(
@@ -317,7 +313,7 @@ async def summarize_conversation(
 async def delete_conversation(
     conversation_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Delete a conversation (must own parent session)."""
     try:
@@ -328,7 +324,7 @@ async def delete_conversation(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        await _get_owned_session(conversation.session_id, _user_id(current_user), db)
+        await _get_owned_session(conversation.session_id, current_user.id, db)
         await db.delete(conversation)
         await db.commit()
         logger.info(f"Conversation deleted: {conversation_id}")

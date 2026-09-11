@@ -1,4 +1,7 @@
-FROM node:18-alpine
+# Must satisfy next@16's engines.node >=20.9.0 — on node:18 `next build`
+# refuses to run at all. Kept in step with NODE_VERSION in
+# .github/workflows/ci.yml so the image and CI build on the same runtime.
+FROM node:22-alpine
 
 WORKDIR /app
 

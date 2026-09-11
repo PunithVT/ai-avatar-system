@@ -59,4 +59,31 @@ echo "[startup] Migrations applied successfully."
 mkdir -p voice_profiles /tmp/avatars /tmp/videos /tmp/audio
 
 echo "[startup] Starting uvicorn..."
-exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers "${UVICORN_WORKERS:-4}"
+# --forwarded-allow-ips decides whose X-Forwarded-For we believe.
+#
+# uvicorn turns --proxy-headers on by default but only trusts 127.0.0.1, and
+# nginx reaches this container over the compose network from a private
+# address. So the header was silently discarded and request.client.host
+# resolved to nginx's own IP on EVERY request. Two consequences:
+#   * the per-IP rate-limit bucket collapsed into one global bucket, so a
+#     single noisy client could 429 every other anonymous user;
+#   * every access log line recorded the proxy address instead of the client.
+#
+# uvicorn 0.27 matches trusted hosts by exact string — it does NOT parse
+# CIDR ranges (that landed in a later release), so a value like
+# "172.16.0.0/12" would never match and would leave the bug in place. "*"
+# is the working choice for this topology.
+#
+# SAFETY PRECONDITION: "*" means "trust X-Forwarded-For from anyone", which
+# is only sound because this service is never reachable directly — neither
+# docker-compose.yml nor docker-compose.prod.yml publishes a port for the
+# backend, so nginx is the sole ingress. If you ever expose this container
+# directly, override FORWARDED_ALLOW_IPS with the proxy's literal address:
+# otherwise a client can spoof X-Forwarded-For and forge its rate-limit
+# identity at will.
+exec uvicorn main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers "${UVICORN_WORKERS:-4}" \
+    --proxy-headers \
+    --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}"
