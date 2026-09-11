@@ -6,6 +6,13 @@ interface User {
   email: string
   username: string
   full_name?: string
+  /**
+   * Anonymous "Continue as Guest" account. Guests are real, isolated
+   * server-side users with a throwaway identity, so this is the only
+   * reliable way to tell one from a registered account — do not infer it
+   * from the token or a magic user id.
+   */
+  is_guest?: boolean
 }
 
 interface AppState {

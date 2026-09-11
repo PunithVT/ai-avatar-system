@@ -71,24 +71,35 @@ async def test_garbage_token_rejected(patched_session_local):
     assert await main._verify_ws_session(sid, "not-a-jwt") is None
 
 
+@pytest.mark.parametrize("debug", [False, True])
 @pytest.mark.asyncio
-async def test_no_token_rejected_when_not_debug(patched_session_local, monkeypatch):
+async def test_tokenless_handshake_always_rejected(patched_session_local, monkeypatch, debug):
+    """
+    A token is now required regardless of DEBUG.
+
+    There used to be a DEBUG-only fallback that accepted a tokenless
+    handshake for a session owned by the shared `demo-user`. That identity no
+    longer exists — sessions cannot be created anonymously and guests get
+    their own accounts — so an absent token is simply unauthenticated. Pinned
+    for both DEBUG values because DEBUG is not enforced off outside
+    production, so the dev path must be safe too.
+    """
     sid = await _seed_session(patched_session_local, "user-A")
-    monkeypatch.setattr(main.settings, "DEBUG", False)
+    monkeypatch.setattr(main.settings, "DEBUG", debug)
     assert await main._verify_ws_session(sid, None) is None
 
 
 @pytest.mark.asyncio
-async def test_no_token_demo_session_allowed_in_debug(patched_session_local, monkeypatch):
-    # The seeded demo fallback only applies to the demo-user session in DEBUG.
+async def test_demo_user_session_gets_no_special_treatment(patched_session_local, monkeypatch):
+    """The literal id `demo-user` must not be privileged any more."""
     sid = await _seed_session(patched_session_local, "demo-user")
     monkeypatch.setattr(main.settings, "DEBUG", True)
-    assert await main._verify_ws_session(sid, None) == "demo-user"
+    assert await main._verify_ws_session(sid, None) is None
 
 
 @pytest.mark.asyncio
-async def test_no_token_non_demo_session_rejected_in_debug(patched_session_local, monkeypatch):
-    sid = await _seed_session(patched_session_local, "real-user")
-    monkeypatch.setattr(main.settings, "DEBUG", True)
-    # Even in DEBUG, the tokenless fallback is demo-user only.
-    assert await main._verify_ws_session(sid, None) is None
+async def test_guest_token_works_for_its_own_session(patched_session_local):
+    """A guest's JWT is an ordinary token and must authenticate normally."""
+    sid = await _seed_session(patched_session_local, "guest-abc123")
+    token = create_access_token(data={"sub": "guest-abc123"})
+    assert await main._verify_ws_session(sid, token) == "guest-abc123"

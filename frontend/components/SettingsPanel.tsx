@@ -17,7 +17,9 @@ export function SettingsPanel() {
   const [savingProfile, setSavingProfile] = useState(false)
   const [savingPassword, setSavingPassword] = useState(false)
 
-  const isGuest = token === 'guest' || user?.id === 'demo-user'
+  // Guests are real server-side accounts now, so trust the flag the API
+  // returns rather than sniffing the token or a hardcoded user id.
+  const isGuest = user?.is_guest === true || token === 'guest'
 
   const saveProfile = async () => {
     if (isGuest) {

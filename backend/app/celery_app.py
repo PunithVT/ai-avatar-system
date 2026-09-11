@@ -2,6 +2,7 @@ import logging
 import os
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from celery import Celery
@@ -28,6 +29,10 @@ celery_app.conf.update(
         "cleanup-old-files-daily": {
             "task": "cleanup_old_files",
             "schedule": crontab(hour=3, minute=0),  # Run daily at 3 AM
+        },
+        "cleanup-guest-accounts-daily": {
+            "task": "cleanup_guest_accounts",
+            "schedule": crontab(hour=3, minute=30),  # after the file sweep
         },
     },
 )
@@ -163,3 +168,69 @@ def cleanup_old_files_task():
     except Exception as e:
         logger.error(f"Cleanup task failed: {e}")
         raise
+
+
+@celery_app.task(name="cleanup_guest_accounts")
+def cleanup_guest_accounts_task():
+    """
+    Delete anonymous "Continue as Guest" accounts that have gone idle.
+
+    Guests get a real user row so that per-user ownership checks isolate
+    their data, which means the table would otherwise grow by one row per
+    visitor forever. A guest is reapable once BOTH its account and its most
+    recent session are older than GUEST_RETENTION_HOURS — checking the
+    session too keeps us from deleting someone who is mid-conversation on a
+    long-lived account.
+
+    Avatars, sessions, messages and conversations all cascade from the user
+    row (ondelete="CASCADE" plus the ORM relationships), so removing the
+    user removes everything it owned in one statement.
+    """
+    import asyncio
+
+    from sqlalchemy import delete, func, select
+
+    from app.database import AsyncSessionLocal
+    from app.models import Session as SessionModel
+    from app.models import User
+
+    if not settings.GUEST_ACCOUNTS_ENABLED:
+        logger.info("Guest accounts disabled — retention sweep skipped")
+        return {"deleted_guests": 0}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.GUEST_RETENTION_HOURS)
+
+    async def _sweep() -> int:
+        async with AsyncSessionLocal() as db:
+            # Most recent activity per guest, treating "no sessions at all"
+            # as the account's own creation time.
+            last_activity = (
+                select(
+                    User.id.label("uid"),
+                    func.coalesce(
+                        func.max(func.coalesce(SessionModel.ended_at, SessionModel.started_at)),
+                        User.created_at,
+                    ).label("seen"),
+                )
+                .outerjoin(SessionModel, SessionModel.user_id == User.id)
+                .where(User.is_guest.is_(True))
+                .group_by(User.id, User.created_at)
+                .subquery()
+            )
+            stale = select(last_activity.c.uid).where(last_activity.c.seen < cutoff)
+            ids = (await db.execute(stale)).scalars().all()
+            if not ids:
+                return 0
+            await db.execute(delete(User).where(User.id.in_(ids)))
+            await db.commit()
+            return len(ids)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        deleted = loop.run_until_complete(_sweep())
+    finally:
+        loop.close()
+
+    logger.info(f"Guest retention sweep removed {deleted} account(s)")
+    return {"deleted_guests": deleted}

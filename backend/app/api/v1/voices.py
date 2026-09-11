@@ -2,9 +2,9 @@
 Voice management endpoints — clone, list, and delete voice profiles.
 
 Voice profiles are stored as WAV reference files on disk plus an index.json
-metadata file. Each profile is owned by the user who created it (or `demo-user`
-in unauthenticated dev mode); the list/get/delete endpoints filter by owner so
-users cannot see or mutate someone else's voices.
+metadata file. Each profile is owned by the user who created it; the
+list/get/delete endpoints filter by owner so users cannot see or mutate
+someone else's voices.
 """
 
 import asyncio
@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import update
 
-from app.api.v1.users import get_current_user
+from app.api.v1.users import require_current_user
 from app.models import User
 
 logger = logging.getLogger(__name__)
@@ -73,10 +73,6 @@ _ALLOWED_LANGUAGES = {
 _NAME_MAX_LEN = 100
 
 
-def _user_id(current_user: Optional[User]) -> str:
-    return current_user.id if current_user else "demo-user"
-
-
 async def _load_index() -> list[dict]:
     async with _index_lock:
         if VOICE_INDEX.exists():
@@ -96,8 +92,16 @@ async def _save_index(data: list[dict]) -> None:
 
 
 def _owned(entry: dict, uid: str) -> bool:
-    """Treat legacy entries (no user_id) as belonging to demo-user."""
-    return entry.get("user_id", "demo-user") == uid
+    """
+    True when `uid` owns this voice profile.
+
+    Entries written before profiles carried a `user_id` have no owner and are
+    deliberately unreachable rather than being granted to some default
+    account — an unowned profile must not become readable by whoever asks
+    first. Such entries are pruned by the voice-profile cleanup task.
+    """
+    owner = entry.get("user_id")
+    return owner is not None and owner == uid
 
 
 @router.post("/clone")
@@ -105,7 +109,7 @@ async def clone_voice(
     audio: UploadFile = File(..., description="Audio sample (WAV/WebM/MP3, 10–60 seconds)"),
     name: str = Form(..., description="Display name for the voice profile"),
     language: Optional[str] = Form("en"),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """
     Accept an audio sample and create a named voice profile owned by the
@@ -210,7 +214,7 @@ async def clone_voice(
         raise HTTPException(status_code=500, detail="Failed to process audio")
 
     # Persist to index
-    uid = _user_id(current_user)
+    uid = current_user.id
     entry = {
         "id": voice_id,
         "name": name,
@@ -237,9 +241,9 @@ async def clone_voice(
 
 
 @router.get("/")
-async def list_voices(current_user: Optional[User] = Depends(get_current_user)):
+async def list_voices(current_user: User = Depends(require_current_user)):
     """List voice profiles owned by the current user."""
-    uid = _user_id(current_user)
+    uid = current_user.id
     return [
         {k: v for k, v in e.items() if k != "wav_path"}
         for e in await _load_index()
@@ -250,10 +254,10 @@ async def list_voices(current_user: Optional[User] = Depends(get_current_user)):
 @router.get("/{voice_id}")
 async def get_voice(
     voice_id: str,
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Get a single voice profile by ID (must own it)."""
-    uid = _user_id(current_user)
+    uid = current_user.id
     for entry in await _load_index():
         if entry["id"] == voice_id:
             if not _owned(entry, uid):
@@ -273,14 +277,14 @@ async def synthesize_voice_preview(
     voice_id: str,
     text: Optional[str] = Form(default=None),
     language: Optional[str] = Form(default="en"),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """
     Synthesize a short sample with this voice profile and return WAV audio.
     Useful for "hear what this voice sounds like" UX before committing the
     voice to an avatar.
     """
-    uid = _user_id(current_user)
+    uid = current_user.id
     entry = next((e for e in await _load_index() if e["id"] == voice_id), None)
     if not entry:
         raise HTTPException(status_code=404, detail="Voice profile not found")
@@ -326,10 +330,10 @@ async def synthesize_voice_preview(
 @router.get("/{voice_id}/preview")
 async def preview_voice(
     voice_id: str,
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Stream the original reference WAV so the UI can preview a cloned voice."""
-    uid = _user_id(current_user)
+    uid = current_user.id
     for entry in await _load_index():
         if entry["id"] == voice_id:
             if not _owned(entry, uid):
@@ -348,10 +352,10 @@ async def preview_voice(
 @router.delete("/{voice_id}")
 async def delete_voice(
     voice_id: str,
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(require_current_user),
 ):
     """Delete a voice profile (owner only), its audio file, and clear any avatar references."""
-    uid = _user_id(current_user)
+    uid = current_user.id
     index = await _load_index()
     entry = next((e for e in index if e["id"] == voice_id), None)
     if not entry:

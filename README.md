@@ -86,7 +86,7 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
 | 🎬 **Lip-Sync Video** | MuseTalk V1.5 persistent worker (30 FPS on GPU) · FFmpeg fallback (CPU) |
 | ⚡ **Streaming Pipeline** | Live LLM tokens + per-sentence video chunks over WebSocket |
 | ✋ **Barge-In** | Speak or hit stop mid-reply — in-flight turn cancels in ms |
-| 🔉 **TTS Fallback Chain** | chatterbox → edge-tts (free neural voices) → gTTS — never silent |
+| 🔉 **TTS Fallback Chain** | chatterbox (optional, separate venv) → edge-tts (free neural voices) → gTTS — never silent |
 | 😊 **Emotion Detection** | Live emotion badges per message |
 | 🌍 **23 Languages** | Whisper multilingual STT + Chatterbox multilingual TTS |
 | 🏠 **Local-First Storage** | `USE_LOCAL_STORAGE=true` — no AWS needed for dev |
@@ -342,6 +342,21 @@ Powered by [Chatterbox Multilingual](https://github.com/resemble-ai/chatterbox) 
 
 Every TTS response then uses your cloned voice.
 
+> **Chatterbox needs its own environment.** It is *not* in `requirements.txt`,
+> because it pins `torch==2.6.0` / `transformers==5.2.0` / `librosa==0.11.0`
+> while the MuseTalk lip-sync pipeline needs torch 2.2 / transformers 4.37 —
+> the two cannot share one virtualenv. Install it separately:
+>
+> ```bash
+> python -m venv venv-tts
+> ./venv-tts/bin/pip install -r backend/requirements-tts.txt
+> ```
+>
+> Without it nothing breaks: TTS falls through to **edge-tts** (free Microsoft
+> neural voices, CPU-only) and then gTTS. Voice cloning is the only feature
+> that requires Chatterbox, so set `TTS_PROVIDER=chatterbox` only once it is
+> actually installed.
+
 ```bash
 # REST API
 curl -X POST http://localhost:8000/api/v1/voices/clone \
@@ -357,15 +372,32 @@ curl -X POST http://localhost:8000/api/v1/voices/clone \
 ```bash
 POST /api/v1/users/register   { "email": "...", "username": "...", "password": "..." }
 POST /api/v1/users/login      form: username=... password=...   → { "access_token": "..." }
+POST /api/v1/users/guest      (no body)                         → { "access_token": "..." }
+POST /api/v1/users/logout     clears the httpOnly auth cookie
 
-# All protected routes:
+# Every resource route requires an identity — pass the bearer token:
 Authorization: Bearer <access_token>
+# ...or rely on the httpOnly cookie that /login and /guest set for browsers.
 ```
+
+`/guest` backs the UI's **Continue as Guest** button. It creates a real but
+anonymous account, so a guest's avatars and transcripts are scoped to them
+alone — guests never share data with each other. Guest accounts have no
+usable password (they are reachable only via the token above) and are deleted
+after `GUEST_RETENTION_HOURS` of inactivity by the `cleanup_guest_accounts`
+task. Set `GUEST_ACCOUNTS_ENABLED=false` to require sign-up.
+
+Registration rules: passwords are 8–128 characters, usernames are 3–39
+characters of `[A-Za-z0-9_-]` (must start and end alphanumeric), and email
+addresses are normalised to lower case so `User@x.com` and `user@x.com` are
+the same account.
 
 ### Avatars
 
 ```
 POST   /api/v1/avatars/upload        Upload photo (multipart: file + name)
+                                     limits: MAX_UPLOAD_SIZE (413 if over),
+                                     ALLOWED_EXTENSIONS, name ≤ 200 chars
 GET    /api/v1/avatars/              List avatars
 DELETE /api/v1/avatars/{id}          Delete avatar
 PUT    /api/v1/avatars/{id}/voice    Assign voice to avatar
@@ -427,6 +459,8 @@ AVATAR_ENGINE=musetalk            # musetalk (GPU recommended) | simple (CPU fal
 MUSETALK_PATH=models/MuseTalk
 
 # TTS — automatic fallback chain: chatterbox → edge-tts → gtts
+# chatterbox requires backend/requirements-tts.txt in its own venv (see
+# "Voice Cloning"); without it this transparently uses edge-tts.
 TTS_PROVIDER=chatterbox
 
 # STT
@@ -566,6 +600,27 @@ git checkout -b feat/my-feature
 git commit -m "feat(backend): add my feature"
 git push origin feat/my-feature
 ```
+
+---
+
+## 💜 Sponsor
+
+AvatarAI is MIT-licensed and developed in the open. If it saves you time, or
+your company is running it in production, sponsoring directly funds the work
+that is expensive to do for free:
+
+- **GPU time** for testing the MuseTalk lip-sync pipeline across resolutions
+  and hardware
+- **Model evaluation** as new TTS and STT releases land, so the defaults stay
+  current instead of drifting
+- **Maintenance** — dependency and security upkeep, issue triage, and review
+
+<a href="https://github.com/sponsors/PunithVT">
+  <img src="https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors&logoColor=white" alt="Sponsor on GitHub" />
+</a>
+
+Not in a position to sponsor? Starring the repo, filing a good bug report, or
+writing about what you built with it all genuinely help.
 
 ---
 

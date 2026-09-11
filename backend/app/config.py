@@ -12,7 +12,6 @@ _WEAK_SECRETS = {"change-this-secret-key", "change-this-jwt-secret", "change-thi
 
 class Settings(BaseSettings):
     # Application
-    APP_NAME: str = "AI Avatar System"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
@@ -20,16 +19,12 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql://avatar_user:password@localhost:5432/avatar_db"
-    DATABASE_HOST: str = "localhost"
-    DATABASE_PORT: int = 5432
     DATABASE_NAME: str = "avatar_db"
     DATABASE_USER: str = "avatar_user"
     DATABASE_PASSWORD: str = "password"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
-    REDIS_HOST: str = "localhost"
-    REDIS_PORT: int = 6379
 
     # Storage — local by default; set USE_LOCAL_STORAGE=false to use S3
     USE_LOCAL_STORAGE: bool = True
@@ -45,7 +40,6 @@ class Settings(BaseSettings):
     # API Keys
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
-    ELEVENLABS_API_KEY: Optional[str] = None
 
     # Point the OpenAI-compatible client at a different server — Ollama
     # (http://localhost:11434/v1), vLLM, LM Studio, OpenRouter, etc.
@@ -85,7 +79,6 @@ class Settings(BaseSettings):
     # TTS Configuration
     # chatterbox: Resemble AI's open-source SOTA TTS (default, voice cloning + 23 langs)
     TTS_PROVIDER: str = "chatterbox"
-    TTS_VOICE: str = "default"
 
     # Security
     # Union[..., str] lets pydantic-settings keep a non-JSON env value as a
@@ -106,6 +99,13 @@ class Settings(BaseSettings):
     AUTH_COOKIE_SAMESITE: str = "lax"  # lax | strict | none
     AUTH_COOKIE_DOMAIN: Optional[str] = None
 
+    # Guest accounts. "Continue as Guest" mints a real (anonymous) user row
+    # so the ordinary per-user ownership checks scope a guest's data to just
+    # that guest. They are disposable: the daily cleanup task deletes guest
+    # users whose sessions have all been idle longer than this.
+    GUEST_ACCOUNTS_ENABLED: bool = True
+    GUEST_RETENTION_HOURS: int = 48
+
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
     RATE_LIMIT_PER_HOUR: int = 1000
@@ -119,14 +119,14 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
-    # File Upload
+    # File Upload. Enforced while streaming the request body (see
+    # app.api.v1.avatars._read_capped) so an oversized upload is rejected
+    # without ever being buffered in full.
     MAX_UPLOAD_SIZE: int = 10485760  # 10MB
     ALLOWED_EXTENSIONS: Union[List[str], str] = ["jpg", "jpeg", "png", "webp"]
-
-    # Video Settings
-    VIDEO_FPS: int = 25
-    VIDEO_CODEC: str = "h264"
-    VIDEO_BITRATE: str = "2000k"
+    # Upper bound on the free-text avatar name accepted at upload time —
+    # matches AvatarRename.name so both entry points agree.
+    MAX_AVATAR_NAME_LEN: int = 200
 
     # Monitoring
     SENTRY_DSN: Optional[str] = None
@@ -154,6 +154,39 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
+    def _validate_production_hardening(self) -> "Settings":
+        """
+        Fail fast when a production deployment is configured unsafely.
+
+        DEBUG is the single switch that unlocks several dev-only behaviours:
+        interactive API docs, `create_all` instead of Alembic, raw exception
+        text in 5xx bodies, and SQL echo (which logs statement parameters).
+        A deploy that sets ENVIRONMENT=production but leaves DEBUG at its
+        `True` default silently gets all of them, so refuse to start rather
+        than run a production service in that state.
+        """
+        if self.ENVIRONMENT != "production":
+            return self
+
+        problems: list[str] = []
+        if self.DEBUG:
+            problems.append("DEBUG must be false in production")
+        if not self.AUTH_COOKIE_SECURE:
+            problems.append(
+                "AUTH_COOKIE_SECURE must be true in production so the auth "
+                "cookie is never sent over plain HTTP"
+            )
+        if "*" in self.CORS_ORIGINS:
+            problems.append(
+                "CORS_ORIGINS must not contain '*' in production — list your exact origins instead"
+            )
+        if any(str(o).startswith("http://") for o in self.CORS_ORIGINS):
+            problems.append("CORS_ORIGINS must use https:// in production")
+        if problems:
+            raise ValueError("Unsafe production configuration:\n  - " + "\n  - ".join(problems))
+        return self
+
+    @model_validator(mode="after")
     def _validate_secrets(self) -> "Settings":
         for field, value in (
             ("SECRET_KEY", self.SECRET_KEY),
@@ -170,6 +203,10 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": _ENV_FILE,
         "case_sensitive": True,
+        # Ignore (rather than reject) unrecognised keys. Operators carry
+        # long-lived .env files; a setting retired from this class must not
+        # turn their existing file into a startup crash.
+        "extra": "ignore",
     }
 
 

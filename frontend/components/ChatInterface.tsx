@@ -757,6 +757,13 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
       // Release media resources so navigating away mid-playback/recording
       // doesn't leak: a still-playing <video>, an open AudioContext, and a
       // running rAF loop all survive unmount otherwise.
+      //
+      // Reading videoRef.current HERE is deliberate. The lint rule wants the
+      // element captured in the effect body instead, but this effect runs
+      // once on mount with an empty dep array — at that point the <video> has
+      // not rendered yet and the ref still holds null, so capturing early
+      // would release nothing. On unmount we want whatever element is live.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
       const video = videoRef.current
       if (video) { video.pause(); video.removeAttribute('src'); video.load() }
       if (levelAnimRef.current !== null) cancelAnimationFrame(levelAnimRef.current)
