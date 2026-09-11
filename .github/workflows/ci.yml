@@ -8,7 +8,8 @@ on:
 
 env:
   PYTHON_VERSION: '3.10'
-  NODE_VERSION: '18'
+  # next@16 requires Node >=20.9.0 — Node 18 fails the build outright.
+  NODE_VERSION: '22'
 
 jobs:
   # ── Detect which folders changed ────────────────────────────────────────
@@ -233,9 +234,35 @@ jobs:
         if: needs.changes.outputs.frontend == 'true'
         run: docker build -t avatar-frontend ./frontend
 
+  # ── Frontend dependency audit ───────────────────────────────────────────
+  frontend-audit:
+    name: Frontend Audit
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Counterpart to the backend's pip-audit. Fails on high/critical only —
+      # low/moderate advisories are reported but don't block a merge.
+      - name: npm audit
+        run: npm audit --audit-level=high
+
   # ── Security scan ───────────────────────────────────────────────────────
   security-scan:
-    name: Security Scan
+    name: Backend Audit
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
