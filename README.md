@@ -332,6 +332,31 @@ bash deploy.sh production
 
 ---
 
+## 🙌 Hands-Free Mode
+
+Tap the **Radio** button next to the mic and just talk — no tap-to-record. The
+avatar detects when you start and stop speaking, and speaking over a reply
+interrupts it.
+
+How turns are decided (`frontend/lib/vad.ts`):
+
+- **Adaptive threshold.** The detector measures the room's ambient level for
+  ~700 ms, then listens for speech a margin above it, and keeps tracking the
+  floor while nobody is talking. A fixed threshold works at a desk and fails
+  in a cafe.
+- **Pause tolerance.** A turn ends after ~900 ms of continuous silence, so
+  "I think… maybe we should" stays one turn instead of three.
+- **Noise rejection.** Anything shorter than ~300 ms is discarded rather than
+  sent, so a cough or a door doesn't cost an STT call and an LLM turn.
+- **Echo cancellation** is requested on the mic. Without it the open mic hears
+  the avatar through the speakers and the session talks to itself.
+
+The detector is pure — it takes `(level, timestamp)` samples and returns turn
+boundaries — so its timing logic can be exercised against a synthetic trace
+without a browser or a microphone.
+
+---
+
 ## 🎤 Voice Cloning
 
 Powered by [Chatterbox Multilingual](https://github.com/resemble-ai/chatterbox) (Resemble AI) — zero-shot voice cloning from a 10-second sample, in 23 languages.
@@ -533,7 +558,7 @@ pytest --cov=app --cov-report=html  # HTML coverage
 - [x] **Streaming LLM** — TTS + lip-sync start before the LLM finishes (token-by-token) ✅
 - [x] **Barge-in** — interrupt the avatar mid-reply by speaking ✅
 - [x] **Local LLMs** — Ollama / vLLM / LM Studio via OpenAI-compatible API ✅
-- [ ] **Hands-free mode** — VAD-driven always-listening with auto end-of-turn (no tap-to-record)
+- [x] **Hands-free mode** — VAD-driven always-listening with auto end-of-turn (no tap-to-record) ✅
 - [ ] **WebRTC streaming** — sub-second full-duplex audio/video instead of chunked MP4
 - [ ] **Wav2Lip engine** — lighter lip-sync option for weaker GPUs
 - [ ] **Emotion-driven animation** — detected emotion changes facial expression

@@ -5,11 +5,12 @@ import {
   Send, Mic, MicOff, Video, Loader2, Volume2, VolumeX,
   Sparkles, Clock, Copy, RotateCcw, Wand2,
   MessageCircle, Zap, Activity, Download, Globe,
-  Pencil, Trash2, Check, X, Keyboard, Plug, Square,
+  Pencil, Trash2, Check, X, Keyboard, Plug, Square, Radio,
 } from 'lucide-react'
 import { useMutation } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
 import { api, buildSessionWsUrl } from '@/lib/api'
+import { VoiceActivityDetector } from '@/lib/vad'
 import { useStore } from '@/store/useStore'
 import type { Avatar, ChatMessage, WsMessage } from '@/lib/types'
 
@@ -161,6 +162,8 @@ function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
 
 export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCreated }: ChatInterfaceProps) {
   const setWsConnected = useStore((s) => s.setWsConnected)
+  const handsFree = useStore((s) => s.handsFree)
+  const setHandsFree = useStore((s) => s.setHandsFree)
 
   const [messages, setMessages] = useState<Message[]>([])
   const [inputText, setInputText] = useState('')
@@ -218,6 +221,22 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
+  // Hands-free holds its own mic/graph for the lifetime of the mode, rather
+  // than acquiring per turn: re-prompting getUserMedia on every utterance
+  // would be slow and would re-trigger the browser's permission UI.
+  const handsFreeStreamRef = useRef<MediaStream | null>(null)
+  const handsFreeCtxRef = useRef<AudioContext | null>(null)
+  const handsFreeAnimRef = useRef<number | null>(null)
+  const handsFreeRecorderRef = useRef<MediaRecorder | null>(null)
+  const vadRef = useRef<VoiceActivityDetector | null>(null)
+  // Bumped on every stop. getUserMedia can sit on a permission prompt for
+  // seconds; if hands-free is switched off in that window the resolved stream
+  // would otherwise be assigned after teardown and left running, keeping the
+  // mic live with nothing holding a reference to stop it.
+  const handsFreeGenRef = useRef(0)
+  // Set when a turn is abandoned as noise, so onstop discards it instead of
+  // shipping a fragment to STT.
+  const discardNextRef = useRef(false)
   const levelAnimRef = useRef<number | null>(null)
 
   // ── Fetch avatar image on mount ──────────────────────────────────────────
@@ -582,9 +601,38 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
     }
   }
 
+  /**
+   * Ship a captured utterance to the backend. Shared by push-to-talk and
+   * hands-free so the two cannot drift on what "sending a turn" means.
+   */
+  const sendAudioBlob = (audioBlob: Blob) => {
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      const base64Audio = (reader.result as string).split(',')[1]
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        setLatencyMs(null)
+        sendTimeRef.current = Date.now()
+        wsRef.current.send(JSON.stringify({ type: 'audio', audio: base64Audio }))
+        setIsProcessing(true)
+        chunkQueueRef.current = []
+        isPlayingRef.current = false
+        setShowVideo(false)
+      }
+    }
+    reader.readAsDataURL(audioBlob)
+  }
+
+  // Echo cancellation is what makes hands-free viable at all: without it the
+  // open mic hears the avatar's own reply through the speakers, the detector
+  // treats it as speech, and the session talks to itself in a loop. Useful
+  // for push-to-talk too, where it keeps barge-in from capturing the reply.
+  const MIC_CONSTRAINTS: MediaStreamConstraints = {
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  }
+
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
       const audioCtx = new AudioContext()
       const analyser = audioCtx.createAnalyser()
       analyser.fftSize = 256
@@ -607,21 +655,7 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
         cancelAnimationFrame(levelAnimRef.current!)
         setRecordingLevel(0)
         audioCtx.close()
-        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
-        const reader = new FileReader()
-        reader.onloadend = () => {
-          const base64Audio = (reader.result as string).split(',')[1]
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            setLatencyMs(null)
-            sendTimeRef.current = Date.now()
-            ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }))
-            setIsProcessing(true)
-            chunkQueueRef.current = []
-            isPlayingRef.current = false
-            setShowVideo(false)
-          }
-        }
-        reader.readAsDataURL(audioBlob)
+        sendAudioBlob(new Blob(audioChunks, { type: 'audio/webm' }))
         stream.getTracks().forEach(t => t.stop())
       }
       mediaRecorder.start()
@@ -631,6 +665,122 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
       toast.error('Failed to access microphone')
     }
   }
+
+  // ── hands-free ──────────────────────────────────────────────────────────
+
+  const stopHandsFree = useCallback(() => {
+    handsFreeGenRef.current += 1
+    if (handsFreeAnimRef.current !== null) {
+      cancelAnimationFrame(handsFreeAnimRef.current)
+      handsFreeAnimRef.current = null
+    }
+    // Discard rather than send: switching the mode off mid-utterance means
+    // the user is leaving, not finishing a thought.
+    if (handsFreeRecorderRef.current?.state === 'recording') {
+      discardNextRef.current = true
+      handsFreeRecorderRef.current.stop()
+    }
+    handsFreeRecorderRef.current = null
+    handsFreeStreamRef.current?.getTracks().forEach(t => t.stop())
+    handsFreeStreamRef.current = null
+    if (handsFreeCtxRef.current && handsFreeCtxRef.current.state !== 'closed') {
+      handsFreeCtxRef.current.close().catch(() => {})
+    }
+    handsFreeCtxRef.current = null
+    vadRef.current = null
+    setIsRecording(false)
+    setRecordingLevel(0)
+  }, [])
+
+  const startHandsFree = useCallback(async () => {
+    const gen = handsFreeGenRef.current
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
+      if (gen !== handsFreeGenRef.current) {
+        // Switched off while the permission prompt was up — release the mic
+        // we were just granted and leave.
+        stream.getTracks().forEach(t => t.stop())
+        return
+      }
+      const audioCtx = new AudioContext()
+      const analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 256
+      audioCtx.createMediaStreamSource(stream).connect(analyser)
+
+      handsFreeStreamRef.current = stream
+      handsFreeCtxRef.current = audioCtx
+      vadRef.current = new VoiceActivityDetector()
+
+      const data = new Uint8Array(analyser.frequencyBinCount)
+
+      const beginTurn = () => {
+        // Barge-in: speaking over the avatar cuts it off. The backend already
+        // understands "interrupt"; hands-free is just another way to trigger it.
+        if (isPlayingRef.current || chunkQueueRef.current.length > 0) {
+          wsRef.current?.send(JSON.stringify({ type: 'interrupt' }))
+          chunkQueueRef.current = []
+          isPlayingRef.current = false
+          setShowVideo(false)
+        }
+        const chunks: Blob[] = []
+        const rec = new MediaRecorder(stream)
+        rec.ondataavailable = (e) => chunks.push(e.data)
+        rec.onstop = () => {
+          const discard = discardNextRef.current
+          discardNextRef.current = false
+          if (!discard) sendAudioBlob(new Blob(chunks, { type: 'audio/webm' }))
+        }
+        rec.start()
+        handsFreeRecorderRef.current = rec
+        setIsRecording(true)
+      }
+
+      const endTurn = (discard: boolean) => {
+        discardNextRef.current = discard
+        if (handsFreeRecorderRef.current?.state === 'recording') {
+          handsFreeRecorderRef.current.stop()
+        }
+        handsFreeRecorderRef.current = null
+        setIsRecording(false)
+      }
+
+      const tick = () => {
+        const vad = vadRef.current
+        if (!vad || gen !== handsFreeGenRef.current) return
+        analyser.getByteFrequencyData(data)
+        const level = Math.min(100, (data.reduce((a, b) => a + b, 0) / data.length) * 2)
+        setRecordingLevel(vad.isSpeaking ? level : 0)
+
+        switch (vad.push(level, performance.now())) {
+          case 'speech-start':
+            beginTurn()
+            break
+          case 'speech-end':
+            endTurn(false)
+            break
+          case 'speech-abort':
+            endTurn(true)
+            break
+        }
+        handsFreeAnimRef.current = requestAnimationFrame(tick)
+      }
+      tick()
+    } catch {
+      if (gen === handsFreeGenRef.current) {
+        toast.error('Failed to access microphone')
+        setHandsFree(false)
+      }
+    }
+  // sendAudioBlob and MIC_CONSTRAINTS are stable for the component's life;
+  // including them would re-acquire the mic on every render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setHandsFree])
+
+  useEffect(() => {
+    if (handsFree) startHandsFree()
+    else stopHandsFree()
+    return stopHandsFree
+  }, [handsFree, startHandsFree, stopHandsFree])
 
   const stopRecording = () => {
     mediaRecorderRef.current?.stop()
@@ -1125,28 +1275,58 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
             <div className="flex items-center gap-2 mb-3 px-2">
               <span className="text-xs text-red-400 font-medium animate-pulse">REC</span>
               <WaveformBars active={isRecording} />
-              <span className="text-xs text-gray-500 ml-auto">Tap stop when done</span>
+              <span className="text-xs text-gray-500 ml-auto">
+                {handsFree ? 'Listening — pause when you\'re done' : 'Tap stop when done'}
+              </span>
+            </div>
+          )}
+          {handsFree && !isRecording && (
+            <div className="flex items-center gap-2 mb-3 px-2">
+              <span className="text-xs text-primary-400 font-medium">HANDS-FREE</span>
+              <span className="text-xs text-gray-500 ml-auto">
+                {isProcessing ? 'Thinking — speak to interrupt' : 'Just start talking'}
+              </span>
             </div>
           )}
 
           <div className="flex gap-2 items-end">
             <button
               onClick={isRecording ? stopRecording : startRecording}
-              disabled={isProcessing}
+              disabled={isProcessing || handsFree}
               aria-label={isRecording ? 'Stop recording' : 'Start voice recording'}
               aria-pressed={isRecording}
+              title={handsFree ? 'Hands-free is listening — turns are detected automatically' : undefined}
               className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
                 transition-all duration-200 active:scale-95
                 ${isRecording
                   ? 'bg-red-600 hover:bg-red-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)]'
                   : 'bg-surface-700 hover:bg-surface-600 border border-white/10 hover:border-primary-500/40 text-gray-400 hover:text-white'
                 }
-                ${isProcessing ? 'opacity-40 cursor-not-allowed' : ''}
+                ${isProcessing || handsFree ? 'opacity-40 cursor-not-allowed' : ''}
               `}
             >
               {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
               {isRecording && (
                 <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-red-500 animate-ping" />
+              )}
+            </button>
+
+            <button
+              onClick={() => setHandsFree(!handsFree)}
+              aria-label={handsFree ? 'Turn off hands-free listening' : 'Turn on hands-free listening'}
+              aria-pressed={handsFree}
+              title={handsFree ? 'Hands-free on — just talk' : 'Hands-free: listen continuously'}
+              className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
+                transition-all duration-200 active:scale-95
+                ${handsFree
+                  ? 'bg-primary-600 hover:bg-primary-500 text-white shadow-[0_0_20px_rgba(99,102,241,0.45)]'
+                  : 'bg-surface-700 hover:bg-surface-600 border border-white/10 hover:border-primary-500/40 text-gray-400 hover:text-white'
+                }
+              `}
+            >
+              <Radio size={18} />
+              {handsFree && !isRecording && (
+                <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-primary-400 animate-pulse" />
               )}
             </button>
 
