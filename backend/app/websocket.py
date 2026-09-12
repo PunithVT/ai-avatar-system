@@ -15,7 +15,13 @@ from fastapi import WebSocket
 
 from app.config import settings
 from app.services.animator import avatar_animator
-from app.services.llm import llm_service
+from app.services.llm import (
+    LLMAuthError,
+    LLMError,
+    LLMRateLimited,
+    LLMUnavailable,
+    llm_service,
+)
 from app.services.storage import storage_service
 from app.services.stt import stt_service
 from app.services.tts import tts_service
@@ -125,6 +131,27 @@ MAX_CONTEXT_MESSAGES = 60
 
 # Soft TTL for an idle (disconnected/abandoned) session in seconds.
 STALE_SESSION_TTL_SECS = 60 * 60 * 2  # 2 hours
+
+
+def _llm_error_message(exc: LLMError) -> str:
+    """
+    Turn a provider failure into something a user can act on.
+
+    llm.py maps SDK exceptions into this hierarchy precisely so the transport
+    can distinguish them, but nothing consumed it — every failure surfaced as
+    "Processing failed" regardless of whether the provider was rate-limiting,
+    the API key was wrong, or the network was down. Those need different
+    reactions: wait, fix your config, or retry.
+    """
+    if isinstance(exc, LLMRateLimited):
+        return "The AI provider is rate-limiting us. Try again in a moment."
+    if isinstance(exc, LLMAuthError):
+        # Deliberately not "check your API key" — the person talking to the
+        # avatar is usually not the person who configured it.
+        return "The AI provider rejected our credentials. This needs an admin."
+    if isinstance(exc, LLMUnavailable):
+        return "Couldn't reach the AI provider. Check your connection and try again."
+    return "The AI provider returned an error. Try again."
 
 
 class ConnectionManager:
@@ -525,6 +552,9 @@ class ConnectionManager:
 
         except asyncio.CancelledError:
             raise  # propagate barge-in cancellation cleanly
+        except LLMError as e:
+            logger.error(f"Audio turn LLM error [{session_id}]: {type(e).__name__}: {e}")
+            await self.send_message(session_id, {"type": "error", "message": _llm_error_message(e)})
         except Exception as e:
             logger.error(f"Audio error [{session_id}]: {e}")
             await self.send_message(
@@ -615,6 +645,9 @@ class ConnectionManager:
                 latency = (datetime.now(timezone.utc) - started_at).total_seconds()
                 await self._persist_message(session_id, "assistant", response_text, latency=latency)
 
+        except LLMError as e:
+            logger.error(f"Text turn LLM error [{session_id}]: {type(e).__name__}: {e}")
+            await self.send_message(session_id, {"type": "error", "message": _llm_error_message(e)})
         except Exception as e:
             logger.error(f"Text error [{session_id}]: {e}")
             await self.send_message(session_id, {"type": "error", "message": "Processing failed"})

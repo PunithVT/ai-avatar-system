@@ -144,3 +144,52 @@ async def test_ws_rejects_bad_token(monkeypatch):
             with tc.websocket_connect(f"/ws/session/{session_id}?token=garbage") as ws:
                 ws.receive_json()
         assert exc.value.code == 4401
+
+
+@pytest.mark.parametrize(
+    "exc_name,expected_fragment",
+    [
+        ("LLMRateLimited", "rate-limiting"),
+        ("LLMAuthError", "credentials"),
+        ("LLMUnavailable", "Couldn't reach"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_llm_failure_reaches_the_client_typed(monkeypatch, exc_name, expected_fragment):
+    """
+    End-to-end proof that a provider failure surfaces as something specific.
+
+    llm.py maps SDK exceptions into a typed hierarchy for exactly this, but
+    nothing caught them — every failure arrived as "Processing failed",
+    whether the user needed to wait, retry, or tell an admin to fix a key.
+    """
+    import app.services.llm as llmmod
+    import app.websocket as wsmod
+
+    url = _make_url()
+    session_id = await _seed(url)
+    sm = async_sessionmaker(
+        create_async_engine(url, poolclass=NullPool), class_=AsyncSession, expire_on_commit=False
+    )
+    monkeypatch.setattr("app.database.AsyncSessionLocal", sm)
+    monkeypatch.setattr(main, "AsyncSessionLocal", sm)
+
+    exc_cls = getattr(llmmod, exc_name)
+
+    async def failing_stream(*_a, **_kw):
+        raise exc_cls("provider said no")
+        yield ""  # pragma: no cover — makes this an async generator
+
+    monkeypatch.setattr(wsmod.llm_service, "stream_response", failing_stream)
+
+    token = create_access_token(data={"sub": "u1"})
+    with TestClient(main.app) as tc:
+        with tc.websocket_connect(f"/ws/session/{session_id}?token={token}") as ws:
+            ws.send_json({"type": "text", "text": "hi"})
+            for _ in range(60):
+                msg = ws.receive_json()
+                if msg["type"] == "error":
+                    assert expected_fragment.lower() in msg["message"].lower(), msg
+                    assert "processing failed" not in msg["message"].lower()
+                    return
+    raise AssertionError("no error message was delivered to the client")

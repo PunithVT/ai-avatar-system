@@ -17,17 +17,30 @@ class CacheService:
         self.default_ttl = 300  # 5 minutes
 
     async def initialize(self):
-        """Initialize Redis connection."""
+        """
+        Connect to Redis. A failure is non-fatal: callers treat `redis is None`
+        as "no cache", and the rate limiter falls back to in-process buckets.
+        """
+        client = None
         try:
-            self.redis = aioredis.from_url(
+            client = aioredis.from_url(
                 settings.REDIS_URL,
                 encoding="utf-8",
                 decode_responses=True,
             )
-            await self.redis.ping()
+            await client.ping()
+            self.redis = client
             logger.info("Redis cache connected successfully")
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
+            # Release the pool the failed client allocated. Assigning None over
+            # it would leak the connection pool on every retry.
+            if client is not None:
+                try:
+                    closer = getattr(client, "aclose", None) or client.close
+                    await closer()
+                except Exception:
+                    pass
             self.redis = None
 
     async def get(self, key: str) -> Optional[Any]:
@@ -43,7 +56,7 @@ class CacheService:
             logger.warning(f"Cache get error for key={key}: {e}")
             return None
 
-    async def set(self, key: str, value: Any, ttl: int = None) -> bool:
+    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         """Set value in cache with TTL."""
         if not self.redis:
             return False
@@ -92,12 +105,16 @@ class CacheService:
             return None
 
     async def cleanup(self):
-        """Close Redis connection."""
+        """Close the Redis connection and drop the reference."""
         if self.redis:
             # redis-py 5.x deprecated close() in favor of aclose(); fall back
             # for older clients that don't have it.
             closer = getattr(self.redis, "aclose", None) or self.redis.close
             await closer()
+            # Clear it too: leaving a closed client in place means anything
+            # touching the cache after shutdown fails against a dead socket
+            # instead of taking the well-tested "no cache" path.
+            self.redis = None
             logger.info("Redis cache connection closed")
 
 
