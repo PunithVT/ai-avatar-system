@@ -7,9 +7,15 @@ uvicorn[standard]==0.27.0
 # Parses every multipart upload (avatar images). 0.0.6 carried 7 advisories,
 # several of them parser DoS in exactly that request path.
 python-multipart==0.0.31
-# Signs and verifies every JWT. 3.3.0 carried algorithm-confusion and DoS
-# advisories (PYSEC-2024-232 / -233); 3.4.0 is the fixed release.
-python-jose[cryptography]==3.4.0
+# Signs and verifies every JWT (see app/tokens.py). Replaced python-jose,
+# which pinned pyasn1<0.5.0 and pulled in ecdsa — 10 advisories between them
+# with no fix reachable behind that pin. PyJWT uses `cryptography` instead and
+# drops both transitive dependencies.
+PyJWT[crypto]==2.14.0
+# Transitive (via rsa/google-auth), pinned explicitly because it was stuck
+# at 0.4.8 with 8 advisories by python-jose's pyasn1<0.5.0 cap. With jose
+# gone nothing constrains it, so pin the fixed line.
+pyasn1==0.6.4
 # bcrypt used directly for password hashing — passlib 1.7.4 (2020) is
 # incompatible with bcrypt 5.x and is unmaintained, so we dropped it.
 bcrypt>=4.1.0

@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from jose import JWTError, jwt
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import select, text
 
@@ -22,6 +21,7 @@ from app.models import Session as SessionModel
 from app.services.cache import cache_service
 from app.services.storage import storage_service
 from app.telemetry import init_telemetry
+from app.tokens import subject_from_token
 from app.websocket import websocket_manager
 
 # Configure logging FIRST — every import below may log on module load.
@@ -294,15 +294,7 @@ async def _verify_ws_session(session_id: str, token: str | None) -> str | None:
                 return None
 
             if token:
-                try:
-                    payload = jwt.decode(
-                        token,
-                        settings.JWT_SECRET_KEY,
-                        algorithms=[settings.JWT_ALGORITHM],
-                    )
-                    user_id = payload.get("sub")
-                except JWTError:
-                    return None
+                user_id = subject_from_token(token)
                 if user_id and user_id == sess.user_id:
                     return user_id
                 return None
