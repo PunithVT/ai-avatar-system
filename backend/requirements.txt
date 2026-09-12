@@ -1,4 +1,8 @@
-fastapi==0.109.0
+fastapi==0.141.1
+# Pinned explicitly: the 7 advisories were against starlette, not fastapi,
+# and only >=1.3.1 clears them all. fastapi <0.135 capped starlette below
+# 1.0, so the framework had to move first.
+starlette==1.6.0
 uvicorn[standard]==0.27.0
 # Parses every multipart upload (avatar images). 0.0.6 carried 7 advisories,
 # several of them parser DoS in exactly that request path.
@@ -10,8 +14,8 @@ python-jose[cryptography]==3.4.0
 # incompatible with bcrypt 5.x and is unmaintained, so we dropped it.
 bcrypt>=4.1.0
 python-dotenv==1.2.2
-pydantic[email]==2.5.3
-pydantic-settings==2.1.0
+pydantic[email]==2.13.5
+pydantic-settings==2.15.0
 
 # Database
 sqlalchemy==2.0.25
@@ -24,8 +28,12 @@ redis==5.0.1
 hiredis==2.3.2
 
 # AWS
-boto3==1.34.25
-aioboto3==12.3.0
+# Bumped together to lift botocore's urllib3<2.1 cap, which pinned urllib3
+# at 2.0.7 with 5 open advisories (fixes need >=2.5). storage.py uses only
+# Session/client-as-async-CM and put/get/delete/head/create_bucket, all
+# unchanged across 12->15; verified each call reaches the transport layer.
+boto3==1.40.61
+aioboto3==15.5.0
 
 # WebSocket
 websockets==12.0
@@ -44,7 +52,13 @@ accelerate==0.26.1
 diffusers==0.32.2
 numpy==1.26.3
 opencv-python==4.9.0.80
-Pillow==10.2.0
+# 10.2.0 carried 3 advisories; some are only fixed in 12.2+. Safe for the
+# lip-sync path: MuseTalk uses only Image.fromarray/new/open and
+# resize(..., Image.BILINEAR), all of which still exist in 12.x (it never
+# touches Image.ANTIALIAS, the notable 10.0 removal). moviepy pins
+# pillow<12 but is not a dependency of this service — it backs MuseTalk's
+# standalone Gradio app.py, which we never invoke.
+Pillow==12.3.0
 librosa==0.10.1
 soundfile==0.12.1
 scipy==1.12.0
@@ -86,7 +100,7 @@ flower==2.0.1
 
 # Monitoring & Logging
 prometheus-client==0.19.0
-prometheus-fastapi-instrumentator==6.1.0
+prometheus-fastapi-instrumentator==8.1.0
 sentry-sdk==2.8.0
 
 # Utilities
