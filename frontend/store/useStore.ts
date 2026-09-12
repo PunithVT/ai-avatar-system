@@ -27,6 +27,12 @@ interface AppState {
   theme: 'light' | 'dark'
   toggleTheme: () => void
 
+  // Hands-free: mic stays open and turns are detected by voice activity
+  // instead of tapping record. Persisted because it is a standing preference
+  // about how someone talks to the avatar, not per-session state.
+  handsFree: boolean
+  setHandsFree: (on: boolean) => void
+
   // Session
   activeSessionId: string | null
   selectedAvatarId: string | null
@@ -55,6 +61,9 @@ export const useStore = create<AppState>()(
       isAuthenticated: () => get().token !== null,
 
       // Theme
+      handsFree: false,
+      setHandsFree: (on) => set({ handsFree: on }),
+
       theme: 'dark',
       toggleTheme: () =>
         set((state) => ({
@@ -86,6 +95,7 @@ export const useStore = create<AppState>()(
         token: state.token,
         user: state.user,
         theme: state.theme,
+        handsFree: state.handsFree,
         selectedAvatarId: state.selectedAvatarId,
         activeSessionId: state.activeSessionId,
       }),
