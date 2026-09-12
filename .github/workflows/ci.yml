@@ -278,14 +278,18 @@ jobs:
       # green. continue-on-error keeps the failure visible in the checks list
       # while letting the PR land.
       #
-      # It cannot be made blocking yet. torch (11 advisories) and transformers
-      # (13) only have fixes in releases the MuseTalk lip-sync pipeline cannot
-      # run against — MuseTalk needs the torch 2.2 / transformers 4.37
-      # generation — so a green audit is unreachable until that pipeline is
-      # ported. The app-layer packages with reachable fixes have been upgraded
-      # (python-jose, python-multipart, python-dotenv, python-socketio,
-      # requests, sentry-sdk); fastapi/starlette remain because they are a
-      # coupled major bump that needs its own change.
+      # It cannot be made blocking yet, but the reason is now narrow: torch
+      # (23 advisories), transformers (45), diffusers (5) and accelerate (1)
+      # only have fixes in releases the MuseTalk lip-sync pipeline cannot run
+      # against — it needs the torch 2.2 / transformers 4.37 generation. A
+      # green audit is unreachable until that pipeline is ported.
+      #
+      # Every application dependency with a reachable fix has been upgraded:
+      # fastapi/starlette/pydantic, Pillow, boto3/aioboto3 (lifting the
+      # urllib3 cap), python-multipart, python-dotenv, python-socketio,
+      # requests, sentry-sdk, and PyJWT in place of python-jose (which pinned
+      # pyasn1 and ecdsa shut). Only click (capped by gTTS) and pytest
+      # (dev-only) remain outside the ML stack.
       #
       # Make this blocking once the ML stack can move, so new advisories in
       # application dependencies fail the build.

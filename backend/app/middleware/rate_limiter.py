@@ -23,11 +23,11 @@ from typing import Callable, Optional
 
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
-from jose import JWTError, jwt
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.services.cache import cache_service
+from app.tokens import subject_from_token
 
 logger = logging.getLogger(__name__)
 
@@ -63,17 +63,10 @@ def _extract_user_id(request: Request) -> Optional[str]:
         # offices starved each other).
         token = request.cookies.get(settings.AUTH_COOKIE_NAME)
     if not token or token == "guest":
+        # "guest" is a stale sentinel some browsers may still hold from the
+        # old shared-demo-user scheme; it was never a real token.
         return None
-    try:
-        payload = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-        )
-        sub = payload.get("sub")
-        return sub if isinstance(sub, str) else None
-    except JWTError:
-        return None
+    return subject_from_token(token)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

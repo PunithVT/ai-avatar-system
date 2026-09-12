@@ -1,12 +1,10 @@
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,12 +12,17 @@ from app.config import settings
 from app.database import get_db
 from app.models import User
 from app.schemas import Token, UserCreate, UserResponse, UserUpdate
+from app.tokens import create_access_token, subject_from_token
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/users/login", auto_error=False)
+
+# Re-exported: token minting lives in app.tokens now, but this has long been
+# its import site for callers and tests.
+__all__ = ["create_access_token", "get_current_user", "require_current_user"]
 
 # bcrypt only inspects the first 72 bytes of input and bcrypt>=4.1 raises
 # (rather than silently truncating) on longer input. We use the `bcrypt`
@@ -49,15 +52,6 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(_truncate_password(password), bcrypt.gensalt()).decode("utf-8")
-
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (
-        expires_delta or timedelta(hours=settings.JWT_EXPIRATION_HOURS)
-    )
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
 def _set_auth_cookie(response: Response, token: str) -> None:
@@ -97,12 +91,8 @@ async def get_current_user(
         token = request.cookies.get(settings.AUTH_COOKIE_NAME)
     if token is None:
         return None
-    try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            return None
-    except JWTError:
+    user_id = subject_from_token(token)
+    if user_id is None:
         return None
 
     result = await db.execute(select(User).where(User.id == user_id))
