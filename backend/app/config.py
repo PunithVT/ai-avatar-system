@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     # Upper bound on the free-text avatar name accepted at upload time —
     # matches AvatarRename.name so both entry points agree.
     MAX_AVATAR_NAME_LEN: int = 200
+    # Voice samples are 10-60 s of audio, so they need more headroom than a
+    # still image. Enforced the same way, while streaming the body.
+    MAX_VOICE_UPLOAD_SIZE: int = 20971520  # 20MB
 
     # Monitoring
     SENTRY_DSN: Optional[str] = None

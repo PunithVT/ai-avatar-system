@@ -48,11 +48,23 @@ interface EventPerformanceEntry extends PerformanceEntry {
 }
 
 /**
- * Initialize observers. Call once from a client component on mount.
- * Safe in SSR — does nothing if `window` is undefined.
+ * Initialize observers. Returns a teardown function — call it from the
+ * effect's cleanup.
+ *
+ * The teardown is not optional housekeeping. React StrictMode mounts, unmounts
+ * and remounts effects in development, so without it every observer and the
+ * visibilitychange listener register twice and each metric is reported twice.
+ * That is merely noisy against a console, and actively wrong once `report()`
+ * POSTs to an analytics endpoint, as the docstring above suggests.
+ *
+ * Safe in SSR — returns a no-op if `window` is undefined.
  */
-export function initWebVitals(): void {
-  if (typeof window === 'undefined' || !('PerformanceObserver' in window)) return
+export function initWebVitals(): () => void {
+  if (typeof window === 'undefined' || !('PerformanceObserver' in window)) {
+    return () => {}
+  }
+
+  const observers: PerformanceObserver[] = []
 
   // ── LCP — biggest above-the-fold element. Reported on visibilitychange.
   let lcpValue = 0
@@ -62,6 +74,7 @@ export function initWebVitals(): void {
       const last = entries[entries.length - 1] as PerformanceEntry & { renderTime?: number; loadTime?: number }
       lcpValue = last?.renderTime ?? last?.loadTime ?? last?.startTime ?? 0
     })
+    observers.push(lcpObserver)
     lcpObserver.observe({ type: 'largest-contentful-paint', buffered: true })
   } catch { /* not supported */ }
 
@@ -84,6 +97,7 @@ export function initWebVitals(): void {
         if (clsSession > clsValue) clsValue = clsSession
       }
     })
+    observers.push(clsObserver)
     clsObserver.observe({ type: 'layout-shift', buffered: true })
   } catch { /* not supported */ }
 
@@ -97,6 +111,7 @@ export function initWebVitals(): void {
         }
       }
     })
+    observers.push(eventObserver)
     eventObserver.observe({ type: 'event', buffered: true, durationThreshold: 16 } as PerformanceObserverInit)
   } catch { /* not supported */ }
 
@@ -106,7 +121,19 @@ export function initWebVitals(): void {
     if (clsValue > 0) report({ name: 'CLS', value: clsValue, rating: rateVital('CLS', clsValue) })
     if (inpValue > 0) report({ name: 'INP', value: inpValue, rating: rateVital('INP', inpValue) })
   }
-  document.addEventListener('visibilitychange', () => {
+  const onVisibilityChange = () => {
     if (document.visibilityState === 'hidden') flush()
-  }, { once: false })
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange)
+
+  return () => {
+    document.removeEventListener('visibilitychange', onVisibilityChange)
+    for (const o of observers) {
+      try {
+        o.disconnect()
+      } catch {
+        /* already gone */
+      }
+    }
+  }
 }
