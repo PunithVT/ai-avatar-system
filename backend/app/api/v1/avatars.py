@@ -15,6 +15,7 @@ from app.models import Avatar, User
 from app.schemas import AvatarMetadataUpdate, AvatarRename, AvatarResponse
 from app.services.avatar_processor import avatar_processor
 from app.services.storage import storage_service
+from app.uploads import read_capped
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,32 +34,6 @@ def _validate_uuid(avatar_id: str) -> None:
         uuid.UUID(avatar_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=404, detail="Avatar not found")
-
-
-async def _read_capped(file: UploadFile, limit: int) -> bytes:
-    """
-    Read an upload in chunks, aborting as soon as it exceeds `limit`.
-
-    `await file.read()` with a size check afterwards buffers the entire body
-    first, so a client could force the server to hold an arbitrarily large
-    payload in memory before we ever rejected it. Reading incrementally caps
-    peak memory at `limit` + one chunk regardless of what the client sends.
-    """
-    chunk_size = 64 * 1024
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(chunk_size)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > limit:
-            raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                detail=f"File must be under {limit // (1024 * 1024)} MB",
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 def _validate_extension(filename: Optional[str]) -> str:
@@ -92,7 +67,7 @@ async def upload_avatar(
         raise HTTPException(status_code=400, detail="File must be an image (JPG, PNG, WEBP)")
 
     suffix = _validate_extension(file.filename)
-    file_data = await _read_capped(file, settings.MAX_UPLOAD_SIZE)
+    file_data = await read_capped(file, settings.MAX_UPLOAD_SIZE, what="File")
 
     avatar_id = str(uuid.uuid4())
     temp_orig = TMPDIR / f"{avatar_id}_original{suffix}"

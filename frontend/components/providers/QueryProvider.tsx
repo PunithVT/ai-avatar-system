@@ -15,8 +15,10 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
     },
   }))
 
-  // Boot Core Web Vitals observers once after hydration.
-  useEffect(() => { initWebVitals() }, [])
+  // Boot Core Web Vitals observers after hydration. Returning the teardown
+  // matters under StrictMode, which mounts effects twice in development —
+  // without it each metric would be observed and reported twice.
+  useEffect(() => initWebVitals(), [])
 
   // useStore has skipHydration:true (see store/useStore.ts) — pull in the
   // persisted theme/auth/session state ourselves, but only after the first

@@ -23,7 +23,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import update
 
 from app.api.v1.users import require_current_user
+from app.config import settings
 from app.models import User
+from app.uploads import read_capped
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,6 @@ _index_lock = asyncio.Lock()
 # and creates a DoS vector for large uploads.
 MIN_DURATION_SECS = 10
 MAX_DURATION_SECS = 60
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB hard cap
 # Chatterbox Multilingual supports 23 languages — keep this in sync with
 # https://www.resemble.ai/introducing-chatterbox-multilingual-open-source-tts-for-23-languages/
 _ALLOWED_LANGUAGES = {
@@ -125,15 +126,13 @@ async def clone_voice(
         raise HTTPException(status_code=400, detail=f"Unsupported language '{lang}'")
 
     voice_id = str(uuid.uuid4())
-    audio_bytes = await audio.read()
+    # Streamed with a cap: reading the whole body first and checking the
+    # length afterwards let a client force the server to buffer an arbitrarily
+    # large upload before it was refused.
+    audio_bytes = await read_capped(audio, settings.MAX_VOICE_UPLOAD_SIZE, what="Audio file")
 
     if len(audio_bytes) < 1000:
         raise HTTPException(status_code=400, detail="Audio sample too short or empty")
-    if len(audio_bytes) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Audio file too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
-        )
 
     # Convert to WAV if needed and save as reference file
     try:
