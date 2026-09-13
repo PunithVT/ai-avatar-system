@@ -129,6 +129,15 @@ class LLMService:
                 api_key=settings.OPENAI_API_KEY,
                 base_url=settings.OPENAI_BASE_URL,  # None → api.openai.com
             )
+        else:
+            # Fail here rather than leaving `self.client` unset. Without this a
+            # typo in LLM_PROVIDER surfaced much later as an opaque
+            # AttributeError from inside the turn pipeline, pointing at the
+            # wrong thing entirely.
+            raise LLMError(
+                f"Unsupported LLM_PROVIDER {self.provider!r}. "
+                f"Expected one of: anthropic, openai, ollama."
+            )
 
     # ── non-streaming ────────────────────────────────────────────────────────
 
@@ -217,6 +226,8 @@ class LLMService:
             logger.error("openai_call_failed", extra={"error_type": type(e).__name__})
             raise mapped from e
 
+        if not response.choices:
+            raise LLMError("OpenAI-compatible response contained no choices")
         return response.choices[0].message.content or ""
 
     # ── streaming ────────────────────────────────────────────────────────────
@@ -273,6 +284,14 @@ class LLMService:
                 **self._openai_extra(),
             )
             async for chunk in stream:
+                # OpenAI sends a final usage-only chunk with an empty
+                # `choices` list when stream_options.include_usage is set, and
+                # several OpenAI-compatible servers (Ollama, vLLM, OpenRouter)
+                # emit one unconditionally. Indexing [0] blindly raised
+                # IndexError on that terminal chunk, failing the turn *after*
+                # the user had already seen the whole reply.
+                if not chunk.choices:
+                    continue
                 content = chunk.choices[0].delta.content
                 if content:
                     yield content

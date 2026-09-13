@@ -209,39 +209,69 @@ class TTSService:
 
         voice = _EDGE_VOICES.get(language, _EDGE_VOICES["en"])
         logger.info(f"Synthesizing (edge-tts, {voice}): {text[:80]}...")
-        mp3_path = output_path.replace(".wav", "_edge.mp3")
+        mp3_path = str(Path(output_path).with_suffix(".edge.mp3"))
 
-        await edge_tts.Communicate(text, voice).save(mp3_path)
-        await asyncio.to_thread(
-            lambda: AudioSegment.from_mp3(mp3_path).export(output_path, format="wav")
-        )
-        Path(mp3_path).unlink(missing_ok=True)
+        try:
+            await edge_tts.Communicate(text, voice).save(mp3_path)
+            await asyncio.to_thread(
+                lambda: AudioSegment.from_mp3(mp3_path).export(output_path, format="wav")
+            )
+            logger.info(f"Edge TTS synthesis complete: {output_path}")
+            return output_path
+        finally:
+            Path(mp3_path).unlink(missing_ok=True)
 
-        logger.info(f"Edge TTS synthesis complete: {output_path}")
-        return output_path
+    @staticmethod
+    def _gtts_language(language: str) -> str:
+        """
+        Map a session language onto one gTTS actually supports.
+
+        gTTS covers 59 languages but not the same 23 this app offers — Hebrew
+        ("he") is accepted everywhere else in the stack and rejected here with
+        ValueError. Since gTTS is the last link in the chain, letting that
+        raise turned a supported language into silence, which is exactly what
+        the fallback chain exists to prevent. Speaking the text in an English
+        voice is a poor result; producing nothing is a broken one.
+        """
+        try:
+            from gtts.lang import tts_langs
+
+            if language in tts_langs():
+                return language
+        except Exception:
+            # Language list unavailable (offline, API change) — try as given
+            # and let the synth attempt decide.
+            return language
+        logger.warning(f"gTTS does not support {language!r}; speaking with the English voice")
+        return "en"
 
     async def _gtts_fallback(self, text: str, output_path: str, language: str = "en") -> str:
         """Network-only fallback using Google TTS — no GPU/local model required."""
+        # Build the temp name from the path's stem rather than replacing the
+        # first ".wav" found anywhere in the string, which would corrupt a path
+        # like /tmp/a.wav.d/out.wav.
+        mp3_path = str(Path(output_path).with_suffix(".gtts.mp3"))
         try:
             from gtts import gTTS
             from pydub import AudioSegment
 
-            logger.info(f"Synthesizing (gTTS): {text[:80]}...")
-            mp3_path = output_path.replace(".wav", "_gtts.mp3")
+            lang = self._gtts_language(language)
+            logger.info(f"Synthesizing (gTTS, lang={lang}): {text[:80]}...")
 
-            await asyncio.to_thread(
-                lambda: gTTS(text=text, lang=language, slow=False).save(mp3_path)
-            )
+            await asyncio.to_thread(lambda: gTTS(text=text, lang=lang, slow=False).save(mp3_path))
             await asyncio.to_thread(
                 lambda: AudioSegment.from_mp3(mp3_path).export(output_path, format="wav")
             )
-            Path(mp3_path).unlink(missing_ok=True)
 
             logger.info(f"gTTS synthesis complete: {output_path}")
             return output_path
         except Exception as e:
             logger.error(f"gTTS also failed: {e}")
             raise
+        finally:
+            # In a finally so a failed mp3->wav conversion doesn't strand the
+            # intermediate file in the session directory.
+            Path(mp3_path).unlink(missing_ok=True)
 
     async def synthesize_bytes(
         self,
