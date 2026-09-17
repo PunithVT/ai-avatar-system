@@ -163,21 +163,48 @@ terraform plan -out=tfplan
 terraform apply tfplan
 ```
 
+**What this creates:** VPC, RDS Postgres, ElastiCache Redis, S3 + CloudFront,
+ALB, ECR repositories, and a GPU-backed ECS cluster (EC2 Auto Scaling group —
+**not Fargate, which has no GPU support** and so cannot run MuseTalk).
+
+Required variables with no default: `s3_bucket_name`, `db_password`,
+`jwt_secret_key`, `secret_key`. The last two must be at least 32 characters —
+the application refuses to start otherwise.
+
 ### Step 2: Deploy Application
 
 ```bash
-# Make deploy script executable
 chmod +x deploy.sh
-
-# Deploy to AWS
 ./deploy.sh production
 ```
 
+This builds both images, pushes them to ECR, applies the Terraform, then rolls
+the ECS services onto the new images and waits for them to stabilise. Expect
+the first run to take a while: the backend cold start downloads ~9 GB of
+MuseTalk weights.
+
+When it finishes it prints the application URL (the ALB DNS name).
+
+> **Before real use, put TLS in front of it.** The listener created here is
+> HTTP:80. Production config sets `AUTH_COOKIE_SECURE=true`, which means the
+> auth cookie will not be sent over plain HTTP — so logins will not persist
+> until you add an ACM certificate and an HTTPS listener, or front the ALB
+> with CloudFront.
+
+> **Cost.** A `g5.xlarge` on demand, plus RDS, ElastiCache, ALB and a NAT
+> gateway, is meaningfully more than the single-VM path in the README. If you
+> only need one box, `scripts/deploy-aws.sh` on a GPU instance is far cheaper.
+
 ### Step 3: Setup DNS (Optional)
 
-1. Go to Route53 in AWS Console
+1. Go to Route53 in the AWS Console
 2. Create a hosted zone for your domain
-3. Create A record pointing to CloudFront distribution
+3. Create an **A (alias) record pointing at the ALB** — not at CloudFront.
+   CloudFront here fronts the S3 media bucket; the application is served by the
+   load balancer.
+4. Request an ACM certificate for the domain and attach it to a new HTTPS
+   listener on the ALB, then set `cors_origins = "https://yourdomain.com"` in
+   `terraform.tfvars` and re-apply.
 4. Update nameservers at your domain registrar
 
 ---
