@@ -1,5 +1,6 @@
 import uuid
 
+import sqlalchemy as sa
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -35,7 +36,12 @@ class User(Base):
     # Anonymous "Continue as Guest" account. Indexed because the retention
     # sweep selects on it, and it is the flag the UI uses to prompt for a
     # real sign-up before the account is reaped.
-    is_guest = Column(Boolean, default=False, nullable=False, index=True)
+    # server_default mirrors migration 0004, which needed one to backfill this
+    # NOT NULL column on existing rows. Declaring it here too keeps the model
+    # and the database in agreement — without it every `alembic revision
+    # --autogenerate` emitted a spurious "drop server default" operation, and
+    # autogenerate that cries wolf is autogenerate nobody reads.
+    is_guest = Column(Boolean, default=False, server_default=sa.false(), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
