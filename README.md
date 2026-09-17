@@ -347,6 +347,17 @@ bash scripts/setup_face_restore.sh   # installs gfpgan + ~520 MB of weights
 FACE_RESTORE=gfpgan                  # off | gfpgan
 ```
 
+`gfpgan` is deliberately **not** in `requirements.txt`. It depends on
+`basicsr`, which ships no wheel and builds from source, and whose `setup.py`
+collides with the CUDA base image's preinstalled `cuda-toolkit` — listing it
+there failed the backend image build for everyone, including people who never
+enable restoration. It lives in `backend/requirements-face-restore.txt` and is
+installed by the setup script, the same way MuseTalk and Chatterbox are.
+
+For the same reason, restoration is a **bare-metal / GPU-host feature today**:
+inside the CUDA container the `basicsr` build needs work that hasn't been done
+yet.
+
 GFPGAN runs over each composited frame after MuseTalk has blended its generated
 mouth back in, so it sees a complete face to detect.
 

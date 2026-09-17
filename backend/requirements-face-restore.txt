@@ -1,0 +1,32 @@
+# Optional: GFPGAN face restoration (FACE_RESTORE=gfpgan).
+#
+# WHY THIS IS NOT IN requirements.txt
+# gfpgan depends on basicsr, which ships no wheel and builds from source. Its
+# setup.py resolves build dependencies through pkg_resources, which collides
+# with the CUDA base image's preinstalled cuda-toolkit:
+#
+#   pkg_resources.ContextualVersionConflict:
+#     nvidia-cublas 13.8.0.4 vs Requirement.parse('nvidia-cublas==13.1.1.3.*')
+#
+# That aborts metadata generation, which fails the whole
+# `pip install -r requirements.txt` — so listing it here broke the backend
+# image for everyone, including people who never turn restoration on. An
+# optional nicety must not be able to take down the core build.
+#
+# Same treatment as MuseTalk itself and requirements-tts.txt: heavy, optional
+# ML components get their own install path.
+#
+# HOW TO USE IT
+#   bash scripts/setup_face_restore.sh      (installs this + downloads weights)
+#
+# then set FACE_RESTORE=gfpgan in .env.
+#
+# WITHOUT IT
+# Nothing breaks. The worker logs one warning and falls through to plain
+# MuseTalk output; lip-sync is unaffected.
+#
+# NOTE: basicsr imports torchvision.transforms.functional_tensor, removed in
+# torchvision 0.18. Our pin is 0.17.0, so it resolves — check this first if a
+# torchvision bump ever breaks the worker.
+
+gfpgan==1.3.8

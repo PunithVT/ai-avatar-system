@@ -26,7 +26,11 @@ if [ ! -d "$MUSETALK_DIR" ]; then
 fi
 
 echo "[1/4] Installing gfpgan..."
-"$VENV_PIP" install -q "gfpgan==1.3.8"
+# From the requirements file, not a bare pin, so there is one source of
+# truth for the version. Deliberately NOT in requirements.txt: basicsr
+# builds from source and its setup.py collides with the CUDA image's
+# cuda-toolkit, which would fail the backend image build for everyone.
+"$VENV_PIP" install -q -r "$BACKEND_DIR/requirements-face-restore.txt"
 
 echo "[2/4] Downloading GFPGANv1.4 weights (~333 MB)..."
 mkdir -p "$GFPGAN_DIR"
