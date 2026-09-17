@@ -83,7 +83,7 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
 | 🤖 **LLM Backends** | Claude (prompt-cached) · GPT-4o · **Ollama / vLLM / LM Studio (local, free)** |
 | 🎤 **Voice Cloning** | Record 10–60 s → Chatterbox Multilingual zero-shot cloning |
 | 🗣️ **Speech-to-Text** | Whisper (`faster-whisper`, CUDA), decodes browser WebM natively |
-| 🎬 **Lip-Sync Video** | MuseTalk V1.5 persistent worker (30 FPS on GPU) · FFmpeg fallback (CPU) |
+| 🎬 **Lip-Sync Video** | MuseTalk V1.5 persistent worker (30 FPS on GPU) · optional GFPGAN restore · FFmpeg fallback (CPU) |
 | ⚡ **Streaming Pipeline** | Live LLM tokens + per-sentence video chunks over WebSocket |
 | ✋ **Barge-In** | Speak or hit stop mid-reply — in-flight turn cancels in ms |
 | 🔉 **TTS Fallback Chain** | chatterbox (optional, separate venv) → edge-tts (free neural voices) → gTTS — never silent |
@@ -329,6 +329,36 @@ terraform init
 terraform apply -var="environment=production"
 bash deploy.sh production
 ```
+
+---
+
+## 🔍 Face Restoration (optional)
+
+MuseTalk regenerates the mouth region at **256×256** and the worker scales it
+back up to the crop size, while the avatar itself is stored at
+`AVATAR_RESOLUTION` (512). The mouth therefore renders at roughly half the
+resolution of the face around it — and that gap, not the model, is the
+pipeline's visible quality ceiling. Swapping lip-sync engines doesn't close it;
+a face restorer does.
+
+```bash
+bash scripts/setup_face_restore.sh   # installs gfpgan + ~520 MB of weights
+# then in .env:
+FACE_RESTORE=gfpgan                  # off | gfpgan
+```
+
+GFPGAN runs over each composited frame after MuseTalk has blended its generated
+mouth back in, so it sees a complete face to detect.
+
+**It is off by default, deliberately.** Restoration runs *per frame*, so it
+trades FPS for sharpness, and whether that trade is worth it depends on your
+GPU and how close to real-time you need to stay. A/B it against
+`FACE_RESTORE=off` on the same avatar and audio before leaving it on.
+
+Everything about it degrades rather than breaks: missing weights, a broken
+`gfpgan` install, CPU-only hardware, or a single frame that fails to restore
+all fall back to plain MuseTalk output. Lip-sync is the feature; sharpness is
+the nicety.
 
 ---
 

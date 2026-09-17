@@ -90,6 +90,17 @@ edge-tts>=6.1.0
 gtts==2.5.1
 pydub==0.25.1
 
+# Face restoration (optional — only imported when FACE_RESTORE=gfpgan).
+# Pinned explicitly because it was already present as an undeclared transitive
+# of the MuseTalk tree; building on it without declaring it would mean a
+# working dev box and a broken fresh install.
+#
+# 1.3.8 depends on basicsr, which imports
+# torchvision.transforms.functional_tensor — removed in torchvision 0.18. Our
+# pin is 0.17.0 so it resolves, but that is the thing to check first if a
+# torchvision bump ever breaks the worker.
+gfpgan==1.3.8
+
 # Avatar Animation
 face-alignment==1.4.1
 imageio==2.33.1

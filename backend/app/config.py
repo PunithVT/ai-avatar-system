@@ -64,6 +64,22 @@ class Settings(BaseSettings):
     # (non-reasoning) models so nothing is sent.
     LLM_REASONING_EFFORT: str = ""
 
+    # Face restoration (optional, GPU only).
+    #
+    # MuseTalk regenerates the mouth region at 256x256 and the worker scales it
+    # back up to the crop size, while avatars themselves are stored at
+    # AVATAR_RESOLUTION (512). The mouth is therefore rendered at roughly half
+    # the resolution of the face around it, which is the pipeline's visible
+    # quality ceiling — a model swap does not fix it, a restorer does.
+    #
+    # Off by default: restoration runs per frame and costs real time, so
+    # whether it is worth the FPS has to be measured on the target GPU rather
+    # than assumed. See README -> Face Restoration.
+    FACE_RESTORE: str = "off"  # off | gfpgan
+    # Downloaded by scripts/setup_face_restore.sh. Relative paths resolve
+    # against MUSETALK_PATH, since the worker runs with that as its cwd.
+    FACE_RESTORE_MODEL: str = "models/gfpgan/GFPGANv1.4.pth"
+
     # Avatar Engine
     AVATAR_ENGINE: str = "musetalk"  # musetalk, simple
     AVATAR_RESOLUTION: int = 512

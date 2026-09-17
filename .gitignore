@@ -43,6 +43,10 @@ pnpm-lock.yaml
 # Local setup sentinels
 .musetalk_ready
 
+# GFPGAN/facexlib cache their helper nets next to the process cwd on first use
+gfpgan/weights/
+**/gfpgan/weights/
+
 # ML models & media
 *.pt
 *.pth
