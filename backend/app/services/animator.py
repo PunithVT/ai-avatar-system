@@ -21,8 +21,12 @@ class AvatarAnimator:
     """
     Avatar Animation Service.
     Supported engines (set AVATAR_ENGINE in .env):
-      - musetalk : MuseTalk V1.5 — persistent worker (models loaded once)
-      - simple   : ffmpeg static image + audio, no lip-sync
+      - musetalk   : MuseTalk V1.5 — persistent worker (models loaded once)
+      - liveavatar : Alibaba LiveAvatar — higher fidelity, 48 GB+ VRAM, and a
+                     full 14B model load per turn (see _animate_liveavatar)
+      - simple     : ffmpeg static image + audio, no lip-sync
+
+    Any engine failure falls back to simple rather than failing the turn.
     """
 
     def __init__(self):
@@ -33,6 +37,7 @@ class AvatarAnimator:
         self.use_float16 = self.device == "cuda"  # float16 on GPU = ~2× faster via Tensor Cores
         self._initialised = False
         self._musetalk_dir: Optional[Path] = None
+        self._liveavatar_dir: Optional[Path] = None
 
         # Persistent worker handles
         self._worker_proc: Optional[asyncio.subprocess.Process] = None
@@ -78,6 +83,27 @@ class AvatarAnimator:
                 self._worker_env["PYTHONPATH"] = str(self._musetalk_dir) + (
                     ":" + existing if existing else ""
                 )
+
+        elif self.engine == "liveavatar":
+            self._liveavatar_dir = self._find_dir(
+                settings.LIVEAVATAR_PATH, "minimal_inference/s2v_streaming_interact.py"
+            )
+            if self._liveavatar_dir is None:
+                logger.warning(
+                    "LiveAvatar not found at '%s'. "
+                    "Run scripts/setup_liveavatar.sh to install it. "
+                    "Falling back to simple animation.",
+                    settings.LIVEAVATAR_PATH,
+                )
+                self.engine = "simple"
+            else:
+                logger.info(f"LiveAvatar found at: {self._liveavatar_dir}")
+                if self.device != "cuda":
+                    logger.warning(
+                        "LiveAvatar requires CUDA (48 GB+ VRAM with FP8). "
+                        "Falling back to simple animation."
+                    )
+                    self.engine = "simple"
 
         elif self.engine not in ("simple",):
             logger.warning(f"Unknown engine '{self.engine}', using simple animation.")
@@ -273,6 +299,8 @@ class AvatarAnimator:
         try:
             if self.engine == "musetalk":
                 return await self._animate_musetalk(avatar_image_path, audio_path, output_path)
+            elif self.engine == "liveavatar":
+                return await self._animate_liveavatar(avatar_image_path, audio_path, output_path)
             else:
                 return await self._animate_simple(avatar_image_path, audio_path, output_path)
         except Exception as e:
@@ -298,6 +326,127 @@ class AvatarAnimator:
         await self._worker_infer(avatar_path, audio_path, output_path, coord_cache)
 
         logger.info(f"MuseTalk animation done: {output_path}")
+        return output_path
+
+    # ── LiveAvatar ────────────────────────────────────────────────────────────
+
+    def _liveavatar_argv(
+        self, live_dir: Path, avatar_path: str, audio_path: str, output_path: str
+    ) -> list[str]:
+        """
+        Build the inference command.
+
+        Split out from the runner so the argument contract can be asserted in
+        tests without a GPU — this integration cannot be executed on ordinary
+        hardware, so the flags being right is the only thing that can be
+        checked cheaply.
+
+        Mirrors infinite_inference_single_gpu.sh: torchrun with one process,
+        --single_gpu, the DMD LoRA, and 4-step euler sampling with guidance
+        off. --save_file is what makes this fit animate()'s contract; without
+        it the script invents a timestamped name under ./output/ that the
+        caller would then have to go hunting for.
+        """
+        argv = [
+            "torchrun",
+            "--nproc_per_node=1",
+            "--standalone",
+            "minimal_inference/s2v_streaming_interact.py",
+            "--task",
+            "s2v-14B",
+            "--ckpt_dir",
+            str(live_dir / settings.LIVEAVATAR_CKPT_DIR),
+            "--single_gpu",
+            "--image",
+            str(Path(avatar_path).resolve()),
+            "--audio",
+            str(Path(audio_path).resolve()),
+            "--save_file",
+            str(Path(output_path).resolve()),
+            "--size",
+            settings.LIVEAVATAR_SIZE,
+            "--infer_frames",
+            str(settings.LIVEAVATAR_INFER_FRAMES),
+            "--sample_steps",
+            str(settings.LIVEAVATAR_SAMPLE_STEPS),
+            "--sample_solver",
+            "euler",
+            "--sample_guide_scale",
+            "0",
+            "--load_lora",
+            "--lora_path_dmd",
+            settings.LIVEAVATAR_LORA,
+            "--offload_model",
+            "True",
+        ]
+        if settings.LIVEAVATAR_FP8:
+            # Halves the weights; the difference between fitting on a 48 GB
+            # card and needing 80 GB.
+            argv.append("--fp8")
+        return argv
+
+    async def _animate_liveavatar(
+        self,
+        avatar_path: str,
+        audio_path: str,
+        output_path: str,
+    ) -> str:
+        """
+        Run one LiveAvatar generation.
+
+        NOT a persistent worker, unlike MuseTalk, because upstream has no such
+        mode: s2v_streaming_interact.py runs once and exits, so every call pays
+        a full 14B model load. That is minutes per turn, which is why this
+        engine belongs on the offline Celery render path rather than the live
+        WebSocket one — and why musetalk remains the default.
+
+        Building a persistent worker for it would mean patching upstream, which
+        is the maintenance debt that got SadTalker removed from this project.
+        """
+        live_dir: Path = self._liveavatar_dir  # type: ignore[assignment]
+        argv = self._liveavatar_argv(live_dir, avatar_path, audio_path, output_path)
+
+        logger.info(
+            "LiveAvatar: starting generation (expect minutes — the 14B model "
+            "loads on every invocation)"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(live_dir) + (
+            ":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+        )
+
+        # stderr to a file, not a pipe: the same deadlock that hit the MuseTalk
+        # worker applies here. Model loading writes progress bars continuously,
+        # and an undrained pipe buffer blocks the child indefinitely.
+        stderr_path = live_dir / "liveavatar_stderr.log"
+        with open(stderr_path, "ab") as stderr_file:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=stderr_file,
+                cwd=str(live_dir),
+                env=env,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=settings.LIVEAVATAR_TIMEOUT_SECS)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise RuntimeError(
+                    f"LiveAvatar timed out after {settings.LIVEAVATAR_TIMEOUT_SECS}s"
+                )
+
+        if proc.returncode != 0:
+            tail = stderr_path.read_text(errors="replace")[-4000:]
+            raise RuntimeError(f"LiveAvatar exited {proc.returncode}. stderr (tail):\n{tail}")
+
+        # Exit code 0 is not proof of output: the script picks its own filename
+        # when --save_file is not honoured as expected, and a missing file here
+        # should surface as a clear error rather than a later confusing one.
+        if not Path(output_path).is_file():
+            raise RuntimeError(f"LiveAvatar reported success but produced no file at {output_path}")
+
+        logger.info(f"LiveAvatar generation done: {output_path}")
         return output_path
 
     # ── Simple ffmpeg fallback ────────────────────────────────────────────────

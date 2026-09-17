@@ -81,7 +81,33 @@ class Settings(BaseSettings):
     FACE_RESTORE_MODEL: str = "models/gfpgan/GFPGANv1.4.pth"
 
     # Avatar Engine
-    AVATAR_ENGINE: str = "musetalk"  # musetalk, simple
+    #   musetalk   — default. Persistent worker, ~30 FPS on a 16-24 GB GPU.
+    #   liveavatar — Alibaba LiveAvatar (Wan2.2-S2V-14B + LoRA). Higher fidelity
+    #                and unbounded clip length, but needs 48 GB VRAM with FP8 /
+    #                80 GB without, and its inference script loads the 14B model
+    #                per invocation. See LIVEAVATAR_PATH below.
+    #   simple     — ffmpeg static image + audio, no lip-sync. CPU, instant.
+    AVATAR_ENGINE: str = "musetalk"  # musetalk, liveavatar, simple
+
+    # LiveAvatar. Only consulted when AVATAR_ENGINE=liveavatar.
+    #
+    # Its entry point (minimal_inference/s2v_streaming_interact.py) runs once
+    # and exits, with no persistent-worker mode — so every turn pays a full 14B
+    # model load. That is the opposite of why MuseTalk runs as a worker, and it
+    # rules LiveAvatar out of the live WebSocket path today. It suits the
+    # offline Celery render path, where a slow, better-looking result is the
+    # point. See README -> LiveAvatar.
+    LIVEAVATAR_PATH: str = "models/LiveAvatar"
+    LIVEAVATAR_CKPT_DIR: str = "ckpt/Wan2.2-S2V-14B"
+    LIVEAVATAR_LORA: str = "Quark-Vision/Live-Avatar"
+    # FP8 halves the weights and is what brings this within reach of a 48 GB
+    # card; without it the model wants 80 GB.
+    LIVEAVATAR_FP8: bool = True
+    LIVEAVATAR_SAMPLE_STEPS: int = 4
+    LIVEAVATAR_INFER_FRAMES: int = 48
+    LIVEAVATAR_SIZE: str = "480*832"
+    # A single turn on one GPU is minutes, not seconds.
+    LIVEAVATAR_TIMEOUT_SECS: int = 1800
     AVATAR_RESOLUTION: int = 512
     AVATAR_FPS: int = 25
     MUSETALK_PATH: str = "models/MuseTalk"

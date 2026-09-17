@@ -332,6 +332,50 @@ bash deploy.sh production
 
 ---
 
+## 🎛️ Avatar Engines
+
+`AVATAR_ENGINE` selects how video is generated. MuseTalk is the default and
+stays installed whatever else you add; any engine failure falls back to
+`simple` rather than failing the turn.
+
+| Engine | VRAM | Speed | Use it for |
+|---|---|---|---|
+| `simple` | none | instant | CPU hosts, no lip-sync |
+| `musetalk` | 16–24 GB | ~30 FPS | **default** — live conversation |
+| `liveavatar` | **48 GB** (FP8) / 80 GB | minutes per turn | offline renders where fidelity beats latency |
+
+### LiveAvatar (optional)
+
+[Alibaba LiveAvatar](https://github.com/Alibaba-Quark/LiveAvatar) (Wan2.2-S2V-14B
++ LoRA, Apache 2.0) produces higher fidelity than MuseTalk and supports
+10,000+ second continuous generation from a single reference image.
+
+```bash
+bash scripts/setup_liveavatar.sh    # checks VRAM first, then ~60 GB of weights
+# then in .env:
+AVATAR_ENGINE=liveavatar
+```
+
+**It is not a MuseTalk replacement, and MuseTalk remains the default.** Two
+reasons, both structural:
+
+- **48 GB VRAM minimum** with FP8, 80 GB without. That is a different hardware
+  tier from the `g5.xlarge` this project targets.
+- **It loads the 14B model on every invocation.** Upstream's entry point
+  (`minimal_inference/s2v_streaming_interact.py`) runs once and exits — there
+  is no persistent-worker mode, which is exactly what MuseTalk uses to keep
+  per-turn cost to inference alone. So a turn costs minutes, not milliseconds.
+
+That makes LiveAvatar a fit for the **offline Celery render path**, where a
+slow better-looking result is the point, and a poor fit for live conversation.
+Switching back is one setting: `AVATAR_ENGINE=musetalk`.
+
+> Giving LiveAvatar a persistent worker would mean patching upstream. That is
+> the maintenance debt that got SadTalker removed from this project, so it has
+> deliberately not been done.
+
+---
+
 ## 🔍 Face Restoration (optional)
 
 MuseTalk regenerates the mouth region at **256×256** and the worker scales it
@@ -521,7 +565,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_BASE_URL=                  # e.g. http://localhost:11434/v1 for Ollama / vLLM / LM Studio
 
 # Avatar engine
-AVATAR_ENGINE=musetalk            # musetalk (GPU recommended) | simple (CPU fallback)
+AVATAR_ENGINE=musetalk            # musetalk (default) | liveavatar (48GB+) | simple (CPU)
 MUSETALK_PATH=models/MuseTalk
 
 # TTS — automatic fallback chain: chatterbox → edge-tts → gtts
