@@ -51,21 +51,23 @@ services:
     container_name: avatar-backend
     ports:
       - "8000:8000"
+    # Everything from .env, the way docker-compose.prod.yml already does it.
+    # This used to be an explicit allowlist of 13 keys, which silently dropped
+    # 56 of the 69 settings the app defines — AVATAR_ENGINE, FACE_RESTORE,
+    # LLM_PROVIDER, CORS_ORIGINS, WHISPER_MODEL and TTS_PROVIDER among them. A
+    # setting changed in .env simply had no effect in the container, with no
+    # error to explain why. (README and SETUP_GUIDE both start with
+    # `cp .env.example .env`, so the file is there.)
+    env_file: .env
+    # Overrides that must win over .env: inside the compose network these are
+    # service names, not localhost, and .env is written for running the
+    # backend directly on the host. `environment` takes precedence over
+    # `env_file`, which is what makes this work.
     environment:
       - DATABASE_URL=postgresql://${DATABASE_USER:-avatar_user}:${DATABASE_PASSWORD:-change_this_password}@postgres:5432/${DATABASE_NAME:-avatar_db}
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_REGION=${AWS_REGION:-us-east-1}
-      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - SECRET_KEY=${SECRET_KEY}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - ENVIRONMENT=${ENVIRONMENT:-development}
-      - DEBUG=${DEBUG:-true}
     volumes:
       - ./backend:/app
       - avatar_cache:/tmp/avatars
@@ -138,15 +140,16 @@ services:
       dockerfile: Dockerfile
     container_name: avatar-celery-worker
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    # Same reasoning as the backend: the worker runs the same application code
+    # (avatar_animator.animate, tts_service.synthesize), so it needs the same
+    # settings. An allowlist here meant a task could behave differently from
+    # the API serving it, on the same .env.
+    env_file: .env
     environment:
       - DATABASE_URL=postgresql://${DATABASE_USER:-avatar_user}:${DATABASE_PASSWORD:-change_this_password}@postgres:5432/${DATABASE_NAME:-avatar_db}
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_REGION=${AWS_REGION:-us-east-1}
-      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
     volumes:
       - ./backend:/app
       - avatar_cache:/tmp/avatars
