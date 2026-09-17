@@ -1,10 +1,15 @@
 name: CI
 
+# Pull requests only. A merge to main re-runs the identical tree that was
+# just verified on the PR, and the Docker image build alone is ~15 minutes of
+# that. Verification happens before the merge, not after it.
+#
+# The trade: a semantic conflict between two PRs that each passed separately
+# would not be caught until the next PR runs. With serial merges that is a
+# narrow window; widen the trigger again if merges start landing in parallel.
 on:
   pull_request:
     branches: [main, develop]
-  push:
-    branches: [main]
 
 env:
   PYTHON_VERSION: '3.10'
@@ -122,8 +127,10 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --cov=app --cov-report=xml --cov-report=term-missing
 
+      # Was gated on a push to main, which no longer happens — that made it
+      # dead again, exactly as it was before the push trigger existed. Publish
+      # it from the PR run instead, which is now the only run there is.
       - name: Upload coverage
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: backend-coverage

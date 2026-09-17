@@ -50,7 +50,77 @@ def _reply(obj: dict):
     sys.stdout.flush()
 
 
-def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device):
+def _load_face_restorer(mode: str, model_path: str, device):
+    """
+    Load GFPGAN once, or return None.
+
+    Never raises. Restoration is a quality nicety; a missing weight file or a
+    dependency that moved must degrade to plain MuseTalk output rather than
+    take down lip-sync, which is the actual feature. Failures are reported on
+    stderr (which the parent captures to worker_stderr.log) and then dropped.
+    """
+    if mode != "gfpgan":
+        return None
+    if device.type != "cuda":
+        # On CPU a MuseTalk turn already takes 30-90 s; adding a per-frame
+        # restoration pass would make it unusable rather than nicer.
+        sys.stderr.write("INFO: face restoration skipped — requires CUDA\n")
+        sys.stderr.flush()
+        return None
+    if not os.path.isfile(model_path):
+        sys.stderr.write(
+            f"WARN: face restoration disabled — weights not found at {model_path}. "
+            f"Run scripts/setup_face_restore.sh\n"
+        )
+        sys.stderr.flush()
+        return None
+    try:
+        from gfpgan import GFPGANer
+
+        restorer = GFPGANer(
+            model_path=model_path,
+            upscale=1,  # compositing is MuseTalk's job; only restore detail
+            arch="clean",
+            channel_multiplier=2,
+            bg_upsampler=None,  # background is untouched original pixels already
+        )
+        sys.stderr.write("INFO: face restoration enabled (gfpgan)\n")
+        sys.stderr.flush()
+        return restorer
+    except Exception as e:
+        sys.stderr.write(f"WARN: face restoration disabled — {type(e).__name__}: {e}\n")
+        sys.stderr.flush()
+        return None
+
+
+def _restore(restorer, frame):
+    """
+    Restore the face in a composited frame, or return it unchanged.
+
+    Applied after MuseTalk has blended its generated mouth back in, so GFPGAN
+    sees a complete face to detect. Running it on the raw generated region
+    instead would be cheaper, but that region is a jaw/mouth crop and the face
+    detector frequently finds nothing in it.
+
+    only_center_face keeps it to the avatar rather than anyone in the
+    background; paste_back composites the restored face into the frame.
+    """
+    if restorer is None:
+        return frame
+    try:
+        _, _, restored = restorer.enhance(
+            frame, has_aligned=False, only_center_face=True, paste_back=True
+        )
+        return restored if restored is not None else frame
+    except Exception as e:
+        # Per-frame failure must not abort the turn; one bad frame is invisible,
+        # a failed turn is not.
+        sys.stderr.write(f"WARN: face restoration failed on a frame: {e}\n")
+        sys.stderr.flush()
+        return frame
+
+
+def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device, restorer=None):
     image_path = job["image"]
     audio_path = job["audio"]
     output_path = job["output"]
@@ -136,6 +206,7 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
         except Exception:
             continue
         combined = get_image(ori, res_frame, [x1, y1, x2, y2], mode="jaw", fp=fp)
+        combined = _restore(restorer, combined)
         cv2.imwrite(f"{frames_dir}/{str(i).zfill(8)}.png", combined)
 
     # ── assemble video ───────────────────────────────────────────────────────
@@ -186,6 +257,12 @@ def main():
     fp = FaceParsing()
     timesteps = torch.tensor([0], device=device)
 
+    # Loaded once, like every other model here — the worker is persistent
+    # precisely so per-turn cost is inference only.
+    restorer = _load_face_restorer(
+        init.get("face_restore", "off"), init.get("face_restore_model", ""), device
+    )
+
     sys.stdout.write("READY\n")
     sys.stdout.flush()
 
@@ -199,7 +276,7 @@ def main():
         except json.JSONDecodeError:
             continue
         try:
-            _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device)
+            _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device, restorer)
             _reply({"status": "ok", "output": job["output"]})
         except Exception as e:
             _reply({"status": "error", "msg": str(e), "tb": traceback.format_exc()})

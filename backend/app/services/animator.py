@@ -44,7 +44,8 @@ class AvatarAnimator:
             gpu_name = torch.cuda.get_device_name(0)
             vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
             logger.info(
-                f"AvatarAnimator: engine={self.engine}, device=cuda "
+                f"AvatarAnimator: engine={self.engine}, device=cuda, "
+                f"face_restore={settings.FACE_RESTORE}, "
                 f"({gpu_name}, {vram_gb:.1f} GB VRAM), float16={self.use_float16}"
             )
         else:
@@ -160,6 +161,16 @@ class AvatarAnimator:
                     "whisper_dir": str(musetalk_dir / "models" / "whisper"),
                     "vae_type": str(musetalk_dir / "models" / "sd-vae"),
                     "use_float16": self.use_float16,
+                    # Optional GFPGAN pass over each composited frame. The
+                    # worker loads it once and degrades to plain output if the
+                    # weights or the package are missing, so an unset or
+                    # half-finished install costs nothing.
+                    "face_restore": settings.FACE_RESTORE,
+                    "face_restore_model": str(
+                        Path(settings.FACE_RESTORE_MODEL)
+                        if Path(settings.FACE_RESTORE_MODEL).is_absolute()
+                        else musetalk_dir / settings.FACE_RESTORE_MODEL
+                    ),
                 }
             )
             + "\n"
