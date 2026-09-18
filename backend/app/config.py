@@ -141,6 +141,24 @@ class Settings(BaseSettings):
     AUTH_COOKIE_SAMESITE: str = "lax"  # lax | strict | none
     AUTH_COOKIE_DOMAIN: Optional[str] = None
 
+    # Conversation memory.
+    #
+    # The LLM context is a fixed window of the most recent turns; anything
+    # older is dropped, so a long conversation silently forgets its own
+    # beginning. With this on, the turns falling out of the window are rolled
+    # into a running summary and carried in the system prompt instead.
+    #
+    # Deliberately a summary rather than embeddings + retrieval: it costs one
+    # LLM call when the window overflows (not per turn), needs no vector store
+    # or embedding model, and works with every provider the project supports —
+    # including Ollama, where requiring an embeddings API would have broken the
+    # "runs fully local and free" path.
+    CONVERSATION_MEMORY: bool = True
+    # Cap on the carried summary. Long enough to hold the thread of a
+    # conversation, short enough that it cannot crowd out the recent turns it
+    # exists to supplement.
+    MEMORY_SUMMARY_MAX_CHARS: int = 1500
+
     # Guest accounts. "Continue as Guest" mints a real (anonymous) user row
     # so the ordinary per-user ownership checks scope a guest's data to just
     # that guest. They are disposable: the daily cleanup task deletes guest
