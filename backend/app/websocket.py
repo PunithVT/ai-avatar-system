@@ -154,6 +154,29 @@ def _llm_error_message(exc: LLMError) -> str:
     return "The AI provider returned an error. Try again."
 
 
+# How the carried summary is introduced to the model. Framed as context rather
+# than instruction so it informs the reply without the model narrating it back.
+_MEMORY_PREAMBLE = "Earlier in this same conversation (summarised):"
+
+
+def _compose_system_prompt(base: Optional[str], summary: Optional[str]) -> Optional[str]:
+    """
+    Fold a conversation summary into the avatar's system prompt.
+
+    Kept pure so the composition can be tested without a websocket, an LLM or a
+    database — the parts most likely to be wrong here are ordering and what
+    happens when either half is missing.
+    """
+    if not summary:
+        return base
+    memory_block = f"{_MEMORY_PREAMBLE}\n{summary}"
+    if not base:
+        return memory_block
+    # Persona first: it governs how the avatar speaks, and burying it under a
+    # wall of recalled context makes models drift off-character.
+    return f"{base}\n\n{memory_block}"
+
+
 class ConnectionManager:
     """Manage WebSocket connections and the real-time avatar pipeline."""
 
@@ -200,12 +223,113 @@ class ConnectionManager:
             "voice_wav": None,
             "language": "en",
             "system_prompt": None,
+            # Running summary of turns that have fallen out of the context
+            # window. None until the conversation is long enough to lose any.
+            "memory_summary": None,
             "user_id": user_id,
             "connected_at": datetime.now(timezone.utc),
             "last_activity": datetime.now(timezone.utc),
         }
         await self._load_session_data(session_id)
         logger.info(f"WebSocket connected: {session_id} (user={user_id})")
+
+    async def _roll_memory(self, session_id: str, dropped: list[dict]) -> None:
+        """
+        Fold the turns just evicted from the context window into the running
+        summary, and persist it.
+
+        Runs only when the window actually overflows — for a 60-message window
+        that is once every 30 turns, not once per turn, which is what keeps
+        this from adding a second LLM call to every reply.
+
+        Never raises. Losing the summary costs continuity; letting it raise
+        would cost the turn, and the turn is the thing the user asked for.
+        """
+        if not settings.CONVERSATION_MEMORY or not dropped:
+            return
+
+        data = self.session_data.get(session_id)
+        if data is None:
+            return
+        previous = data.get("memory_summary")
+
+        lines = [
+            f"{'User' if m.get('role') == 'user' else 'Assistant'}: {m.get('content', '')}"
+            for m in dropped
+        ]
+        transcript = "\n".join(lines)
+
+        # Feed the old summary back in so this compounds rather than only ever
+        # describing the most recently dropped chunk.
+        if previous:
+            prompt = (
+                "Update the running summary of a conversation so it also covers "
+                "the newer turns below. Keep it under 150 words, third person, "
+                "no preamble. Preserve names, decisions and open questions.\n\n"
+                f"Existing summary:\n{previous}\n\nNewer turns:\n{transcript}"
+            )
+        else:
+            prompt = (
+                "Summarise the conversation turns below in under 150 words, "
+                "third person, no preamble. Preserve names, decisions and open "
+                f"questions.\n\n{transcript}"
+            )
+
+        try:
+            summary = await llm_service.generate_response(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt="You write concise neutral summaries.",
+            )
+        except Exception as e:
+            # Including LLMError: a provider hiccup here must not surface as a
+            # failed turn. The window simply truncates as it did before.
+            logger.warning(f"Memory summarisation failed [{session_id}]: {e}")
+            return
+
+        summary = (summary or "").strip()
+        if not summary:
+            return
+        if len(summary) > settings.MEMORY_SUMMARY_MAX_CHARS:
+            summary = summary[: settings.MEMORY_SUMMARY_MAX_CHARS].rstrip() + "…"
+
+        data["memory_summary"] = summary
+        # Guarded here as well as inside the callee. _roll_memory runs on the
+        # turn path, so anything escaping it becomes a failed reply — and this
+        # method's whole contract is that a memory problem never costs a turn.
+        # Relying on the callee's internal handling would make that contract
+        # depend on someone not refactoring it away.
+        try:
+            await self._persist_memory_summary(session_id, summary)
+        except Exception as e:
+            logger.warning(f"Could not persist memory summary [{session_id}]: {e}")
+        logger.info(f"Memory summary updated [{session_id}] ({len(summary)} chars)")
+
+    async def _persist_memory_summary(self, session_id: str, summary: str) -> None:
+        """
+        Store the summary on the session's Conversation row so it survives a
+        reconnect — otherwise a browser refresh would silently drop everything
+        the summary was carrying.
+        """
+        try:
+            from sqlalchemy import select
+
+            from app.database import AsyncSessionLocal
+            from app.models import Conversation
+
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(Conversation)
+                    .where(Conversation.session_id == session_id)
+                    .order_by(Conversation.created_at.desc())
+                    .limit(1)
+                )
+                conversation = result.scalar_one_or_none()
+                if conversation is None:
+                    return
+                conversation.summary = summary
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"Could not persist memory summary [{session_id}]: {e}")
 
     async def _load_session_data(self, session_id: str):
         try:
@@ -253,6 +377,24 @@ class ConnectionManager:
                         {"role": row.role, "content": row.content} for row in hist_rows
                     ]
                     logger.info(f"Rehydrated {len(hist_rows)} message(s) for session {session_id}")
+
+                # Restore the running summary too. Rehydrating only the last
+                # MAX_CONTEXT_MESSAGES rows means everything older is already
+                # outside the window on reconnect — without the summary a
+                # refresh would quietly lose it.
+                if settings.CONVERSATION_MEMORY:
+                    from app.models import Conversation
+
+                    conv_result = await db.execute(
+                        select(Conversation)
+                        .where(Conversation.session_id == session_id)
+                        .order_by(Conversation.created_at.desc())
+                        .limit(1)
+                    )
+                    conversation = conv_result.scalar_one_or_none()
+                    if conversation is not None and conversation.summary:
+                        self.session_data[session_id]["memory_summary"] = conversation.summary
+                        logger.info(f"Restored memory summary for session {session_id}")
 
                 avatar = session.avatar
                 if avatar:
@@ -606,9 +748,16 @@ class ConnectionManager:
             # Cap the conversation window. The system prompt is passed
             # separately to the LLM so we don't need to keep it in `messages`.
             if len(messages) > MAX_CONTEXT_MESSAGES:
+                # Roll what is about to be lost into the running summary before
+                # discarding it. Without this the model simply forgets the
+                # opening of a long conversation, with nothing to indicate it
+                # ever happened.
+                await self._roll_memory(session_id, messages[:-MAX_CONTEXT_MESSAGES])
                 messages = messages[-MAX_CONTEXT_MESSAGES:]
 
-            system_prompt = data.get("system_prompt")
+            system_prompt = _compose_system_prompt(
+                data.get("system_prompt"), data.get("memory_summary")
+            )
 
             # Persist the user turn before kicking off generation so it's
             # durable even if the model fails partway through.

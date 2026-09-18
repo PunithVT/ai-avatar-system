@@ -417,6 +417,37 @@ the nicety.
 
 ---
 
+## 🧠 Conversation Memory
+
+The LLM context is a fixed window of the most recent turns (`MAX_CONTEXT_MESSAGES`,
+60). Anything older used to be dropped outright, so a long conversation quietly
+forgot its own beginning — the avatar would lose your name twenty minutes in.
+
+Turns leaving the window are now folded into a running summary carried in the
+system prompt, and persisted to `Conversation.summary` so a browser refresh
+doesn't lose it.
+
+```bash
+CONVERSATION_MEMORY=true          # default
+MEMORY_SUMMARY_MAX_CHARS=1500
+```
+
+**A summary rather than embeddings, deliberately.** It costs one LLM call when
+the window overflows — roughly once every 30 turns, not once per reply — needs
+no vector store or embedding model, and works with every provider the project
+supports. Requiring an embeddings API would have broken the "runs fully local
+and free with Ollama" path, since Anthropic has no embeddings endpoint and a
+local embedding model is another dependency to install and keep working.
+
+The tradeoff is honest: a summary is lossy. It carries the *thread* of a
+conversation, not verbatim recall of a detail from an hour ago. Fact-level
+retrieval is what RAG would add, and that remains open on the roadmap.
+
+Failure never costs a turn — if summarisation fails, the window truncates
+exactly as it did before and the reply proceeds.
+
+---
+
 ## 🙌 Hands-Free Mode
 
 Tap the **Radio** button next to the mic and just talk — no tap-to-record. The
@@ -648,7 +679,7 @@ pytest --cov=app --cov-report=html  # HTML coverage
 - [ ] **Wav2Lip engine** — lighter lip-sync option for weaker GPUs
 - [ ] **Emotion-driven animation** — detected emotion changes facial expression
 - [ ] **Embeddable widget** — drop a talking avatar into any website with 3 lines of JS
-- [ ] **Long-term memory** — RAG + vector DB for persistent context
+- [x] **Long-term memory** — rolling summary carries context past the window ✅ *(RAG + vector DB still open for fact-level recall)*
 - [ ] **UI i18n** — the pipeline speaks 23 languages; the UI should too
 
 ---
