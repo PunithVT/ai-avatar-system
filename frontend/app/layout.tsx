@@ -1,11 +1,39 @@
 import './globals.css'
 import type { Metadata } from 'next'
-import { Inter } from 'next/font/google'
+import { Inter, Urbanist, JetBrains_Mono, Playfair_Display } from 'next/font/google'
 import { Toaster } from 'react-hot-toast'
 import { QueryProvider } from '@/components/providers/QueryProvider'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 
-const inter = Inter({ subsets: ['latin'] })
+// Exposed as CSS variables so Tailwind's fontFamily tokens resolve to them.
+// display=swap keeps text visible while the face loads rather than blanking it.
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',
+})
+const urbanist = Urbanist({
+  subsets: ['latin'],
+  weight: ['300', '400', '500', '600', '700'],
+  variable: '--font-urbanist',
+  display: 'swap',
+})
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  weight: ['400', '500'],
+  variable: '--font-jetbrains',
+  display: 'swap',
+})
+// Rule 6: loaded italic-only, because that is the only way it is ever used.
+const playfair = Playfair_Display({
+  subsets: ['latin'],
+  weight: ['400', '500'],
+  style: ['italic'],
+  variable: '--font-playfair',
+  display: 'swap',
+})
+
+const FONT_VARS = [inter, urbanist, jetbrainsMono, playfair].map((f) => f.variable).join(' ')
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'
 const SITE_TITLE = 'AvatarAI — Real-Time AI Avatar with Lip-Sync & Voice Cloning'
@@ -84,13 +112,13 @@ export default function RootLayout({
           dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
         />
       </head>
-      <body className={inter.className}>
+      <body className={`${FONT_VARS} font-sans antialiased`}>
         {/* Skip link — appears only on keyboard focus, lets users bypass the nav */}
         <a
           href="#main-content"
           className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[100]
-                     focus:px-4 focus:py-2 focus:rounded-lg focus:bg-primary-600 focus:text-white
-                     focus:shadow-glow focus:outline-none focus:ring-2 focus:ring-primary-300"
+ focus:px-4 focus:py-2 focus:rounded-lg focus:bg-primary-600 focus:text-gray-900
+ focus:shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-300"
         >
           Skip to main content
         </a>
@@ -101,7 +129,7 @@ export default function RootLayout({
           <Toaster
             position="top-right"
             toastOptions={{
-              className: 'dark:bg-gray-800 dark:text-gray-100',
+              className: ' ',
             }}
           />
         </QueryProvider>

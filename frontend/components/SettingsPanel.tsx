@@ -75,16 +75,16 @@ export function SettingsPanel() {
   return (
     <div className="max-w-3xl mx-auto px-6 py-10 animate-fade-in">
       <div className="mb-8">
-        <h1 className="text-3xl font-black gradient-text mb-2">Settings</h1>
-        <p className="text-gray-400">Manage your account and preferences.</p>
+        <h1 className="text-3xl font-black text-gray-900 mb-2">Settings</h1>
+        <p className="text-gray-500">Manage your account and preferences.</p>
       </div>
 
       {isGuest && (
-        <div className="card-glow mb-6 flex items-start gap-3">
-          <User size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
+        <div className="card mb-6 flex items-start gap-3">
+          <User size={16} className="text-warning-600 mt-0.5 flex-shrink-0" />
           <div>
-            <p className="text-sm text-white font-semibold">You&apos;re signed in as a guest.</p>
-            <p className="text-xs text-gray-400 mt-1">Sign out and register an account to save your profile and access multi-device sync.</p>
+            <p className="text-sm text-gray-900 font-semibold">You&apos;re signed in as a guest.</p>
+            <p className="text-xs text-gray-500 mt-1">Sign out and register an account to save your profile and access multi-device sync.</p>
           </div>
         </div>
       )}
@@ -93,12 +93,12 @@ export function SettingsPanel() {
       <div className="card flex flex-col gap-5">
         <div className="flex items-center gap-2">
           <User size={16} className="text-primary-400" />
-          <h2 className="text-xl font-bold text-white">Profile</h2>
+          <h2 className="text-xl font-bold text-gray-900">Profile</h2>
         </div>
         <div className="divider" />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-gray-300">Full name</label>
+            <label className="text-sm font-medium text-gray-700">Full name</label>
             <input
               type="text"
               value={fullName}
@@ -109,7 +109,7 @@ export function SettingsPanel() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-gray-300">Username</label>
+            <label className="text-sm font-medium text-gray-700">Username</label>
             <input
               type="text"
               value={username}
@@ -120,7 +120,7 @@ export function SettingsPanel() {
             />
           </div>
           <div className="space-y-1.5 md:col-span-2">
-            <label className="text-sm font-medium text-gray-300">Email</label>
+            <label className="text-sm font-medium text-gray-700">Email</label>
             <input
               type="email"
               value={email}
@@ -145,12 +145,12 @@ export function SettingsPanel() {
       <div className="card flex flex-col gap-5 mt-6">
         <div className="flex items-center gap-2">
           <KeyRound size={16} className="text-primary-400" />
-          <h2 className="text-xl font-bold text-white">Password</h2>
+          <h2 className="text-xl font-bold text-gray-900">Password</h2>
         </div>
         <div className="divider" />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-gray-300">New password</label>
+            <label className="text-sm font-medium text-gray-700">New password</label>
             <input
               type="password"
               value={newPassword}
@@ -162,7 +162,7 @@ export function SettingsPanel() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-gray-300">Confirm new password</label>
+            <label className="text-sm font-medium text-gray-700">Confirm new password</label>
             <input
               type="password"
               value={confirmPassword}
@@ -185,13 +185,13 @@ export function SettingsPanel() {
       </div>
 
       {/* Danger zone */}
-      <div className="card flex flex-col gap-5 mt-6 border border-red-500/20">
+      <div className="card flex flex-col gap-5 mt-6 border border-error-600/20">
         <div className="flex items-center gap-2">
-          <Trash2 size={16} className="text-red-400" />
-          <h2 className="text-xl font-bold text-white">Danger zone</h2>
+          <Trash2 size={16} className="text-error-600" />
+          <h2 className="text-xl font-bold text-gray-900">Danger zone</h2>
         </div>
         <div className="divider" />
-        <p className="text-sm text-gray-400">
+        <p className="text-sm text-gray-500">
           Sign out of this device. Your avatars, voices, and conversations remain on the server.
         </p>
         <button

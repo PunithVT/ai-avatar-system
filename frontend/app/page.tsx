@@ -5,7 +5,6 @@ import dynamic from 'next/dynamic'
 import { AvatarUpload } from '@/components/AvatarUpload'
 import { AvatarList } from '@/components/AvatarList'
 import { ConnectionStatus } from '@/components/ui/ConnectionStatus'
-import { ThemeToggle } from '@/components/ui/ThemeToggle'
 import { AuthModal } from '@/components/AuthModal'
 import { api } from '@/lib/api'
 import { toast } from 'react-hot-toast'
@@ -62,42 +61,42 @@ const FEATURES = [
     icon: Brain,
     title: 'LLM-Powered Intelligence',
     description: 'Claude & GPT-4 drive natural conversations with context-aware, cached prompts.',
-    color: 'from-purple-500 to-pink-500',
+    color: ' ',
     glow: 'rgba(168,85,247,0.3)',
   },
   {
     icon: AudioWaveform,
     title: 'Voice Cloning',
     description: 'Chatterbox Multilingual clones any voice from a 10-second sample in 23 languages.',
-    color: 'from-blue-500 to-cyan-500',
+    color: ' ',
     glow: 'rgba(59,130,246,0.3)',
   },
   {
     icon: Activity,
     title: 'Lip-Sync Animation',
     description: 'MuseTalk V1.5 produces photorealistic lip-sync video aligned to the spoken audio.',
-    color: 'from-emerald-500 to-teal-500',
+    color: ' ',
     glow: 'rgba(16,185,129,0.3)',
   },
   {
     icon: Zap,
     title: 'Streaming Pipeline',
     description: 'WebSocket streams tokens, audio, and video chunk-by-chunk for low first-byte latency.',
-    color: 'from-amber-500 to-orange-500',
+    color: ' ',
     glow: 'rgba(245,158,11,0.3)',
   },
   {
     icon: Globe,
     title: 'Multi-Language',
     description: 'Whisper STT + Chatterbox TTS support 23 languages end-to-end.',
-    color: 'from-indigo-500 to-blue-500',
+    color: ' ',
     glow: 'rgba(99,102,241,0.3)',
   },
   {
     icon: Shield,
     title: 'Privacy-First',
     description: 'Self-host everything — your photos, voices, and conversations stay on your infra.',
-    color: 'from-rose-500 to-pink-500',
+    color: ' ',
     glow: 'rgba(244,63,94,0.3)',
   },
 ]
@@ -171,13 +170,13 @@ export default function Home() {
       <nav className="fixed top-0 left-0 right-0 z-50 h-16">
         <div className="h-full mx-auto max-w-7xl px-6 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-accent-600 flex items-center justify-center shadow-glow-sm">
-              <Sparkles size={16} className="text-white" />
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center shadow-xs">
+              <Sparkles size={16} className="text-gray-900" />
             </div>
-            <span className="font-bold text-lg gradient-text">AvatarAI</span>
+            <span className="font-bold text-lg text-gray-900">AvatarAI</span>
           </div>
 
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-surface-800/80 backdrop-blur-xl border border-white/8 overflow-x-auto">
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-white backdrop-blur-xl border border-gray-200 overflow-x-auto">
             {navItems.map(({ id, icon: Icon, label, disabled }) => (
               <button
                 key={id}
@@ -185,10 +184,10 @@ export default function Home() {
                 disabled={disabled || undefined}
                 aria-current={view === id ? 'page' : undefined}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 flex-shrink-0
-                  ${view === id
-                    ? 'bg-gradient-to-r from-primary-600/80 to-accent-600/80 text-white shadow-glow-sm'
-                    : 'text-gray-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed'
-                  }`}
+ ${view === id
+ ? ' text-gray-900 shadow-xs'
+ : 'text-gray-500 hover:text-gray-900 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed'
+ }`}
               >
                 <Icon size={14} />
                 <span className="hidden sm:inline">{label}</span>
@@ -198,13 +197,12 @@ export default function Home() {
 
           <div className="flex items-center gap-3">
             <ConnectionStatus />
-            <ThemeToggle />
             {user && (
               <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-400 hidden sm:block">{user.username}</span>
+                <span className="text-xs text-gray-500 hidden sm:block">{user.username}</span>
                 <button
                   onClick={() => { api.logout(); clearAuth() }}
-                  className="text-xs text-gray-500 hover:text-red-400 transition-colors px-2 py-1 rounded-lg hover:bg-red-500/10"
+                  className="text-xs text-gray-500 hover:text-error-600 transition-colors px-2 py-1 rounded-lg hover:bg-error-50"
                   title="Sign out"
                 >
                   Sign out
@@ -213,8 +211,8 @@ export default function Home() {
             )}
           </div>
         </div>
-        {/* nav glass blur border */}
-        <div className="absolute inset-0 -z-10 bg-surface-900/70 backdrop-blur-xl border-b border-white/6" />
+        {/* nav card blur border */}
+        <div className="absolute inset-0 -z-10 bg-white backdrop-blur-xl border-b border-gray-200" />
       </nav>
 
       <main className="pt-16">
@@ -226,10 +224,9 @@ export default function Home() {
               {/* Aurora background */}
               <div className="absolute inset-0 overflow-hidden pointer-events-none">
                 <div className="absolute -top-40 -left-40 w-96 h-96 bg-primary-600/20 rounded-full blur-3xl animate-float" />
-                <div className="absolute -top-20 -right-40 w-80 h-80 bg-accent-600/15 rounded-full blur-3xl animate-float" style={{ animationDelay: '2s' }} />
+                <div className="absolute -top-20 -right-40 w-80 h-80 bg-primary-600/15 rounded-full blur-3xl animate-float" style={{ animationDelay: '2s' }} />
                 <div className="absolute bottom-20 left-1/4 w-72 h-72 bg-primary-800/20 rounded-full blur-3xl animate-float" style={{ animationDelay: '4s' }} />
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full opacity-5"
-                  style={{ background: 'radial-gradient(circle, #a855f7 0%, transparent 70%)' }} />
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full opacity-5" />
               </div>
 
               {/* Badge */}
@@ -240,14 +237,14 @@ export default function Home() {
 
               {/* Headline */}
               <h1 className="text-6xl md:text-7xl lg:text-8xl font-black leading-none mb-6 tracking-tight animate-slide-up" style={{ animationDelay: '0.1s' }}>
-                <span className="gradient-text">Talk to</span>
+                <span className="text-gray-900">Talk to</span>
                 <br />
-                <span className="text-white">Any Face,</span>
+                <span className="text-gray-900">Any Face,</span>
                 <br />
-                <span className="gradient-text-gold">Any Voice.</span>
+                <span className="text-gray-900">Any Voice.</span>
               </h1>
 
-              <p className="max-w-2xl text-lg md:text-xl text-gray-400 mb-10 leading-relaxed animate-slide-up" style={{ animationDelay: '0.2s' }}>
+              <p className="max-w-2xl text-lg md:text-xl text-gray-500 mb-10 leading-relaxed animate-slide-up" style={{ animationDelay: '0.2s' }}>
                 Upload a photo, clone a voice, and have real-time AI-powered conversations with
                 photorealistic lip-sync animations. Powered by Claude, Whisper, Chatterbox, and MuseTalk.
               </p>
@@ -275,7 +272,7 @@ export default function Home() {
               <div className="flex flex-wrap items-center justify-center gap-8 mt-16 animate-slide-up" style={{ animationDelay: '0.4s' }}>
                 {STATS.map(({ value, label }) => (
                   <div key={label} className="text-center">
-                    <div className="text-3xl font-black gradient-text">{value}</div>
+                    <div className="text-3xl font-black text-gray-900">{value}</div>
                     <div className="text-sm text-gray-500 mt-1">{label}</div>
                   </div>
                 ))}
@@ -287,9 +284,9 @@ export default function Home() {
               <div className="text-center mb-14">
                 <h2 className="text-4xl font-black mb-4">
                   Everything you need to build
-                  <span className="gradient-text"> avatar experiences</span>
+                  <span className="text-gray-900"> avatar experiences</span>
                 </h2>
-                <p className="text-gray-400 text-lg max-w-2xl mx-auto">
+                <p className="text-gray-500 text-lg max-w-2xl mx-auto">
                   A complete stack — from voice cloning to lip-sync video — running locally or in the cloud.
                 </p>
               </div>
@@ -301,11 +298,11 @@ export default function Home() {
                     className="feature-card group"
                     style={{ '--glow': glow } as CSSProperties}
                   >
-                    <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${color} flex items-center justify-center mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300`}>
-                      <Icon size={22} className="text-white" />
+                    <div className={`w-12 h-12 rounded-xl ${color} flex items-center justify-center mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300`}>
+                      <Icon size={22} className="text-gray-900" />
                     </div>
-                    <h3 className="font-bold text-lg text-white mb-2">{title}</h3>
-                    <p className="text-gray-400 text-sm leading-relaxed">{description}</p>
+                    <h3 className="font-bold text-lg text-gray-900 mb-2">{title}</h3>
+                    <p className="text-gray-500 text-sm leading-relaxed">{description}</p>
                   </div>
                 ))}
               </div>
@@ -317,8 +314,8 @@ export default function Home() {
         {view === 'avatars' && (
           <div className="max-w-7xl mx-auto px-6 py-10 animate-fade-in">
             <div className="mb-8">
-              <h1 className="text-3xl font-black gradient-text mb-2">Avatar Studio</h1>
-              <p className="text-gray-400">Upload photos and manage your avatar collection.</p>
+              <h1 className="text-3xl font-black text-gray-900 mb-2">Avatar Studio</h1>
+              <p className="text-gray-500">Upload photos and manage your avatar collection.</p>
             </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
               <AvatarUpload />
@@ -346,8 +343,8 @@ export default function Home() {
         {view === 'voice' && (
           <div className="max-w-4xl mx-auto px-6 py-10 animate-fade-in">
             <div className="mb-8">
-              <h1 className="text-3xl font-black gradient-text mb-2">Voice Studio</h1>
-              <p className="text-gray-400">Clone voices and manage your voice library.</p>
+              <h1 className="text-3xl font-black text-gray-900 mb-2">Voice Studio</h1>
+              <p className="text-gray-500">Clone voices and manage your voice library.</p>
             </div>
             <VoicePanel onVoiceSelect={handleVoiceSelect} />
           </div>
@@ -357,8 +354,8 @@ export default function Home() {
         {view === 'chat' && selectedAvatar && (
           <div className="max-w-7xl mx-auto px-6 py-10 animate-fade-in">
             <div className="mb-6">
-              <h1 className="text-3xl font-black gradient-text mb-2">Live Conversation</h1>
-              <p className="text-gray-400">Talk to your AI avatar in real time.</p>
+              <h1 className="text-3xl font-black text-gray-900 mb-2">Live Conversation</h1>
+              <p className="text-gray-500">Talk to your AI avatar in real time.</p>
             </div>
             <ChatInterface
               key={`${selectedAvatar}:${resumeSessionId ?? 'new'}`}
@@ -372,7 +369,7 @@ export default function Home() {
         {/* Redirect if no avatar selected for chat */}
         {view === 'chat' && !selectedAvatar && (
           <div className="max-w-7xl mx-auto px-6 py-10 text-center">
-            <p className="text-gray-400 mb-4">Please select an avatar first.</p>
+            <p className="text-gray-500 mb-4">Please select an avatar first.</p>
             <button onClick={() => setView('avatars')} className="btn-primary">
               <Camera size={18} />
               Go to Avatar Studio

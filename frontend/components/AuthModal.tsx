@@ -128,35 +128,35 @@ export function AuthModal() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-surface-950/90 backdrop-blur-md"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-gray-25 backdrop-blur-md"
       role="dialog"
       aria-modal="true"
       aria-labelledby="auth-modal-title"
       aria-describedby="auth-modal-desc"
     >
-      <div ref={dialogRef} className="w-full max-w-md mx-4 glass-card rounded-2xl p-8 animate-scale-in">
+      <div ref={dialogRef} className="w-full max-w-md mx-4 card rounded-2xl p-8 animate-scale-in">
         {/* Logo */}
         <div className="flex flex-col items-center gap-3 mb-8">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary-500 to-accent-600 flex items-center justify-center shadow-glow">
-            <Sparkles size={22} className="text-white" />
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center shadow-sm">
+            <Sparkles size={22} className="text-gray-900" />
           </div>
           <div className="text-center">
-            <h1 id="auth-modal-title" className="text-2xl font-black gradient-text">AvatarAI</h1>
+            <h1 id="auth-modal-title" className="text-2xl font-black text-gray-900">AvatarAI</h1>
             <p id="auth-modal-desc" className="text-sm text-gray-500 mt-0.5">Sign in to your account</p>
           </div>
         </div>
 
         {/* Tab switcher */}
-        <div className="flex gap-1 p-1 rounded-xl bg-surface-800/80 border border-white/8 mb-6">
+        <div className="flex gap-1 p-1 rounded-xl bg-white border border-gray-200 mb-6">
           {(['login', 'register'] as const).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
               className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                ${tab === t
-                  ? 'bg-gradient-to-r from-primary-600/80 to-accent-600/80 text-white shadow-glow-sm'
-                  : 'text-gray-400 hover:text-white'
-                }`}
+ ${tab === t
+ ? ' text-gray-900 shadow-xs'
+ : 'text-gray-500 hover:text-gray-900'
+ }`}
             >
               {t === 'login' ? <><LogIn size={14} /> Sign In</> : <><UserPlus size={14} /> Register</>}
             </button>
@@ -167,7 +167,7 @@ export function AuthModal() {
         {tab === 'login' && (
           <form onSubmit={handleLogin} className="space-y-4">
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-300">Email</label>
+              <label className="text-sm font-medium text-gray-700">Email</label>
               <input
                 type="email"
                 value={loginEmail}
@@ -179,7 +179,7 @@ export function AuthModal() {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-300">Password</label>
+              <label className="text-sm font-medium text-gray-700">Password</label>
               <div className="relative">
                 <input
                   type={showPassword ? 'text' : 'password'}
@@ -193,7 +193,7 @@ export function AuthModal() {
                 <button
                   type="button"
                   onClick={() => setShowPassword(s => !s)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
@@ -211,7 +211,7 @@ export function AuthModal() {
           <form onSubmit={handleRegister} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <label className="text-sm font-medium text-gray-300">Username</label>
+                <label className="text-sm font-medium text-gray-700">Username</label>
                 <input
                   type="text"
                   value={regUsername}
@@ -222,7 +222,7 @@ export function AuthModal() {
                 />
               </div>
               <div className="space-y-1.5">
-                <label className="text-sm font-medium text-gray-300">Full Name</label>
+                <label className="text-sm font-medium text-gray-700">Full Name</label>
                 <input
                   type="text"
                   value={regFullName}
@@ -233,7 +233,7 @@ export function AuthModal() {
               </div>
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-300">Email</label>
+              <label className="text-sm font-medium text-gray-700">Email</label>
               <input
                 type="email"
                 value={regEmail}
@@ -244,7 +244,7 @@ export function AuthModal() {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-300">Password</label>
+              <label className="text-sm font-medium text-gray-700">Password</label>
               <div className="relative">
                 <input
                   type={showPassword ? 'text' : 'password'}
@@ -258,7 +258,7 @@ export function AuthModal() {
                 <button
                   type="button"
                   onClick={() => setShowPassword(s => !s)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
@@ -273,9 +273,9 @@ export function AuthModal() {
 
         {/* Divider */}
         <div className="flex items-center gap-3 my-5">
-          <div className="flex-1 h-px bg-white/10" />
-          <span className="text-xs text-gray-600">or</span>
-          <div className="flex-1 h-px bg-white/10" />
+          <div className="flex-1 h-px bg-white" />
+          <span className="text-xs text-gray-500">or</span>
+          <div className="flex-1 h-px bg-white" />
         </div>
 
         {/* Guest mode */}
@@ -287,7 +287,7 @@ export function AuthModal() {
           <User size={15} />
           Continue as Guest
         </button>
-        <p className="text-xs text-center text-gray-600 mt-3">
+        <p className="text-xs text-center text-gray-500 mt-3">
           Guest data is private to you and is deleted after 48 hours of inactivity.
         </p>
       </div>

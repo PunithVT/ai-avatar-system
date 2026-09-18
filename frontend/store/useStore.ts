@@ -23,10 +23,6 @@ interface AppState {
   clearAuth: () => void
   isAuthenticated: () => boolean
 
-  // Theme — UI is dark-first; toggle just for the few light-mode users
-  theme: 'light' | 'dark'
-  toggleTheme: () => void
-
   // Hands-free: mic stays open and turns are detected by voice activity
   // instead of tapping record. Persisted because it is a standing preference
   // about how someone talks to the avatar, not per-session state.
@@ -64,11 +60,6 @@ export const useStore = create<AppState>()(
       handsFree: false,
       setHandsFree: (on) => set({ handsFree: on }),
 
-      theme: 'dark',
-      toggleTheme: () =>
-        set((state) => ({
-          theme: state.theme === 'light' ? 'dark' : 'light',
-        })),
 
       // Session
       activeSessionId: null,
@@ -94,7 +85,6 @@ export const useStore = create<AppState>()(
       partialize: (state) => ({
         token: state.token,
         user: state.user,
-        theme: state.theme,
         handsFree: state.handsFree,
         selectedAvatarId: state.selectedAvatarId,
         activeSessionId: state.activeSessionId,

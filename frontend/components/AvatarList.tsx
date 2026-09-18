@@ -14,15 +14,15 @@ interface AvatarListProps {
 }
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string }> = {
-  ready:      { label: 'Ready',      color: 'text-green-400',  dot: 'bg-green-400' },
-  processing: { label: 'Processing', color: 'text-amber-400',  dot: 'bg-amber-400 animate-pulse' },
-  failed:     { label: 'Failed',     color: 'text-red-400',    dot: 'bg-red-400' },
-  pending:    { label: 'Pending',    color: 'text-gray-400',   dot: 'bg-gray-500' },
+  ready:      { label: 'Ready',      color: 'text-success-600',  dot: 'bg-success-500' },
+  processing: { label: 'Processing', color: 'text-warning-600',  dot: 'bg-warning-500 animate-pulse' },
+  failed:     { label: 'Failed',     color: 'text-error-600',    dot: 'bg-error-400' },
+  pending:    { label: 'Pending',    color: 'text-gray-500',   dot: 'bg-gray-500' },
 }
 
 function AvatarCardSkeleton() {
   return (
-    <div className="glass-card rounded-xl overflow-hidden animate-pulse">
+    <div className="card rounded-xl overflow-hidden animate-pulse">
       <div className="aspect-square skeleton" />
       <div className="p-3 space-y-2">
         <div className="h-4 skeleton rounded w-3/4" />
@@ -95,7 +95,7 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-white">Your Avatars</h2>
+          <h2 className="text-xl font-bold text-gray-900">Your Avatars</h2>
           <p className="text-sm text-gray-500 mt-0.5">
             {avatars?.length ?? 0} avatar{(avatars?.length ?? 0) !== 1 ? 's' : ''}
           </p>
@@ -113,11 +113,11 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
         </div>
       ) : !avatars || avatars.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
-          <div className="w-16 h-16 rounded-2xl bg-surface-700/80 flex items-center justify-center border border-white/8">
+          <div className="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center border border-gray-200">
             <User size={28} className="text-gray-500" />
           </div>
           <div>
-            <p className="text-white font-medium">No avatars yet</p>
+            <p className="text-gray-900 font-medium">No avatars yet</p>
             <p className="text-gray-500 text-sm mt-1">Upload your first avatar to get started</p>
           </div>
         </div>
@@ -133,14 +133,14 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                   key={avatar.id}
                   onClick={() => onSelectAvatar(avatar.id)}
                   className={`relative rounded-xl overflow-hidden cursor-pointer transition-all duration-300 group
-                    ${isSelected
-                      ? 'ring-2 ring-primary-500 ring-offset-2 ring-offset-surface-900 shadow-glow-sm scale-[1.02]'
-                      : 'hover:scale-[1.02] hover:shadow-glow-sm hover:ring-1 hover:ring-primary-500/40'
-                    }`}
+ ${isSelected
+ ? 'ring-2 ring-primary-500 ring-offset-2 ring-offset-white shadow-xs scale-[1.02]'
+ : 'hover:scale-[1.02] hover:shadow-xs hover:ring-1 hover:ring-primary-500/40'
+ }`}
                   style={{ animationDelay: `${idx * 0.05}s` }}
                 >
                   {/* Image */}
-                  <div className="aspect-square relative bg-surface-700 overflow-hidden">
+                  <div className="aspect-square relative bg-gray-100 overflow-hidden">
                     {(avatar.thumbnail_url || avatar.image_url) ? (
                       <Image
                         src={(avatar.thumbnail_url || avatar.image_url) as string}
@@ -150,22 +150,22 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
-                        <User size={40} className="text-gray-600" />
+                        <User size={40} className="text-gray-500" />
                       </div>
                     )}
 
-                    <div className="absolute inset-0 bg-gradient-to-t from-surface-950/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
+                    <div className="absolute inset-0 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
 
                     {isSelected && (
-                      <div className="absolute top-2 right-2 w-6 h-6 rounded-full bg-primary-500 flex items-center justify-center shadow-glow-sm animate-scale-in">
-                        <Check size={14} className="text-white" />
+                      <div className="absolute top-2 right-2 w-6 h-6 rounded-full bg-primary-500 flex items-center justify-center shadow-xs animate-scale-in">
+                        <Check size={14} className="text-gray-900" />
                       </div>
                     )}
 
                     {!isSelected && (
                       <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200">
                         <div className="w-10 h-10 rounded-full bg-primary-600/80 backdrop-blur-sm flex items-center justify-center">
-                          <Play size={16} className="text-white ml-0.5" />
+                          <Play size={16} className="text-gray-900 ml-0.5" />
                         </div>
                       </div>
                     )}
@@ -178,14 +178,14 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                           deleteMutation.mutate(avatar.id)
                         }
                       }}
-                      className="absolute top-2 left-2 w-6 h-6 rounded-full bg-red-600/80 backdrop-blur-sm flex items-center justify-center
-                                 opacity-0 group-hover:opacity-100 transition-opacity duration-200 hover:bg-red-500"
+                      className="absolute top-2 left-2 w-6 h-6 rounded-full bg-error-50 backdrop-blur-sm flex items-center justify-center
+ opacity-0 group-hover:opacity-100 transition-opacity duration-200 hover:bg-error-500"
                       title="Delete avatar"
                     >
                       {deleteMutation.isPending ? (
-                        <Loader2 size={11} className="text-white animate-spin" />
+                        <Loader2 size={11} className="text-gray-900 animate-spin" />
                       ) : (
-                        <Trash2 size={11} className="text-white" />
+                        <Trash2 size={11} className="text-gray-900" />
                       )}
                     </button>
 
@@ -197,21 +197,21 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                           editingId === avatar.id ? setEditingId(null) : openEditor(avatar)
                         }}
                         className={`absolute bottom-2 right-2 w-6 h-6 rounded-full backdrop-blur-sm flex items-center justify-center
-                                   transition-all duration-200
-                                   ${editingId === avatar.id
-                                     ? 'bg-primary-600 opacity-100'
-                                     : 'bg-surface-800/80 opacity-0 group-hover:opacity-100 hover:bg-primary-600/60'
-                                   }`}
+ transition-all duration-200
+ ${editingId === avatar.id
+ ? 'bg-primary-600 opacity-100'
+ : 'bg-white opacity-0 group-hover:opacity-100 hover:bg-primary-600/60'
+ }`}
                         title="Edit personality"
                       >
-                        <Settings2 size={11} className="text-white" />
+                        <Settings2 size={11} className="text-gray-900" />
                       </button>
                     )}
                   </div>
 
                   {/* Info */}
-                  <div className="bg-surface-800/90 px-3 py-2.5 border-t border-white/8">
-                    <p className="font-semibold text-sm text-white truncate">{avatar.name}</p>
+                  <div className="bg-white px-3 py-2.5 border-t border-gray-200">
+                    <p className="font-semibold text-sm text-gray-900 truncate">{avatar.name}</p>
                     <div className="flex items-center gap-1.5 mt-1">
                       <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} />
                       <span className={`text-xs ${status.color}`}>{status.label}</span>
@@ -227,14 +227,14 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                                 unsetVoiceMutation.mutate(avatar.id)
                               }
                             }}
-                            className="text-[10px] text-primary-300 hover:text-red-400 transition-colors flex items-center gap-0.5"
+                            className="text-[10px] text-primary-300 hover:text-error-600 transition-colors flex items-center gap-0.5"
                             title="Voice attached — click to unassign"
                             aria-label="Unassign voice from this avatar"
                           >
                             <Mic2 size={9} />
                           </button>
                         ) : (
-                          <span title="No custom voice" aria-label="No custom voice" className="text-[10px] text-gray-600 flex items-center gap-0.5">
+                          <span title="No custom voice" aria-label="No custom voice" className="text-[10px] text-gray-500 flex items-center gap-0.5">
                             <MicOff size={9} />
                           </span>
                         )}
@@ -251,11 +251,11 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
             const av = avatars.find((a: Avatar) => a.id === editingId)
             if (!av) return null
             return (
-              <div className="glass-card rounded-xl p-4 border border-primary-500/30 animate-slide-up">
+              <div className="card rounded-xl p-4 border border-primary-500/30 animate-slide-up">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Settings2 size={14} className="text-primary-400" />
-                    <span className="text-sm font-semibold text-white">
+                    <span className="text-sm font-semibold text-gray-900">
                       Personality — <span className="text-primary-400">{av.name}</span>
                     </span>
                   </div>
@@ -265,14 +265,14 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                 </div>
 
                 <div className="space-y-1.5 mb-3">
-                  <label className="text-xs font-medium text-gray-400">Display name</label>
+                  <label className="text-xs font-medium text-gray-500">Display name</label>
                   <input
                     type="text"
                     value={draftName}
                     onChange={(e) => setDraftName(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-surface-700/80 border border-white/10 text-white text-sm
-                               placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-primary-500/50
-                               focus:border-primary-500/40 transition-all duration-200"
+                    className="w-full px-3 py-2 rounded-xl bg-gray-100 border border-gray-200 text-gray-900 text-sm
+ placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500/50
+ focus:border-primary-500/40 transition-all duration-200"
                     placeholder="Avatar name"
                   />
                 </div>
@@ -286,13 +286,13 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                   onChange={(e) => setDraftPrompt(e.target.value)}
                   placeholder="You are a friendly assistant named Alex. Respond conversationally and keep answers concise…"
                   rows={4}
-                  className="w-full px-3 py-2.5 rounded-xl bg-surface-700/80 border border-white/10 text-white text-sm
-                             placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-primary-500/50
-                             focus:border-primary-500/40 resize-none transition-all duration-200"
+                  className="w-full px-3 py-2.5 rounded-xl bg-gray-100 border border-gray-200 text-gray-900 text-sm
+ placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500/50
+ focus:border-primary-500/40 resize-none transition-all duration-200"
                 />
 
                 <div className="flex items-center justify-between mt-3">
-                  <span className="text-xs text-gray-600">{draftPrompt.length} chars</span>
+                  <span className="text-xs text-gray-500">{draftPrompt.length} chars</span>
                   <div className="flex gap-2">
                     <button
                       onClick={() => setEditingId(null)}

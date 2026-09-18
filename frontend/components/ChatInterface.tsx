@@ -61,12 +61,12 @@ function detectEmotion(text: string): string {
 }
 
 const EMOTION_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
-  happy:   { label: '😄 Happy',   color: 'text-yellow-300', bg: 'bg-yellow-500/20 border-yellow-500/30' },
-  angry:   { label: '😠 Angry',   color: 'text-red-300',    bg: 'bg-red-500/20 border-red-500/30' },
-  sad:     { label: '😢 Sad',     color: 'text-blue-300',   bg: 'bg-blue-500/20 border-blue-500/30' },
-  excited: { label: '🤩 Excited', color: 'text-purple-300', bg: 'bg-purple-500/20 border-purple-500/30' },
-  curious: { label: '🤔 Curious', color: 'text-cyan-300',   bg: 'bg-cyan-500/20 border-cyan-500/30' },
-  neutral: { label: '😊 Neutral', color: 'text-gray-300',   bg: 'bg-gray-500/20 border-gray-500/30' },
+  happy:   { label: '😄 Happy',   color: 'text-warning-600', bg: 'bg-warning-50 border-warning-600/30' },
+  angry:   { label: '😠 Angry',   color: 'text-error-600',    bg: 'bg-error-50 border-error-600/30' },
+  sad:     { label: '😢 Sad',     color: 'text-primary-600',   bg: 'bg-primary-50 border-primary-600/30' },
+  excited: { label: '🤩 Excited', color: 'text-primary-600', bg: 'bg-primary-50 border-primary-600/30' },
+  curious: { label: '🤔 Curious', color: 'text-primary-600',   bg: 'bg-primary-50 border-primary-600/30' },
+  neutral: { label: '😊 Neutral', color: 'text-gray-700',   bg: 'bg-gray-500/20 border-gray-500/30' },
 }
 
 // Deterministic per-bar heights — a static varied pattern instead of
@@ -83,7 +83,7 @@ function WaveformBars({ active }: { active: boolean }) {
           className="w-1 rounded-full"
           style={{
             height: active ? `${_WAVE_HEIGHTS[i]}px` : '4px',
-            background: 'linear-gradient(to top, #7c3aed, #3b82f6)',
+            background: '#444ce7', // primary-600 — rule 4: flat, not a ramp
             transition: 'height 0.15s ease',
             animation: active ? 'waveform 1.2s ease-in-out infinite' : 'none',
             animationDelay: `${i * 0.1}s`,
@@ -97,10 +97,10 @@ function WaveformBars({ active }: { active: boolean }) {
 function TypingIndicator() {
   return (
     <div className="flex items-end gap-3 animate-slide-up">
-      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center flex-shrink-0">
-        <Sparkles size={14} className="text-white" />
+      <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0">
+        <Sparkles size={14} className="text-gray-900" />
       </div>
-      <div className="glass-card px-4 py-3 rounded-2xl rounded-bl-sm">
+      <div className="card px-4 py-3 rounded-2xl rounded-bl-sm">
         <div className="flex items-center gap-1">
           {[0, 0.2, 0.4].map((delay) => (
             <div
@@ -120,8 +120,8 @@ function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
   if (!imageUrl) {
     return (
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
-        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-primary-600/30 to-accent-600/20
-                        flex items-center justify-center border border-white/10 animate-pulse-slow">
+        <div className="w-20 h-20 rounded-full 
+ flex items-center justify-center border border-gray-200 animate-pulse-slow">
           <Video size={36} className="text-primary-400" />
         </div>
         <p className="text-gray-500 text-sm">Avatar video will appear here</p>
@@ -130,31 +130,20 @@ function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
   }
 
   return (
-    <div className="absolute inset-0 flex items-center justify-center bg-surface-950">
-      {/* Glow ring behind image */}
-      <div
-        className="absolute w-[70%] aspect-square rounded-full avatar-idle-glow"
-        style={{ filter: 'blur(32px)', background: 'radial-gradient(circle, rgba(124,58,237,0.15) 0%, transparent 70%)' }}
-      />
+    <div className="absolute inset-0 flex items-center justify-center bg-gray-25">
       {/* Avatar image with breathing scale */}
       <img
         src={imageUrl}
         alt="Avatar idle"
-        className="avatar-idle relative z-10 w-full h-full object-cover"
+        className="relative z-10 w-full h-full object-cover"
         style={{ borderRadius: '0.75rem' }}
       />
-      {/* Subtle scanline shimmer overlay */}
-      <div
-        className="absolute inset-0 z-20 pointer-events-none rounded-xl"
-        style={{
-          background: 'linear-gradient(180deg, transparent 60%, rgba(0,0,0,0.25) 100%)',
-        }}
-      />
       {/* "Idle" indicator dot */}
-      <div className="absolute bottom-3 left-3 z-30 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm
-                      px-2 py-1 rounded-full border border-white/10">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-        <span className="text-[10px] text-gray-300 font-medium tracking-wide">IDLE</span>
+      <div className="absolute bottom-3 left-3 z-30 flex items-center gap-1.5 rounded-full
+ border border-white/15 bg-ink/70 px-2.5 py-1 backdrop-blur-sm">
+        <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-success-500" />
+        {/* Rule 3: an 11px uppercase micro-label is a JetBrains Mono eyebrow. */}
+        <span className="font-mono text-eyebrow uppercase text-gray-25">Idle</span>
       </div>
     </div>
   )
@@ -934,14 +923,14 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 h-[calc(100vh-10rem)]">
       {/* ── Video Panel ─────────────────────────────────────────────────── */}
       <div className="lg:col-span-3 flex flex-col gap-4">
-        <div className="card-glow flex-1 relative overflow-hidden rounded-2xl group">
+        <div className="card flex-1 relative overflow-hidden rounded-2xl group">
           {/* Neon border when speaking */}
           {isSpeaking && (
             <div className="absolute inset-0 rounded-2xl neon-border pointer-events-none z-10 animate-glow" />
           )}
 
           {/* Main display area */}
-          <div className="aspect-video w-full bg-surface-950 rounded-xl overflow-hidden relative">
+          <div className="aspect-video w-full bg-gray-25 rounded-xl overflow-hidden relative">
 
             {/* ── Idle avatar (always mounted, hidden when video plays) ── */}
             <div
@@ -965,24 +954,24 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
 
             {/* ── Processing overlay ── */}
             {isProcessing && (
-              <div className="absolute inset-0 bg-surface-950/75 backdrop-blur-sm flex flex-col
-                              items-center justify-center gap-4 z-20">
+              <div className="absolute inset-0 bg-gray-25 backdrop-blur-sm flex flex-col
+ items-center justify-center gap-4 z-20">
                 <div className="relative">
                   <div className="w-16 h-16 rounded-full border-2 border-primary-500/30 animate-spin-slow" />
                   <div className="absolute inset-2 rounded-full border-2 border-t-primary-400
-                                  border-r-transparent border-b-transparent border-l-transparent animate-spin" />
+ border-r-transparent border-b-transparent border-l-transparent animate-spin" />
                   <Wand2 className="absolute inset-0 m-auto text-primary-400" size={20} />
                 </div>
-                <p className="text-sm text-gray-300 font-medium animate-pulse">{statusMsg}</p>
+                <p className="text-sm text-gray-700 font-medium animate-pulse">{statusMsg}</p>
               </div>
             )}
 
             {/* ── Chunk progress badge (shows while more chunks are coming) ── */}
             {isSpeaking && currentChunkProgress.total > 1 && (
-              <div className="absolute top-3 right-3 z-30 flex items-center gap-1.5 bg-black/50
-                              backdrop-blur-sm px-2.5 py-1.5 rounded-full border border-white/10">
-                <span className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-pulse" />
-                <span className="text-[10px] text-gray-300 font-medium">
+              <div className="absolute right-3 top-3 z-30 flex items-center gap-1.5 rounded-full
+ border border-white/15 bg-ink/70 px-2.5 py-1.5 backdrop-blur-sm">
+                <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-primary-400" />
+                <span className="font-mono text-eyebrow text-gray-25 tabular-nums">
                   {currentChunkProgress.current}/{currentChunkProgress.total}
                 </span>
               </div>
@@ -994,18 +983,18 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1.5 text-xs">
                 <span className={`status-dot ${
-                  connectionStatus === 'connected' ? 'online'
-                  : connectionStatus === 'connecting' ? 'processing'
-                  : 'offline'
-                }`} />
-                <span className="text-gray-400 capitalize">{connectionStatus}</span>
+ connectionStatus === 'connected' ? 'online'
+ : connectionStatus === 'connecting' ? 'processing'
+ : 'offline'
+ }`} />
+                <span className="text-gray-500 capitalize">{connectionStatus}</span>
               </div>
               {reconnectStalled && (
                 <button
                   onClick={manualReconnect}
-                  className="flex items-center gap-1 text-xs text-primary-300 hover:text-white
-                             px-2 py-1 rounded-md border border-primary-500/40 hover:bg-primary-500/20
-                             transition-colors"
+                  className="flex items-center gap-1 text-xs text-primary-300 hover:text-gray-900
+ px-2 py-1 rounded-md border border-primary-500/40 hover:bg-primary-500/20
+ transition-colors"
                   title="Reconnect"
                   aria-label="Reconnect to avatar"
                 >
@@ -1017,12 +1006,12 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
 
             <div className="flex items-center gap-2">
               {/* Language picker */}
-              <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-surface-700/60 border border-white/10">
+              <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gray-100 border border-gray-200">
                 <Globe size={11} className="text-gray-500" />
                 <select
                   value={language}
                   onChange={(e) => changeLanguage(e.target.value)}
-                  className="bg-transparent text-xs text-gray-300 focus:outline-none cursor-pointer"
+                  className="bg-transparent text-xs text-gray-700 focus:outline-none cursor-pointer"
                   title="TTS language"
                 >
                   {CHAT_LANGUAGES.map(l => (
@@ -1038,7 +1027,7 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
               )}
               <button
                 onClick={() => setIsMuted(m => !m)}
-                className={`btn-icon ${isMuted ? 'text-red-400 border-red-500/30' : ''}`}
+                className={`btn-icon ${isMuted ? 'text-error-600 border-error-600/30' : ''}`}
                 title={isMuted ? 'Unmute (⌘E)' : 'Mute (⌘E)'}
                 aria-label={isMuted ? 'Unmute avatar' : 'Mute avatar'}
                 aria-pressed={isMuted}
@@ -1059,7 +1048,7 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
 
         {/* Emotion bar */}
         {messages.length > 0 && (
-          <div className="glass-card px-4 py-3 flex items-center gap-3 rounded-xl animate-slide-up">
+          <div className="card px-4 py-3 flex items-center gap-3 rounded-xl animate-slide-up">
             <Activity size={14} className="text-primary-400 flex-shrink-0" />
             <span className="text-xs text-gray-500 flex-shrink-0">Emotion detected:</span>
             <div className="flex flex-wrap gap-2">
@@ -1078,11 +1067,11 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
       </div>
 
       {/* ── Chat Panel ──────────────────────────────────────────────────── */}
-      <div className="lg:col-span-2 flex flex-col glass-card rounded-2xl overflow-hidden p-0">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-white/8">
+      <div className="lg:col-span-2 flex flex-col card rounded-2xl overflow-hidden p-0">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <MessageCircle size={16} className="text-primary-400" />
-            <span className="font-semibold text-white">Conversation</span>
+            <span className="font-semibold text-gray-900">Conversation</span>
           </div>
           <div className="flex items-center gap-2">
             {latencyMs !== null && (
@@ -1111,12 +1100,12 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 messages-scroll">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full gap-4 py-12 text-center">
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-600/20 to-accent-600/10
-                              flex items-center justify-center border border-white/8">
+              <div className="w-16 h-16 rounded-2xl 
+ flex items-center justify-center border border-gray-200">
                 <Sparkles size={28} className="text-primary-400" />
               </div>
               <div>
-                <p className="text-white font-medium mb-1">Start the conversation</p>
+                <p className="text-gray-900 font-medium mb-1">Start the conversation</p>
                 <p className="text-gray-500 text-sm">Type a message or press the mic button</p>
               </div>
             </div>
@@ -1132,10 +1121,10 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                   style={{ animationDelay: `${idx * 0.05}s` }}
                 >
                   <div className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold
-                    ${isUser
-                      ? 'bg-gradient-to-br from-accent-600 to-accent-800'
-                      : 'bg-gradient-to-br from-primary-600 to-primary-800'
-                    }`}
+ ${isUser
+ ? ' '
+ : ' '
+ }`}
                   >
                     {isUser ? 'U' : 'AI'}
                   </div>
@@ -1159,22 +1148,22 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                           }}
                           maxLength={8000}
                           rows={3}
-                          className="w-full px-3 py-2 rounded-2xl bg-surface-700/80 border border-primary-500/40
-                                     text-white text-sm placeholder:text-gray-600 focus:outline-none
-                                     focus:ring-2 focus:ring-primary-500/50 resize-none"
+                          className="w-full px-3 py-2 rounded-2xl bg-gray-100 border border-primary-500/40
+ text-gray-900 text-sm placeholder:text-gray-500 focus:outline-none
+ focus:ring-2 focus:ring-primary-500/50 resize-none"
                           aria-label="Edit message"
                         />
                         <div className="flex items-center gap-1.5 justify-end">
                           <button
                             onClick={cancelEditMessage}
-                            className="text-xs text-gray-400 hover:text-white px-2 py-1 rounded-md hover:bg-white/5"
+                            className="text-xs text-gray-500 hover:text-gray-900 px-2 py-1 rounded-md hover:bg-white"
                           >
                             Cancel
                           </button>
                           <button
                             onClick={() => saveEditMessage(message.id)}
-                            className="text-xs text-white bg-primary-600 hover:bg-primary-500 px-2.5 py-1 rounded-md
-                                       flex items-center gap-1"
+                            className="text-xs text-gray-900 bg-primary-600 hover:bg-primary-500 px-2.5 py-1 rounded-md
+ flex items-center gap-1"
                           >
                             <Check size={11} />
                             Save
@@ -1183,43 +1172,43 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                       </div>
                     ) : (
                       <div className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed
-                        ${isUser
-                          ? 'bg-gradient-to-br from-primary-700/80 to-accent-700/60 text-white rounded-tr-sm'
-                          : 'bg-surface-700/80 border border-white/8 text-gray-200 rounded-tl-sm'
-                        }`}
+ ${isUser
+ ? ' text-gray-900 rounded-tr-sm'
+ : 'bg-gray-100 border border-gray-200 text-gray-800 rounded-tl-sm'
+ }`}
                       >
                         {message.content}
                         {/* Hover action menu — only on persisted messages (have a real DB id) */}
                         <div className={`absolute -top-2 ${isUser ? '-left-2' : '-right-2'} flex items-center gap-1
-                                         opacity-0 group-hover:opacity-100 transition-opacity`}>
+ opacity-0 group-hover:opacity-100 transition-opacity`}>
                           <button
                             onClick={() => copyMessage(message.content)}
-                            className="w-6 h-6 rounded-full bg-surface-600 border border-white/10
-                                       flex items-center justify-center hover:bg-surface-500"
+                            className="w-6 h-6 rounded-full bg-gray-200 border border-gray-200
+ flex items-center justify-center hover:bg-gray-300"
                             title="Copy"
                             aria-label="Copy message"
                           >
-                            <Copy size={10} className="text-gray-400" />
+                            <Copy size={10} className="text-gray-500" />
                           </button>
                           {message.persisted && (
                             <>
                               <button
                                 onClick={() => startEditMessage(message)}
-                                className="w-6 h-6 rounded-full bg-surface-600 border border-white/10
-                                           flex items-center justify-center hover:bg-surface-500"
+                                className="w-6 h-6 rounded-full bg-gray-200 border border-gray-200
+ flex items-center justify-center hover:bg-gray-300"
                                 title="Edit"
                                 aria-label="Edit message"
                               >
-                                <Pencil size={10} className="text-gray-400" />
+                                <Pencil size={10} className="text-gray-500" />
                               </button>
                               <button
                                 onClick={() => deleteMessage(message.id)}
-                                className="w-6 h-6 rounded-full bg-surface-600 border border-white/10
-                                           flex items-center justify-center hover:bg-red-600/30"
+                                className="w-6 h-6 rounded-full bg-gray-200 border border-gray-200
+ flex items-center justify-center hover:bg-error-50"
                                 title="Delete"
                                 aria-label="Delete message"
                               >
-                                <Trash2 size={10} className="text-gray-400" />
+                                <Trash2 size={10} className="text-gray-500" />
                               </button>
                             </>
                           )}
@@ -1227,8 +1216,8 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                       </div>
                     )}
                     <div className={`flex items-center gap-1.5 px-1 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
-                      <Clock size={10} className="text-gray-600" />
-                      <span className="text-xs text-gray-600">
+                      <Clock size={10} className="text-gray-500" />
+                      <span className="text-xs text-gray-500">
                         {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </span>
                       {emotion !== 'neutral' && (
@@ -1245,13 +1234,12 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
           {/* Live streaming bubble — shows tokens as they arrive */}
           {streamingContent && (
             <div className="flex gap-2.5 animate-slide-up">
-              <div className="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold
-                              bg-gradient-to-br from-primary-600 to-primary-800">
+              <div className="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold">
                 AI
               </div>
               <div className="max-w-[85%] flex flex-col gap-1 items-start">
                 <div className="relative px-4 py-2.5 rounded-2xl rounded-tl-sm text-sm leading-relaxed
-                                bg-surface-700/80 border border-primary-500/30 text-gray-200">
+ bg-gray-100 border border-primary-500/30 text-gray-800">
                   {streamingContent}
                   <span className="inline-block w-1.5 h-4 bg-primary-400 ml-0.5 align-middle animate-pulse rounded-sm" />
                 </div>
@@ -1264,16 +1252,16 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
 
         {isRecording && (
           <div className="px-4 pb-2">
-            <div className="h-1 rounded-full bg-surface-700 overflow-hidden">
+            <div className="h-1 rounded-full bg-gray-100 overflow-hidden">
               <div className="voice-level h-full" style={{ width: `${recordingLevel}%` }} />
             </div>
           </div>
         )}
 
-        <div className="border-t border-white/8 px-4 py-3">
+        <div className="border-t border-gray-200 px-4 py-3">
           {isRecording && (
             <div className="flex items-center gap-2 mb-3 px-2">
-              <span className="text-xs text-red-400 font-medium animate-pulse">REC</span>
+              <span className="text-xs text-error-600 font-medium animate-pulse">REC</span>
               <WaveformBars active={isRecording} />
               <span className="text-xs text-gray-500 ml-auto">
                 {handsFree ? 'Listening — pause when you\'re done' : 'Tap stop when done'}
@@ -1297,17 +1285,16 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
               aria-pressed={isRecording}
               title={handsFree ? 'Hands-free is listening — turns are detected automatically' : undefined}
               className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
-                transition-all duration-200 active:scale-95
-                ${isRecording
-                  ? 'bg-red-600 hover:bg-red-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)]'
-                  : 'bg-surface-700 hover:bg-surface-600 border border-white/10 hover:border-primary-500/40 text-gray-400 hover:text-white'
-                }
-                ${isProcessing || handsFree ? 'opacity-40 cursor-not-allowed' : ''}
-              `}
+ transition-all duration-200 active:scale-95
+ ${isRecording
+ ? 'bg-error-600 hover:bg-error-500 text-gray-900 shadow-[0_0_20px_rgba(239,68,68,0.5)]'
+ : 'bg-gray-100 hover:bg-gray-200 border border-gray-200 hover:border-primary-500/40 text-gray-500 hover:text-gray-900'
+ }
+ ${isProcessing || handsFree ? 'opacity-40 cursor-not-allowed' : ''}`}
             >
               {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
               {isRecording && (
-                <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-red-500 animate-ping" />
+                <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-error-500 animate-ping" />
               )}
             </button>
 
@@ -1317,12 +1304,11 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
               aria-pressed={handsFree}
               title={handsFree ? 'Hands-free on — just talk' : 'Hands-free: listen continuously'}
               className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
-                transition-all duration-200 active:scale-95
-                ${handsFree
-                  ? 'bg-primary-600 hover:bg-primary-500 text-white shadow-[0_0_20px_rgba(99,102,241,0.45)]'
-                  : 'bg-surface-700 hover:bg-surface-600 border border-white/10 hover:border-primary-500/40 text-gray-400 hover:text-white'
-                }
-              `}
+ transition-all duration-200 active:scale-95
+ ${handsFree
+ ? 'bg-primary-600 hover:bg-primary-500 text-gray-900 shadow-[0_0_20px_rgba(99,102,241,0.45)]'
+ : 'bg-gray-100 hover:bg-gray-200 border border-gray-200 hover:border-primary-500/40 text-gray-500 hover:text-gray-900'
+ }`}
             >
               <Radio size={18} />
               {handsFree && !isRecording && (
@@ -1341,10 +1327,10 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                 aria-label="Message your avatar"
                 disabled={isProcessing || isRecording}
                 rows={1}
-                className="w-full px-4 py-2.5 rounded-xl bg-surface-700/80 border border-white/10 text-white text-sm
-                           placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-primary-500/50
-                           focus:border-primary-500/40 resize-none transition-all duration-200 disabled:opacity-50
-                           [field-sizing:content] max-h-32 overflow-y-auto"
+                className="w-full px-4 py-2.5 rounded-xl bg-gray-100 border border-gray-200 text-gray-900 text-sm
+ placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500/50
+ focus:border-primary-500/40 resize-none transition-all duration-200 disabled:opacity-50
+ [field-sizing:content] max-h-32 overflow-y-auto"
               />
             </div>
 
@@ -1353,9 +1339,9 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                 onClick={stopGeneration}
                 aria-label="Stop generating"
                 title="Stop"
-                className="flex-shrink-0 w-10 h-10 rounded-xl bg-red-600 hover:bg-red-500
-                           flex items-center justify-center text-white shadow-[0_0_18px_rgba(239,68,68,0.4)]
-                           transition-all duration-200 active:scale-95"
+                className="flex-shrink-0 w-10 h-10 rounded-xl bg-error-600 hover:bg-error-500
+ flex items-center justify-center text-gray-900 shadow-[0_0_18px_rgba(239,68,68,0.4)]
+ transition-all duration-200 active:scale-95"
               >
                 <Square size={16} fill="currentColor" />
               </button>
@@ -1364,17 +1350,17 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                 onClick={sendMessage}
                 disabled={!inputText.trim() || isRecording}
                 aria-label="Send message"
-                className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600
-                           flex items-center justify-center text-white hover:shadow-glow
-                           disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-95"
+                className="flex-shrink-0 w-10 h-10 rounded-xl 
+ flex items-center justify-center text-gray-900 hover:shadow-sm
+ disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-95"
               >
                 <Send size={18} />
               </button>
             )}
           </div>
 
-          <p className="text-xs text-gray-600 text-center mt-2">
-            Shift+Enter for new line · Mic for voice · <kbd className="px-1 py-0.5 rounded bg-surface-700 text-gray-500">?</kbd> for shortcuts
+          <p className="text-xs text-gray-500 text-center mt-2">
+            Shift+Enter for new line · Mic for voice · <kbd className="px-1 py-0.5 rounded bg-gray-100 text-gray-500">?</kbd> for shortcuts
           </p>
         </div>
       </div>
@@ -1382,20 +1368,20 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
       {/* ── Keyboard shortcuts modal ─────────────────────────────────────── */}
       {showShortcuts && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-surface-950/80 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-gray-25 backdrop-blur-sm"
           role="dialog"
           aria-modal="true"
           aria-labelledby="kbd-title"
           onClick={() => setShowShortcuts(false)}
         >
           <div
-            className="w-full max-w-md mx-4 glass-card rounded-2xl p-6 animate-scale-in"
+            className="w-full max-w-md mx-4 card rounded-2xl p-6 animate-scale-in"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Keyboard size={18} className="text-primary-400" />
-                <h2 id="kbd-title" className="text-lg font-bold text-white">Keyboard shortcuts</h2>
+                <h2 id="kbd-title" className="text-lg font-bold text-gray-900">Keyboard shortcuts</h2>
               </div>
               <button
                 onClick={() => setShowShortcuts(false)}
@@ -1415,12 +1401,12 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                 { keys: ['?'], desc: 'Toggle this shortcuts panel' },
               ].map(({ keys, desc }) => (
                 <li key={desc} className="flex items-center justify-between gap-3">
-                  <span className="text-gray-300">{desc}</span>
+                  <span className="text-gray-700">{desc}</span>
                   <span className="flex items-center gap-1">
                     {keys.map((k, i) => (
                       <kbd
                         key={i}
-                        className="px-2 py-0.5 rounded-md bg-surface-700 border border-white/10 text-xs text-gray-300 font-mono"
+                        className="px-2 py-0.5 rounded-md bg-gray-100 border border-gray-200 text-xs text-gray-700 font-mono"
                       >
                         {k}
                       </kbd>
@@ -1430,7 +1416,7 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
               ))}
             </ul>
             <p className="text-xs text-gray-500 mt-4">
-              On Windows/Linux, use <kbd className="px-1 py-0.5 rounded bg-surface-700">Ctrl</kbd> in place of <kbd className="px-1 py-0.5 rounded bg-surface-700">⌘</kbd>.
+              On Windows/Linux, use <kbd className="px-1 py-0.5 rounded bg-gray-100">Ctrl</kbd> in place of <kbd className="px-1 py-0.5 rounded bg-gray-100">⌘</kbd>.
             </p>
           </div>
         </div>

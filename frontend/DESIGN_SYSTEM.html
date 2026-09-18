@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HireAI — Design System</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=Urbanist:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Playfair+Display:ital,wght@1,400;1,500&display=swap" rel="stylesheet">
+
+<style>
+  /* ===== HireAI Design Tokens — single source of truth ===== */
+  :root{
+    /* Primary (brand) */
+    --primary-50:#f0f5ff;  --primary-100:#e0eaff; --primary-200:#c7d7fe;
+    --primary-300:#a4bcfd; --primary-400:#8098f9; --primary-500:#6172f3;
+    --primary-600:#444ce7; --primary-700:#3538cd; --primary-800:#2d31a6;
+    --primary-900:#2b2f83;
+    /* Gray (text + surfaces) */
+    --gray-25:#fcfcfd;  --gray-50:#f9fafb;  --gray-100:#f2f4f7;
+    --gray-200:#eaecf0; --gray-300:#d0d5dd; --gray-400:#98a2b3;
+    --gray-500:#667085; --gray-600:#475467; --gray-700:#344054;
+    --gray-800:#1d2939; --gray-900:#101828;
+    /* Semantic */
+    --success-50:#ecfdf3; --success-500:#12b76a; --success-600:#039855; --success-700:#027a48;
+    --warning-50:#fffaeb; --warning-500:#f79009; --warning-600:#dc6803; --warning-700:#b54708;
+    --error-50:#fef3f2;   --error-400:#f97066;   --error-500:#f04438;   --error-600:#d92d20; --error-700:#b42318;
+    /* Shadows */
+    --shadow-xs:0 1px 2px 0 rgba(16,24,40,.05);
+    --shadow-sm:0 1px 3px 0 rgba(16,24,40,.1), 0 1px 2px -1px rgba(16,24,40,.1);
+    --shadow-md:0 4px 8px -2px rgba(16,24,40,.1), 0 2px 4px -2px rgba(16,24,40,.06);
+    --shadow-lg:0 12px 16px -4px rgba(16,24,40,.08), 0 4px 6px -2px rgba(16,24,40,.03);
+    --shadow-xl:0 20px 24px -4px rgba(16,24,40,.08), 0 8px 8px -4px rgba(16,24,40,.03);
+    --shadow-ring:0 0 0 4px rgba(68,76,231,.12);
+    /* Radii */
+    --r-xs:4px;  --r-sm:6px;  --r-md:8px;  --r-lg:12px;  --r-xl:16px;  --r-2xl:20px;
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{font-family:'Inter',system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  body{background:var(--gray-25);color:var(--gray-900);line-height:1.55;font-size:15px}
+
+  h1,h2,h3,h4,h5,h6{font-family:'Urbanist','Inter',sans-serif;letter-spacing:-.015em;color:var(--gray-900)}
+  h1{font-weight:400}
+  h2,h3{font-weight:500}
+
+  .mono{font-family:'JetBrains Mono',monospace}
+  .serif-italic{font-family:'Playfair Display',serif;font-style:italic}
+
+  .wrap{max-width:1180px;margin:0 auto;padding:56px 32px 96px}
+
+  /* ===== Hero ===== */
+  .hero{
+    background:#0a0a0a;color:#fff;border-radius:24px;padding:64px 56px;margin-bottom:48px;
+    position:relative;overflow:hidden;
+  }
+  .hero-eyebrow{
+    font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;
+    letter-spacing:.15em;text-transform:uppercase;color:rgba(255,255,255,.55);margin-bottom:24px;
+  }
+  .hero h1{
+    color:#fff;font-family:'Urbanist',sans-serif;font-weight:300;
+    font-size:clamp(36px,5.5vw,64px);line-height:1.08;letter-spacing:-.025em;margin-bottom:18px;
+  }
+  .hero h1 .accent{font-family:'Playfair Display',serif;font-style:italic;font-weight:400}
+  .hero p{color:rgba(255,255,255,.6);max-width:640px;font-size:16px;line-height:1.7}
+  .hero-meta{display:flex;gap:48px;margin-top:48px;flex-wrap:wrap}
+  .hero-meta-item .v{font-family:'Urbanist',sans-serif;font-size:32px;font-weight:600;color:#fff;line-height:1}
+  .hero-meta-item .l{font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(255,255,255,.45);text-transform:uppercase;letter-spacing:.15em;margin-top:8px}
+
+  /* ===== Section ===== */
+  section{margin-bottom:72px}
+  .section-eyebrow{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;letter-spacing:.15em;text-transform:uppercase;color:var(--gray-400);margin-bottom:12px}
+  .section-title{font-family:'Urbanist',sans-serif;font-weight:300;font-size:36px;letter-spacing:-.02em;color:var(--gray-900);margin-bottom:8px}
+  .section-sub{color:var(--gray-500);font-size:15px;max-width:780px;margin-bottom:32px}
+
+  /* ===== Card ===== */
+  .card{background:#fff;border:1px solid var(--gray-200);border-radius:16px;padding:24px;box-shadow:var(--shadow-xs)}
+  .card-tint{background:rgba(0,0,0,.02);border:1px solid var(--gray-100);border-radius:20px;padding:24px}
+
+  /* ===== Color swatches ===== */
+  .palette-row{display:grid;grid-template-columns:80px repeat(10,1fr);gap:8px;align-items:center;margin-bottom:12px}
+  @media(max-width:860px){.palette-row{grid-template-columns:60px repeat(5,1fr);gap:6px}}
+  .palette-label{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--gray-500);text-transform:uppercase;letter-spacing:.08em}
+  .swatch{
+    aspect-ratio:1.4/1;border-radius:8px;display:flex;align-items:flex-end;padding:8px;
+    border:1px solid rgba(0,0,0,.04);transition:transform .15s;cursor:pointer;
+  }
+  .swatch:hover{transform:translateY(-2px)}
+  .swatch .tone{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.05em;font-weight:500}
+  .swatch.light .tone{color:rgba(0,0,0,.55)}
+  .swatch.dark  .tone{color:rgba(255,255,255,.85)}
+
+  /* ===== Font samples ===== */
+  .font-card{background:#fff;border:1px solid var(--gray-200);border-radius:16px;padding:28px;margin-bottom:14px}
+  .font-card .meta{display:flex;justify-content:space-between;margin-bottom:18px;align-items:center}
+  .font-card .name{font-family:'Urbanist',sans-serif;font-size:24px;font-weight:500;color:var(--gray-900)}
+  .font-card .role{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--gray-500);text-transform:uppercase;letter-spacing:.1em}
+  .font-card .specimen{font-size:38px;line-height:1.1;color:var(--gray-900);margin-bottom:8px}
+  .font-card .secondary{color:var(--gray-500);font-size:14px;margin-top:14px}
+  .weights{display:flex;gap:24px;flex-wrap:wrap;margin-top:14px}
+  .weight-block{font-size:18px;line-height:1.2}
+  .weight-block .lbl{display:block;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--gray-400);letter-spacing:.1em;text-transform:uppercase;margin-top:4px}
+
+  /* ===== Components demo ===== */
+  .grid{display:grid;gap:16px}
+  .grid-2{grid-template-columns:repeat(2,1fr)}
+  .grid-3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:860px){.grid-2,.grid-3{grid-template-columns:1fr}}
+
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:8px;
+    padding:10px 18px;border-radius:8px;font-weight:600;font-size:14px;font-family:'Inter',sans-serif;
+    border:none;cursor:pointer;transition:all .15s;text-decoration:none;
+  }
+  .btn-primary{background:var(--primary-600);color:#fff;box-shadow:var(--shadow-xs)}
+  .btn-primary:hover{background:var(--primary-700);box-shadow:var(--shadow-sm)}
+  .btn-secondary{background:#fff;color:var(--gray-700);border:1px solid var(--gray-200);box-shadow:var(--shadow-xs)}
+  .btn-secondary:hover{background:var(--gray-50);border-color:var(--gray-300)}
+  .btn-danger{background:var(--error-500);color:#fff;box-shadow:var(--shadow-xs)}
+  .btn-success{background:var(--success-500);color:#fff;box-shadow:var(--shadow-xs)}
+  .btn-ghost{background:transparent;color:var(--gray-500)}
+  .btn-ghost:hover{background:var(--gray-100);color:var(--gray-700)}
+
+  .badge{
+    display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:999px;
+    font-size:11px;font-weight:500;line-height:1.5;margin:4px;
+  }
+  .badge-blue  {background:var(--primary-50); color:var(--primary-700);  box-shadow:inset 0 0 0 1px rgba(68,76,231,.12)}
+  .badge-green {background:var(--success-50); color:var(--success-700);  box-shadow:inset 0 0 0 1px rgba(3,152,85,.12)}
+  .badge-yellow{background:var(--warning-50); color:var(--warning-700);  box-shadow:inset 0 0 0 1px rgba(181,71,8,.12)}
+  .badge-red   {background:var(--error-50);   color:var(--error-700);    box-shadow:inset 0 0 0 1px rgba(180,35,24,.12)}
+  .badge-gray  {background:var(--gray-100);   color:var(--gray-600);     box-shadow:inset 0 0 0 1px rgba(102,112,133,.12)}
+
+  .input{
+    width:100%;padding:10px 14px;font-size:14px;font-family:'Inter',sans-serif;
+    border:1px solid var(--gray-200);border-radius:8px;background:#fff;
+    transition:all .15s;color:var(--gray-900);
+  }
+  .input:focus{outline:none;border-color:var(--primary-400);box-shadow:0 0 0 4px var(--primary-50)}
+  .input::placeholder{color:var(--gray-400)}
+
+  .label{display:block;font-size:13px;font-weight:500;color:var(--gray-700);margin-bottom:6px}
+
+  /* ===== Shadows demo ===== */
+  .shadow-demo{
+    background:#fff;border-radius:12px;padding:24px;text-align:center;
+    font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--gray-500);
+    letter-spacing:.1em;text-transform:uppercase;
+  }
+
+  /* ===== Radii demo ===== */
+  .radius-demo{
+    background:var(--primary-100);height:80px;display:flex;align-items:flex-end;
+    justify-content:center;padding-bottom:10px;
+    font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--primary-700);
+  }
+
+  /* ===== Code block ===== */
+  pre{
+    background:var(--gray-900);color:var(--gray-100);padding:18px 22px;border-radius:12px;
+    font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;
+    overflow-x:auto;margin:12px 0;
+  }
+  code{font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--gray-100);padding:2px 6px;border-radius:4px;color:var(--gray-800)}
+
+  /* ===== Table ===== */
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+  th{
+    text-align:left;font-family:'JetBrains Mono',monospace;font-size:11px;
+    text-transform:uppercase;letter-spacing:.08em;color:var(--gray-500);
+    padding:10px 12px;border-bottom:1px solid var(--gray-200);background:var(--gray-50);
+  }
+  td{padding:10px 12px;border-bottom:1px solid var(--gray-100);color:var(--gray-700);vertical-align:top}
+  td code{white-space:nowrap}
+
+  /* ===== Quote ===== */
+  blockquote{
+    border-left:3px solid var(--gray-900);padding:14px 20px;background:rgba(0,0,0,.02);
+    border-radius:0 12px 12px 0;color:var(--gray-700);font-style:normal;margin:12px 0;
+  }
+  blockquote strong{color:var(--gray-900)}
+
+  /* ===== Brand mark ===== */
+  .brand{display:flex;align-items:center;gap:14px;margin-bottom:40px}
+  .logo-mark{
+    width:44px;height:44px;border-radius:50%;background:#0a0a0a;
+    display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-sm);
+  }
+  .logo-mark::after{content:'';width:14px;height:14px;border-radius:50%;background:#fff}
+  .logo-text{font-family:'Urbanist',sans-serif;font-size:22px;font-weight:600;color:var(--gray-900);letter-spacing:-.01em}
+
+  /* ===== Footer ===== */
+  footer{
+    margin-top:80px;padding-top:32px;border-top:1px solid var(--gray-200);
+    display:flex;justify-content:space-between;flex-wrap:wrap;gap:16px;
+    color:var(--gray-500);font-size:13px;
+  }
+  footer strong{color:var(--gray-700);font-weight:600}
+
+  /* Print */
+  @media print{
+    body{background:#fff}
+    .wrap{padding:20px;max-width:100%}
+    .hero{background:#0a0a0a !important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    section{page-break-inside:avoid}
+    .card,.font-card,.swatch{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Brand -->
+  <div class="brand">
+    <div class="logo-mark"></div>
+    <div class="logo-text">HireAI <span style="color:var(--gray-500);font-weight:400">Design System</span></div>
+  </div>
+
+  <!-- Hero -->
+  <div class="hero">
+    <div class="hero-eyebrow">DESIGN SYSTEM · v1.0 · MAY 2026</div>
+    <h1>The <span class="accent">aesthetic</span> that ties every<br/>HireAI surface together.</h1>
+    <p>Monochrome canvas. Urbanist for headlines, Inter for body, JetBrains Mono for micro-labels. No gradients. Rounded surfaces on a 2% black tint. This document is the single source of truth — pulled directly from the live frontend.</p>
+    <div class="hero-meta">
+      <div class="hero-meta-item"><div class="v">39</div><div class="l">Color Tokens</div></div>
+      <div class="hero-meta-item"><div class="v">4</div><div class="l">Type Families</div></div>
+      <div class="hero-meta-item"><div class="v">6</div><div class="l">Shadow Tiers</div></div>
+      <div class="hero-meta-item"><div class="v">6</div><div class="l">Radius Tokens</div></div>
+    </div>
+  </div>
+
+  <!-- ── BRAND PRINCIPLES ──────────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">PRINCIPLES</div>
+    <h2 class="section-title">Five rules — read these first</h2>
+
+    <div class="grid grid-2">
+      <div class="card">
+        <h3 style="font-size:18px;margin-bottom:8px">1. Monochrome canvas</h3>
+        <p style="color:var(--gray-500);font-size:14px">Default text is <code>#0a0a0a</code> on <code>#fcfcfd</code>. Secondary is <code>gray-500</code>. The brand <code>primary-600</code> (<code>#444CE7</code>) is reserved for buttons, links, and one accent per page — never paint full surfaces with it.</p>
+      </div>
+      <div class="card">
+        <h3 style="font-size:18px;margin-bottom:8px">2. Urbanist headlines, Inter body</h3>
+        <p style="color:var(--gray-500);font-size:14px">All H1–H6 switch to <strong>Urbanist</strong> with <code>letter-spacing: -0.015em</code>. H1 is weight 400 (thin). H2/H3 are weight 500. Body and UI labels stay on <strong>Inter</strong>.</p>
+      </div>
+      <div class="card">
+        <h3 style="font-size:18px;margin-bottom:8px">3. JetBrains Mono is for labels, not code</h3>
+        <p style="color:var(--gray-500);font-size:14px">The 11-px uppercase <span class="mono" style="font-size:11px;letter-spacing:.15em">EYEBROW LABELS</span> above section titles are <strong>JetBrains Mono · 500</strong>, gray-400, letter-spacing <code>0.15em</code>. Use it consistently — it's the most recognisable HireAI signature.</p>
+      </div>
+      <div class="card">
+        <h3 style="font-size:18px;margin-bottom:8px">4. No gradients. Ever.</h3>
+        <p style="color:var(--gray-500);font-size:14px">The brand is flat, monochrome, deliberate. Hero panels use solid <code>#0a0a0a</code>. Cards use <code>rgba(0,0,0,0.02)</code> tint. If you find yourself reaching for a gradient, pick a slightly darker swatch instead.</p>
+      </div>
+      <div class="card">
+        <h3 style="font-size:18px;margin-bottom:8px">5. Rounded surfaces (16–20px)</h3>
+        <p style="color:var(--gray-500);font-size:14px">Standard card radius is <code>16px</code> (<code>rounded-xl</code>). Hero / featured panels use <code>20–24px</code> (<code>rounded-2xl</code>). Buttons and inputs use <code>8px</code>. Avatars and pill-badges are fully rounded.</p>
+      </div>
+      <div class="card">
+        <h3 style="font-size:18px;margin-bottom:8px">6. One italic accent, sparingly</h3>
+        <p style="color:var(--gray-500);font-size:14px">For a soft typographic accent inside a headline, switch one word to <span class="serif-italic" style="font-size:18px">Playfair Display italic</span>. Use it once per page max — never in body copy.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── COLORS ───────────────────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">COLOR · 39 TOKENS</div>
+    <h2 class="section-title">Palette</h2>
+    <p class="section-sub">Pulled verbatim from <code>frontend/tailwind.config.js</code>. Click any swatch to inspect; values are CSS custom properties (<code>var(--primary-600)</code>) and Tailwind classes (<code>bg-primary-600</code>).</p>
+
+    <!-- Primary -->
+    <div class="palette-row">
+      <div class="palette-label">primary</div>
+      <div class="swatch light" style="background:#f0f5ff"><span class="tone">50 · #f0f5ff</span></div>
+      <div class="swatch light" style="background:#e0eaff"><span class="tone">100</span></div>
+      <div class="swatch light" style="background:#c7d7fe"><span class="tone">200</span></div>
+      <div class="swatch light" style="background:#a4bcfd"><span class="tone">300</span></div>
+      <div class="swatch light" style="background:#8098f9"><span class="tone">400</span></div>
+      <div class="swatch dark"  style="background:#6172f3"><span class="tone">500</span></div>
+      <div class="swatch dark"  style="background:#444ce7"><span class="tone">600 · brand</span></div>
+      <div class="swatch dark"  style="background:#3538cd"><span class="tone">700</span></div>
+      <div class="swatch dark"  style="background:#2d31a6"><span class="tone">800</span></div>
+      <div class="swatch dark"  style="background:#2b2f83"><span class="tone">900</span></div>
+    </div>
+
+    <!-- Gray -->
+    <div class="palette-row">
+      <div class="palette-label">gray</div>
+      <div class="swatch light" style="background:#fcfcfd"><span class="tone">25 · canvas</span></div>
+      <div class="swatch light" style="background:#f9fafb"><span class="tone">50</span></div>
+      <div class="swatch light" style="background:#f2f4f7"><span class="tone">100</span></div>
+      <div class="swatch light" style="background:#eaecf0"><span class="tone">200 · border</span></div>
+      <div class="swatch light" style="background:#d0d5dd"><span class="tone">300</span></div>
+      <div class="swatch light" style="background:#98a2b3"><span class="tone">400</span></div>
+      <div class="swatch dark"  style="background:#667085"><span class="tone">500 · muted</span></div>
+      <div class="swatch dark"  style="background:#475467"><span class="tone">600</span></div>
+      <div class="swatch dark"  style="background:#344054"><span class="tone">700</span></div>
+      <div class="swatch dark"  style="background:#101828"><span class="tone">900 · text</span></div>
+    </div>
+
+    <!-- Success -->
+    <div class="palette-row" style="grid-template-columns:80px repeat(4,1fr)">
+      <div class="palette-label">success</div>
+      <div class="swatch light" style="background:#ecfdf3"><span class="tone">50</span></div>
+      <div class="swatch dark"  style="background:#12b76a"><span class="tone">500</span></div>
+      <div class="swatch dark"  style="background:#039855"><span class="tone">600</span></div>
+      <div class="swatch dark"  style="background:#027a48"><span class="tone">700</span></div>
+    </div>
+
+    <!-- Warning -->
+    <div class="palette-row" style="grid-template-columns:80px repeat(4,1fr)">
+      <div class="palette-label">warning</div>
+      <div class="swatch light" style="background:#fffaeb"><span class="tone">50</span></div>
+      <div class="swatch dark"  style="background:#f79009"><span class="tone">500</span></div>
+      <div class="swatch dark"  style="background:#dc6803"><span class="tone">600</span></div>
+      <div class="swatch dark"  style="background:#b54708"><span class="tone">700</span></div>
+    </div>
+
+    <!-- Error -->
+    <div class="palette-row" style="grid-template-columns:80px repeat(5,1fr)">
+      <div class="palette-label">error</div>
+      <div class="swatch light" style="background:#fef3f2"><span class="tone">50</span></div>
+      <div class="swatch dark"  style="background:#f97066"><span class="tone">400</span></div>
+      <div class="swatch dark"  style="background:#f04438"><span class="tone">500</span></div>
+      <div class="swatch dark"  style="background:#d92d20"><span class="tone">600</span></div>
+      <div class="swatch dark"  style="background:#b42318"><span class="tone">700</span></div>
+    </div>
+
+    <div class="card-tint" style="margin-top:24px">
+      <h3 style="font-size:16px;margin-bottom:10px;font-weight:500">Quick reference — when to use what</h3>
+      <table>
+        <thead><tr><th>Use case</th><th>Token</th><th>Hex</th></tr></thead>
+        <tbody>
+          <tr><td>Page background</td><td><code>gray-25</code></td><td><code>#fcfcfd</code></td></tr>
+          <tr><td>Card / surface</td><td><code>#fff</code></td><td><code>#ffffff</code></td></tr>
+          <tr><td>Tinted card (landing aesthetic)</td><td><code>rgba(0,0,0,.02)</code></td><td>—</td></tr>
+          <tr><td>Default text</td><td><code>gray-900</code></td><td><code>#101828</code></td></tr>
+          <tr><td>Secondary / muted text</td><td><code>gray-500</code></td><td><code>#667085</code></td></tr>
+          <tr><td>Placeholder text</td><td><code>gray-400</code></td><td><code>#98a2b3</code></td></tr>
+          <tr><td>Border, divider</td><td><code>gray-200</code></td><td><code>#eaecf0</code></td></tr>
+          <tr><td>Primary action / link</td><td><code>primary-600</code></td><td><code>#444CE7</code></td></tr>
+          <tr><td>Focus ring</td><td><code>primary-400</code> + <code>primary-50</code></td><td><code>#8098f9</code></td></tr>
+          <tr><td>Hero / footer surface</td><td>black</td><td><code>#0a0a0a</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── TYPOGRAPHY ───────────────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">TYPOGRAPHY · 4 FAMILIES</div>
+    <h2 class="section-title">Type system</h2>
+    <p class="section-sub">All four families load via Google Fonts inside <code>frontend/src/index.css</code>. The CSS <code>@import</code> URLs are listed at the bottom of this document.</p>
+
+    <div class="font-card">
+      <div class="meta">
+        <div class="name">Urbanist</div>
+        <div class="role">HEADINGS · NUMERALS</div>
+      </div>
+      <div class="specimen" style="font-family:'Urbanist',sans-serif;font-weight:300;letter-spacing:-.025em">Hire the best talent. In hours, not weeks.</div>
+      <div class="secondary" style="font-family:'Urbanist',sans-serif;font-weight:300">All H1–H6 across the app switch to Urbanist with <code>letter-spacing: -0.015em</code>. H1 lands at weight 400 in normal contexts and weight 200–300 in hero / cover treatments to feel airy.</div>
+      <div class="weights">
+        <div class="weight-block" style="font-family:'Urbanist',sans-serif;font-weight:200">Aa <span class="lbl">200 · thin</span></div>
+        <div class="weight-block" style="font-family:'Urbanist',sans-serif;font-weight:300">Aa <span class="lbl">300 · light</span></div>
+        <div class="weight-block" style="font-family:'Urbanist',sans-serif;font-weight:400">Aa <span class="lbl">400 · regular</span></div>
+        <div class="weight-block" style="font-family:'Urbanist',sans-serif;font-weight:500">Aa <span class="lbl">500 · medium</span></div>
+        <div class="weight-block" style="font-family:'Urbanist',sans-serif;font-weight:600">Aa <span class="lbl">600 · semibold</span></div>
+        <div class="weight-block" style="font-family:'Urbanist',sans-serif;font-weight:700">Aa <span class="lbl">700 · bold</span></div>
+      </div>
+    </div>
+
+    <div class="font-card">
+      <div class="meta">
+        <div class="name">Inter</div>
+        <div class="role">BODY · UI</div>
+      </div>
+      <div class="specimen" style="font-family:'Inter',sans-serif;font-weight:500;font-size:24px;letter-spacing:-.01em">The 9 a.m. inbox flood, finally tamed. Auto-screen, auto-rank, auto-invite — your team only sees the ones worth talking to.</div>
+      <div class="secondary">Inter handles every paragraph, button, input, badge, and table row. Italic <em>Inter italic</em> appears in the codebase but use it sparingly — bold or color is usually the clearer emphasis tool.</div>
+      <div class="weights">
+        <div class="weight-block" style="font-family:'Inter',sans-serif;font-weight:400">Aa <span class="lbl">400 · regular</span></div>
+        <div class="weight-block" style="font-family:'Inter',sans-serif;font-weight:500">Aa <span class="lbl">500 · medium</span></div>
+        <div class="weight-block" style="font-family:'Inter',sans-serif;font-weight:600">Aa <span class="lbl">600 · semibold</span></div>
+        <div class="weight-block" style="font-family:'Inter',sans-serif;font-weight:700">Aa <span class="lbl">700 · bold</span></div>
+        <div class="weight-block" style="font-family:'Inter',sans-serif;font-weight:800">Aa <span class="lbl">800 · extrabold</span></div>
+      </div>
+    </div>
+
+    <div class="font-card">
+      <div class="meta">
+        <div class="name">JetBrains Mono</div>
+        <div class="role">MICRO-LABELS · TIMESTAMPS · CODE</div>
+      </div>
+      <div class="specimen mono" style="font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--gray-500)">AI RECRUITMENT PLATFORM · v0.3 · MAY 2026</div>
+      <div class="secondary">The unmistakable HireAI signature. Use <strong>11 px · weight 500 · uppercase · 0.15em tracking · gray-400/500</strong> for eyebrow labels above section titles, stat-counter footers, status pills, and stat-card units.</div>
+      <div class="weights">
+        <div class="weight-block mono" style="font-weight:400">Aa <span class="lbl">400 · regular</span></div>
+        <div class="weight-block mono" style="font-weight:500">Aa <span class="lbl">500 · medium</span></div>
+      </div>
+    </div>
+
+    <div class="font-card">
+      <div class="meta">
+        <div class="name">Playfair Display</div>
+        <div class="role">ITALIC ACCENT ONLY</div>
+      </div>
+      <div class="specimen" style="font-family:'Urbanist',sans-serif;font-weight:300;letter-spacing:-.025em">Hiring shouldn't take <span class="serif-italic">weeks</span>.</div>
+      <div class="secondary">Loaded in italic-only weights (400, 500). Use exactly once per headline as a soft accent on a single word. Never in body copy, never in UI controls, never standing alone.</div>
+    </div>
+
+    <h3 style="font-size:18px;margin:32px 0 12px;font-weight:500">Type scale (custom Tailwind tokens)</h3>
+    <table>
+      <thead><tr><th>Token</th><th>Size</th><th>Line height</th><th>Tracking</th><th>Weight</th><th>Use</th></tr></thead>
+      <tbody>
+        <tr><td><code>text-display-lg</code></td><td>3rem (48 px)</td><td>1.2</td><td>-0.02em</td><td>700</td><td>Hero displays, marketing</td></tr>
+        <tr><td><code>text-display-md</code></td><td>2.25rem (36 px)</td><td>1.2</td><td>-0.02em</td><td>700</td><td>Section headers</td></tr>
+        <tr><td><code>text-display-sm</code></td><td>1.875rem (30 px)</td><td>1.3</td><td>-0.01em</td><td>600</td><td>Subsection headers</td></tr>
+        <tr><td>default <code>h1</code></td><td>—</td><td>—</td><td>-0.015em</td><td>400</td><td>Page titles</td></tr>
+        <tr><td>default <code>h2, h3</code></td><td>—</td><td>—</td><td>-0.015em</td><td>500</td><td>Card / modal titles</td></tr>
+        <tr><td>body</td><td>15 px</td><td>1.55</td><td>0</td><td>400</td><td>Default paragraphs</td></tr>
+        <tr><td>eyebrow / micro-label</td><td>11 px</td><td>1.5</td><td>0.15em</td><td>500</td><td>JetBrains Mono UPPERCASE</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── SHADOWS & RADII ────────────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">DEPTH</div>
+    <h2 class="section-title">Shadows &amp; radii</h2>
+    <p class="section-sub">Subtle by default — production UI rarely needs anything heavier than <code>shadow-sm</code>. Reserve <code>shadow-lg</code> for modals and floating menus.</p>
+
+    <div class="grid grid-3">
+      <div class="shadow-demo" style="box-shadow:var(--shadow-xs)">shadow-xs</div>
+      <div class="shadow-demo" style="box-shadow:var(--shadow-sm)">shadow-sm</div>
+      <div class="shadow-demo" style="box-shadow:var(--shadow-md)">shadow-md</div>
+      <div class="shadow-demo" style="box-shadow:var(--shadow-lg)">shadow-lg</div>
+      <div class="shadow-demo" style="box-shadow:var(--shadow-xl)">shadow-xl</div>
+      <div class="shadow-demo" style="box-shadow:var(--shadow-ring)">shadow-ring (focus)</div>
+    </div>
+
+    <h3 style="font-size:18px;margin:32px 0 12px;font-weight:500">Radii</h3>
+    <div class="grid" style="grid-template-columns:repeat(6,1fr)">
+      <div class="radius-demo" style="border-radius:4px">xs · 4</div>
+      <div class="radius-demo" style="border-radius:6px">sm · 6</div>
+      <div class="radius-demo" style="border-radius:8px">md · 8</div>
+      <div class="radius-demo" style="border-radius:12px">lg · 12</div>
+      <div class="radius-demo" style="border-radius:16px">xl · 16</div>
+      <div class="radius-demo" style="border-radius:20px">2xl · 20</div>
+    </div>
+  </section>
+
+  <!-- ── COMPONENTS ──────────────────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">COMPONENTS</div>
+    <h2 class="section-title">Building blocks in production use</h2>
+    <p class="section-sub">Every utility class below is defined in <code>frontend/src/index.css</code> under <code>@layer components</code> and can be used straight in any JSX as <code>className="btn-primary"</code> etc.</p>
+
+    <h3 style="font-size:18px;margin:20px 0 12px;font-weight:500">Buttons</h3>
+    <div class="card">
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+        <button class="btn btn-primary">Primary</button>
+        <button class="btn btn-secondary">Secondary</button>
+        <button class="btn btn-success">Success</button>
+        <button class="btn btn-danger">Danger</button>
+        <button class="btn btn-ghost">Ghost</button>
+      </div>
+      <div style="font-size:12px;color:var(--gray-500);margin-top:14px;font-family:'JetBrains Mono',monospace">px-4 py-2.5 · rounded-lg · font-semibold text-sm · shadow-xs</div>
+    </div>
+
+    <h3 style="font-size:18px;margin:24px 0 12px;font-weight:500">Badges</h3>
+    <div class="card">
+      <span class="badge badge-blue">Primary</span>
+      <span class="badge badge-green">● Active</span>
+      <span class="badge badge-yellow">Pending</span>
+      <span class="badge badge-red">Rejected</span>
+      <span class="badge badge-gray">Archived</span>
+      <div style="font-size:12px;color:var(--gray-500);margin-top:14px;font-family:'JetBrains Mono',monospace">rounded-full · text-xs · semantic-50 bg + semantic-700 text + 1px ring</div>
+    </div>
+
+    <h3 style="font-size:18px;margin:24px 0 12px;font-weight:500">Forms</h3>
+    <div class="card" style="max-width:480px">
+      <label class="label">Email address</label>
+      <input class="input" type="email" placeholder="you@company.com" value="punithvt@rooman.com" readonly />
+      <div style="font-size:12px;color:var(--gray-400);margin-top:6px">Standard <code>.input</code> — focus ring uses primary-400 + primary-50</div>
+    </div>
+
+    <h3 style="font-size:18px;margin:24px 0 12px;font-weight:500">Cards</h3>
+    <div class="grid grid-2">
+      <div class="card">
+        <h4 style="font-size:14px;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--gray-400);font-weight:500;margin-bottom:8px">Standard card</h4>
+        <p style="color:var(--gray-700);font-size:14px">Background <code>#fff</code>, border <code>gray-200</code>, radius <code>16px</code>, shadow <code>xs</code>, padding <code>24px</code>.</p>
+        <pre style="font-size:11px;padding:10px 12px;margin-top:10px">.card &#123;
+  background: #fff;
+  border: 1px solid var(--gray-200);
+  border-radius: 16px;
+  box-shadow: var(--shadow-xs);
+  padding: 24px;
+&#125;</pre>
+      </div>
+      <div class="card-tint">
+        <h4 style="font-size:14px;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--gray-400);font-weight:500;margin-bottom:8px">Tinted card (landing aesthetic)</h4>
+        <p style="color:var(--gray-700);font-size:14px">Background <code>rgba(0,0,0,0.02)</code>, border <code>gray-100</code>, radius <code>20px</code>. Used for feature cards on the landing page and on this design-system doc.</p>
+        <pre style="font-size:11px;padding:10px 12px;margin-top:10px">.card-tint &#123;
+  background: rgba(0,0,0,.02);
+  border: 1px solid var(--gray-100);
+  border-radius: 20px;
+&#125;</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── MOTION ─────────────────────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">MOTION</div>
+    <h2 class="section-title">Animations</h2>
+    <p class="section-sub">Short, soft, never bouncy. Defined as keyframes in <code>tailwind.config.js</code>; reach for them via <code>animate-fade-in</code> etc.</p>
+    <table>
+      <thead><tr><th>Name</th><th>Duration</th><th>Easing</th><th>From → To</th></tr></thead>
+      <tbody>
+        <tr><td><code>animate-fade-in</code></td><td>200 ms</td><td>ease-out</td><td>opacity 0 → 1</td></tr>
+        <tr><td><code>animate-slide-up</code></td><td>250 ms</td><td>ease-out</td><td>opacity 0 + translateY(8px) → opacity 1 + 0</td></tr>
+        <tr><td><code>animate-slide-down</code></td><td>200 ms</td><td>ease-out</td><td>opacity 0 + translateY(-8px) → 0</td></tr>
+        <tr><td><code>animate-scale-in</code></td><td>200 ms</td><td>ease-out</td><td>scale 0.96 + opacity 0 → 1 + 1</td></tr>
+        <tr><td><code>animate-shimmer</code></td><td>1.4 s</td><td>ease-in-out · infinite</td><td>backgroundPosition -200% → 200% (skeleton)</td></tr>
+        <tr><td><code>animate-pulse-soft</code></td><td>2 s</td><td>ease-in-out · infinite</td><td>opacity 1 ↔ 0.6</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── LANDING PAGE AESTHETIC ─────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">LANDING-PAGE AESTHETIC</div>
+    <h2 class="section-title">The "source-of-truth" rules</h2>
+    <p class="section-sub">From <code>.claude/CLAUDE.md</code> — these are mandatory for any new top-level surface.</p>
+
+    <blockquote>
+      <strong>Landing page is the source of truth:</strong> monochrome (<code>text-[#0a0a0a]</code>, <code>text-gray-500</code>), Urbanist for numerals/headings, JetBrains Mono for uppercase micro-labels, <code>rounded-2xl</code> cards on <code>rgba(0,0,0,0.02)</code> tint. No gradients. Match this for any new UI.
+    </blockquote>
+
+    <div class="grid grid-2" style="margin-top:24px">
+      <div class="card">
+        <h3 style="font-size:18px;font-weight:500;margin-bottom:10px">Hero panel</h3>
+        <ul style="list-style:none;padding-left:0">
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0;border-bottom:1px solid var(--gray-100)">background <code>#0a0a0a</code> solid (no gradient)</li>
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0;border-bottom:1px solid var(--gray-100)">h1 <code>Urbanist · 300 · clamp(40,7vw,76px)</code></li>
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0;border-bottom:1px solid var(--gray-100)">tracking <code>-0.03em</code> · line-height <code>1.1</code></li>
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0">eyebrow <code>JetBrains Mono · 11px · 0.15em tracking · rgba(255,255,255,.55)</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="font-size:18px;font-weight:500;margin-bottom:10px">Stat counter</h3>
+        <ul style="list-style:none;padding-left:0">
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0;border-bottom:1px solid var(--gray-100)">numeral <code>Urbanist · 600 · 32px</code></li>
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0">label <code>JetBrains Mono · 10–12px · 0.15em tracking · gray-400</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="font-size:18px;font-weight:500;margin-bottom:10px">Feature card</h3>
+        <ul style="list-style:none;padding-left:0">
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0;border-bottom:1px solid var(--gray-100)">background <code>rgba(0,0,0,0.02)</code></li>
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0;border-bottom:1px solid var(--gray-100)">border <code>gray-100</code></li>
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0;border-bottom:1px solid var(--gray-100)">radius <code>20px</code> (<code>rounded-2xl</code>)</li>
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0">title <code>Urbanist · 500 · 20px</code> · body <code>Inter · 14px · gray-500</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="font-size:18px;font-weight:500;margin-bottom:10px">CTA buttons</h3>
+        <ul style="list-style:none;padding-left:0">
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0;border-bottom:1px solid var(--gray-100)">primary <code>bg-black · text-white · rounded-full · px-7 py-3</code></li>
+          <li style="font-size:14px;color:var(--gray-700);padding:4px 0">secondary <code>border-gray-200 · rounded-full · text-gray-700</code></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── COPY-PASTE BLOCKS ──────────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">COPY-PASTE</div>
+    <h2 class="section-title">Raw values, ready to ship</h2>
+    <p class="section-sub">Drop these into any new project (Figma, design doc, microsite, partner integration) to keep the visual language consistent with HireAI.</p>
+
+    <h3 style="font-size:18px;margin-top:24px;margin-bottom:8px;font-weight:500">Google Fonts <code>@import</code></h3>
+<pre>@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&amp;display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Urbanist:wght@200;300;400;500;600;700&amp;display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&amp;display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,400;1,500&amp;display=swap');</pre>
+
+    <h3 style="font-size:18px;margin-top:24px;margin-bottom:8px;font-weight:500">CSS Custom Properties</h3>
+<pre>:root &#123;
+  /* Primary */
+  --primary-50:  #f0f5ff;  --primary-100: #e0eaff;  --primary-200: #c7d7fe;
+  --primary-300: #a4bcfd;  --primary-400: #8098f9;  --primary-500: #6172f3;
+  --primary-600: #444ce7;  --primary-700: #3538cd;  --primary-800: #2d31a6;
+  --primary-900: #2b2f83;
+
+  /* Gray */
+  --gray-25:  #fcfcfd;  --gray-50:  #f9fafb;  --gray-100: #f2f4f7;
+  --gray-200: #eaecf0;  --gray-300: #d0d5dd;  --gray-400: #98a2b3;
+  --gray-500: #667085;  --gray-600: #475467;  --gray-700: #344054;
+  --gray-800: #1d2939;  --gray-900: #101828;
+
+  /* Semantic */
+  --success-50: #ecfdf3;  --success-500: #12b76a;  --success-600: #039855;  --success-700: #027a48;
+  --warning-50: #fffaeb;  --warning-500: #f79009;  --warning-600: #dc6803;  --warning-700: #b54708;
+  --error-50:   #fef3f2;  --error-400:   #f97066;  --error-500:   #f04438;  --error-600:   #d92d20;  --error-700: #b42318;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 2px 0 rgba(16,24,40,.05);
+  --shadow-sm: 0 1px 3px 0 rgba(16,24,40,.1), 0 1px 2px -1px rgba(16,24,40,.1);
+  --shadow-md: 0 4px 8px -2px rgba(16,24,40,.1), 0 2px 4px -2px rgba(16,24,40,.06);
+  --shadow-lg: 0 12px 16px -4px rgba(16,24,40,.08), 0 4px 6px -2px rgba(16,24,40,.03);
+  --shadow-xl: 0 20px 24px -4px rgba(16,24,40,.08), 0 8px 8px -4px rgba(16,24,40,.03);
+  --shadow-ring: 0 0 0 4px rgba(68,76,231,.12);
+
+  /* Radii */
+  --r-xs: 4px;  --r-sm: 6px;  --r-md: 8px;  --r-lg: 12px;  --r-xl: 16px;  --r-2xl: 20px;
+&#125;
+
+body &#123;
+  background: var(--gray-25);
+  color: var(--gray-900);
+  font-family: 'Inter', system-ui, sans-serif;
+&#125;
+
+h1, h2, h3, h4, h5, h6 &#123;
+  font-family: 'Urbanist', 'Inter', sans-serif;
+  letter-spacing: -0.015em;
+&#125;
+
+h1 &#123; font-weight: 400; &#125;
+h2, h3 &#123; font-weight: 500; &#125;</pre>
+
+    <h3 style="font-size:18px;margin-top:24px;margin-bottom:8px;font-weight:500">Tailwind config snippet</h3>
+<pre>// tailwind.config.js — drop this into theme.extend
+fontFamily: &#123;
+  sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+  mono: ['JetBrains Mono', 'IBM Plex Mono', 'monospace'],
+&#125;,
+colors: &#123;
+  primary: &#123; 50:'#f0f5ff', 100:'#e0eaff', 200:'#c7d7fe', 300:'#a4bcfd',
+             400:'#8098f9', 500:'#6172f3', 600:'#444ce7', 700:'#3538cd',
+             800:'#2d31a6', 900:'#2b2f83' &#125;,
+  gray:    &#123; 25:'#fcfcfd', 50:'#f9fafb', 100:'#f2f4f7', 200:'#eaecf0',
+             300:'#d0d5dd', 400:'#98a2b3', 500:'#667085', 600:'#475467',
+             700:'#344054', 800:'#1d2939', 900:'#101828' &#125;,
+  success: &#123; 50:'#ecfdf3', 500:'#12b76a', 600:'#039855', 700:'#027a48' &#125;,
+  warning: &#123; 50:'#fffaeb', 500:'#f79009', 600:'#dc6803', 700:'#b54708' &#125;,
+  error:   &#123; 50:'#fef3f2', 400:'#f97066', 500:'#f04438', 600:'#d92d20', 700:'#b42318' &#125;,
+&#125;</pre>
+
+    <h3 style="font-size:18px;margin-top:24px;margin-bottom:8px;font-weight:500">Component snippet — section with eyebrow + title</h3>
+<pre>&lt;section&gt;
+  &lt;p style="font-family: 'JetBrains Mono', monospace; font-size: 11px;
+            letter-spacing: .15em; text-transform: uppercase;
+            color: var(--gray-400); margin-bottom: 12px;"&gt;
+    FEATURES
+  &lt;/p&gt;
+  &lt;h2 style="font-family: 'Urbanist', sans-serif; font-weight: 300;
+             font-size: clamp(32px, 4.5vw, 48px); letter-spacing: -0.02em;
+             line-height: 1.15; color: #0a0a0a;"&gt;
+    Everything you need&lt;br/&gt;to hire smarter
+  &lt;/h2&gt;
+&lt;/section&gt;</pre>
+  </section>
+
+  <!-- ── DO / DON'T ────────────────────────────────────────────────────── -->
+  <section>
+    <div class="section-eyebrow">DO &amp; DON'T</div>
+    <h2 class="section-title">Quick guardrails</h2>
+    <div class="grid grid-2">
+      <div class="card" style="border-color:var(--success-500);background:var(--success-50)">
+        <h3 style="font-size:16px;color:var(--success-700);margin-bottom:12px;font-weight:600">DO</h3>
+        <ul style="list-style:none;padding:0">
+          <li style="padding:6px 0;color:var(--success-700);font-size:14px">✓ Use <code>#0a0a0a</code> for hero panels and footer; never a colored gradient</li>
+          <li style="padding:6px 0;color:var(--success-700);font-size:14px">✓ Pair Urbanist headlines with Inter body and JetBrains Mono micro-labels</li>
+          <li style="padding:6px 0;color:var(--success-700);font-size:14px">✓ Keep cards on a 2% black tint with 16-20 px radius</li>
+          <li style="padding:6px 0;color:var(--success-700);font-size:14px">✓ Use <code>primary-600</code> sparingly — buttons, links, one accent per page</li>
+          <li style="padding:6px 0;color:var(--success-700);font-size:14px">✓ Use Playfair Display italic on one word per headline, max</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:var(--error-500);background:var(--error-50)">
+        <h3 style="font-size:16px;color:var(--error-700);margin-bottom:12px;font-weight:600">DON'T</h3>
+        <ul style="list-style:none;padding:0">
+          <li style="padding:6px 0;color:var(--error-700);font-size:14px">✗ Never use gradients (neither colored nor monochrome)</li>
+          <li style="padding:6px 0;color:var(--error-700);font-size:14px">✗ Never paint surfaces with <code>primary-600</code> — it's an accent, not a background</li>
+          <li style="padding:6px 0;color:var(--error-700);font-size:14px">✗ Don't use heavy shadows; default is <code>shadow-xs</code></li>
+          <li style="padding:6px 0;color:var(--error-700);font-size:14px">✗ Don't combine Urbanist + body weight — bodies stay on Inter</li>
+          <li style="padding:6px 0;color:var(--error-700);font-size:14px">✗ Don't use Playfair Display in UI controls, body copy, or buttons</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div>
+      <strong>HireAI Design System</strong> · by Rooman Technologies · <span class="mono">hireai.rooman.com</span><br>
+      Pulled from <code>frontend/tailwind.config.js</code> + <code>frontend/src/index.css</code> · v1.0 · May 2026
+    </div>
+    <div style="text-align:right">
+      <strong>Brand palette</strong> · <span class="mono" style="color:var(--primary-600)">#444CE7</span>
+      <span class="mono" style="color:var(--gray-900)">#101828</span> · Urbanist / Inter / JetBrains Mono / Playfair
+    </div>
+  </footer>
+
+</div>
+</body>
+</html>

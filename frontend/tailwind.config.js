@@ -1,4 +1,17 @@
 /** @type {import('tailwindcss').Config} */
+//
+// HireAI design system. The rules it states are load-bearing, not decoration:
+//
+//   1. Monochrome canvas — #0a0a0a ink on #fcfcfd. primary-600 is reserved for
+//      buttons, links and ONE accent per page. Never paint a surface with it.
+//   2. Urbanist headlines, Inter body, tracking -0.015em on headings.
+//   3. JetBrains Mono for 11px uppercase eyebrow labels — the signature.
+//   4. No gradients. Ever. Reach for a darker swatch instead.
+//   5. Rounded surfaces — 16px cards, 20-24px hero, 8px controls.
+//   6. One italic Playfair accent, sparingly.
+//
+// There is deliberately no gradient utility and no glow shadow defined below,
+// so rule 4 is enforced by the config rather than by remembering it.
 module.exports = {
   content: [
     './pages/**/*.{js,ts,jsx,tsx,mdx}',
@@ -6,132 +19,103 @@ module.exports = {
     './app/**/*.{js,ts,jsx,tsx,mdx}',
     './store/**/*.{js,ts,jsx,tsx}',
   ],
-  darkMode: 'class',
   theme: {
     extend: {
       colors: {
+        // Ink: the near-black used for hero panels and highest-contrast text.
+        // Distinct from gray-900, which is the body text colour.
+        ink: '#0a0a0a',
+        gray: {
+          25: '#fcfcfd', // page canvas
+          50: '#f9fafb',
+          100: '#f2f4f7',
+          200: '#eaecf0',
+          300: '#d0d5dd',
+          400: '#98a2b3',
+          500: '#667085',
+          600: '#475467',
+          700: '#344054',
+          800: '#1d2939',
+          900: '#101828',
+        },
         primary: {
-          50: '#faf5ff',
-          100: '#f3e8ff',
-          200: '#e9d5ff',
-          300: '#d8b4fe',
-          400: '#c084fc',
-          500: '#a855f7',
-          600: '#9333ea',
-          700: '#7c3aed',
-          800: '#6d28d9',
-          900: '#5b21b6',
+          50: '#f0f5ff',
+          100: '#e0eaff',
+          200: '#c7d7fe',
+          300: '#a4bcfd',
+          400: '#8098f9',
+          500: '#6172f3',
+          600: '#444ce7', // the brand accent
+          700: '#3538cd',
+          800: '#2d31a6',
+          900: '#2b2f83',
         },
-        accent: {
-          50: '#eff6ff',
-          100: '#dbeafe',
-          200: '#bfdbfe',
-          300: '#93c5fd',
-          400: '#60a5fa',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-          800: '#1e40af',
-          900: '#1e3a8a',
-        },
-        surface: {
-          950: '#05050a',
-          900: '#0a0a0f',
-          800: '#111118',
-          700: '#1a1a24',
-          600: '#22222f',
-          500: '#2d2d3d',
-        },
-        neon: {
-          purple: '#a855f7',
-          blue: '#3b82f6',
-          cyan: '#06b6d4',
-          pink: '#ec4899',
-        },
+        success: { 50: '#ecfdf3', 500: '#12b76a', 600: '#039855', 700: '#027a48' },
+        warning: { 50: '#fffaeb', 500: '#f79009', 600: '#dc6803', 700: '#b54708' },
+        error: { 50: '#fef3f2', 400: '#f97066', 500: '#f04438', 600: '#d92d20', 700: '#b42318' },
       },
-      backgroundImage: {
-        'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
-        'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))',
-        'hero-gradient': 'linear-gradient(135deg, #0a0a0f 0%, #1a0533 50%, #0a0a0f 100%)',
-        'card-gradient': 'linear-gradient(135deg, rgba(168,85,247,0.1) 0%, rgba(59,130,246,0.05) 100%)',
-        'glow-gradient': 'radial-gradient(ellipse at center, rgba(168,85,247,0.15) 0%, transparent 70%)',
+
+      fontFamily: {
+        // var(--font-*) are injected by next/font in app/layout.tsx; the
+        // literal names are the fallback if a face fails to load.
+        sans: ['var(--font-inter)', 'Inter', 'system-ui', '-apple-system', 'sans-serif'],
+        display: ['var(--font-urbanist)', 'Urbanist', 'Inter', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-jetbrains)', '"JetBrains Mono"', 'ui-monospace', 'monospace'],
+        // Rule 6: the single italic accent.
+        accent: ['var(--font-playfair)', '"Playfair Display"', 'Georgia', 'serif'],
       },
+
+      fontSize: {
+        // Body is 15px, not Tailwind's 16px default — the system is set
+        // slightly tighter than stock and it shows across dense UI.
+        base: ['15px', { lineHeight: '1.55' }],
+        eyebrow: ['11px', { lineHeight: '1.5', letterSpacing: '0.15em', fontWeight: '500' }],
+        'display-sm': ['1.875rem', { lineHeight: '1.3', letterSpacing: '-0.01em', fontWeight: '600' }],
+        'display-md': ['2.25rem', { lineHeight: '1.2', letterSpacing: '-0.02em', fontWeight: '700' }],
+        'display-lg': ['3rem', { lineHeight: '1.2', letterSpacing: '-0.02em', fontWeight: '700' }],
+      },
+
+      borderRadius: {
+        xs: '4px',
+        sm: '6px',
+        md: '8px', // buttons and inputs
+        lg: '12px',
+        xl: '16px', // standard card
+        '2xl': '20px', // hero / featured panel
+      },
+
+      boxShadow: {
+        // Subtle by default. Nothing heavier than sm in ordinary UI; lg is for
+        // modals and floating menus only.
+        xs: '0 1px 2px 0 rgba(16,24,40,.05)',
+        sm: '0 1px 3px 0 rgba(16,24,40,.1), 0 1px 2px -1px rgba(16,24,40,.1)',
+        md: '0 4px 8px -2px rgba(16,24,40,.1), 0 2px 4px -2px rgba(16,24,40,.06)',
+        lg: '0 12px 16px -4px rgba(16,24,40,.08), 0 4px 6px -2px rgba(16,24,40,.03)',
+        xl: '0 20px 24px -4px rgba(16,24,40,.08), 0 8px 8px -4px rgba(16,24,40,.03)',
+        ring: '0 0 0 4px rgba(68,76,231,.12)',
+      },
+
+      letterSpacing: {
+        heading: '-0.015em',
+        eyebrow: '0.15em',
+      },
+
       animation: {
-        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-        'float': 'float 6s ease-in-out infinite',
-        'glow': 'glow 2s ease-in-out infinite alternate',
-        'wave': 'wave 1.5s ease-in-out infinite',
-        'shimmer': 'shimmer 2s linear infinite',
-        'typewriter': 'typewriter 0.05s steps(1) forwards',
-        'fade-in': 'fadeIn 0.5s ease-out forwards',
-        'slide-up': 'slideUp 0.4s ease-out forwards',
-        'slide-in-right': 'slideInRight 0.4s ease-out forwards',
-        'scale-in': 'scaleIn 0.3s ease-out forwards',
-        'spin-slow': 'spin 8s linear infinite',
-        'ping-slow': 'ping 2s cubic-bezier(0, 0, 0.2, 1) infinite',
-        'waveform': 'waveform 1.2s ease-in-out infinite',
-        'aurora': 'aurora 8s ease infinite',
+        'fade-up': 'fadeUp .4s cubic-bezier(.16,1,.3,1) both',
+        'fade-in': 'fadeIn .3s ease both',
+        'pulse-soft': 'pulseSoft 2s cubic-bezier(.4,0,.6,1) infinite',
       },
       keyframes: {
-        float: {
-          '0%, 100%': { transform: 'translateY(0px)' },
-          '50%': { transform: 'translateY(-20px)' },
+        // Short and eased rather than bouncy. The system is restrained; motion
+        // should confirm an action, not perform.
+        fadeUp: {
+          '0%': { opacity: '0', transform: 'translateY(8px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
         },
-        glow: {
-          '0%': { boxShadow: '0 0 20px rgba(168,85,247,0.3)' },
-          '100%': { boxShadow: '0 0 40px rgba(168,85,247,0.8), 0 0 80px rgba(59,130,246,0.3)' },
-        },
-        shimmer: {
-          '0%': { backgroundPosition: '-1000px 0' },
-          '100%': { backgroundPosition: '1000px 0' },
-        },
-        fadeIn: {
-          '0%': { opacity: '0' },
-          '100%': { opacity: '1' },
-        },
-        slideUp: {
-          '0%': { transform: 'translateY(20px)', opacity: '0' },
-          '100%': { transform: 'translateY(0)', opacity: '1' },
-        },
-        slideInRight: {
-          '0%': { transform: 'translateX(20px)', opacity: '0' },
-          '100%': { transform: 'translateX(0)', opacity: '1' },
-        },
-        scaleIn: {
-          '0%': { transform: 'scale(0.9)', opacity: '0' },
-          '100%': { transform: 'scale(1)', opacity: '1' },
-        },
-        waveform: {
-          '0%, 100%': { height: '4px' },
-          '50%': { height: '24px' },
-        },
-        aurora: {
-          '0%, 100%': { backgroundPosition: '0% 50%' },
-          '50%': { backgroundPosition: '100% 50%' },
-        },
-      },
-      backdropBlur: {
-        xs: '2px',
-      },
-      boxShadow: {
-        'glow-sm': '0 0 10px rgba(168,85,247,0.3)',
-        'glow': '0 0 20px rgba(168,85,247,0.4)',
-        'glow-lg': '0 0 40px rgba(168,85,247,0.5)',
-        'glow-blue': '0 0 20px rgba(59,130,246,0.4)',
-        'inner-glow': 'inset 0 0 20px rgba(168,85,247,0.1)',
-        'glass': '0 8px 32px 0 rgba(0,0,0,0.5)',
-        'card': '0 4px 24px rgba(0,0,0,0.4)',
-        'neon-purple': '0 0 5px #a855f7, 0 0 20px #a855f7, 0 0 40px #a855f7',
-        'neon-blue': '0 0 5px #3b82f6, 0 0 20px #3b82f6, 0 0 40px #3b82f6',
-      },
-      fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'monospace'],
-      },
-      transitionTimingFunction: {
-        'spring': 'cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+        pulseSoft: { '0%,100%': { opacity: '1' }, '50%': { opacity: '.5' } },
       },
     },
   },
   plugins: [],
-};
+}
