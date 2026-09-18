@@ -206,8 +206,8 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
     <div className="max-w-4xl mx-auto px-6 py-10 animate-fade-in">
       <div className="mb-8 flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-3xl font-black gradient-text mb-2">Conversation History</h1>
-          <p className="text-gray-400">Re-open, review, export, and clean up your past sessions.</p>
+          <h1 className="text-3xl font-black text-gray-900 mb-2">Conversation History</h1>
+          <p className="text-gray-500">Re-open, review, export, and clean up your past sessions.</p>
         </div>
         <button onClick={() => refetch()} className="btn-icon" title="Refresh" aria-label="Refresh">
           <RefreshCw size={15} />
@@ -232,11 +232,11 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
         </div>
       ) : filtered.length === 0 ? (
         <div className="card flex flex-col items-center justify-center py-16 gap-4 text-center">
-          <div className="w-16 h-16 rounded-2xl bg-surface-700/80 flex items-center justify-center border border-white/8">
+          <div className="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center border border-gray-200">
             <MessageCircle size={28} className="text-gray-500" />
           </div>
           <div>
-            <p className="text-white font-medium">No conversations yet</p>
+            <p className="text-gray-900 font-medium">No conversations yet</p>
             <p className="text-gray-500 text-sm mt-1">
               {query ? 'Nothing matches that search.' : 'Start a chat with an avatar to see it here.'}
             </p>
@@ -253,9 +253,9 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
             const isBusy = busy === s.id
             const title = convo?.title || av?.name || 'Untitled conversation'
             return (
-              <div key={s.id} className="glass-card rounded-2xl overflow-hidden border border-white/8">
+              <div key={s.id} className="card rounded-2xl overflow-hidden border border-gray-200">
                 <div className="flex items-center gap-4 px-5 py-4">
-                  <div className="w-12 h-12 rounded-xl overflow-hidden bg-surface-700 flex-shrink-0 flex items-center justify-center">
+                  <div className="w-12 h-12 rounded-xl overflow-hidden bg-gray-100 flex-shrink-0 flex items-center justify-center">
                     {av?.thumbnail_url || av?.image_url ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
@@ -285,7 +285,7 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                         />
                         <button
                           onClick={handleSaveRename}
-                          className="btn-icon text-green-400"
+                          className="btn-icon text-success-600"
                           aria-label="Save title"
                           disabled={isBusy}
                         >
@@ -301,12 +301,12 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                       </div>
                     ) : (
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-semibold text-white truncate">{title}</span>
+                        <span className="font-semibold text-gray-900 truncate">{title}</span>
                         <span className={`badge text-xs ${
-                          s.status === 'active' ? 'badge-green' :
-                          s.status === 'paused' ? 'badge-amber' :
-                          'badge-gray'
-                        }`}>
+ s.status === 'active' ? 'badge-green' :
+ s.status === 'paused' ? 'badge-amber' :
+ 'badge-gray'
+ }`}>
                           {s.status}
                         </span>
                       </div>
@@ -372,7 +372,7 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                     )}
                     <button
                       onClick={() => handleDelete(s.id)}
-                      className="btn-icon text-gray-500 hover:text-red-400"
+                      className="btn-icon text-gray-500 hover:text-error-600"
                       title="Delete conversation"
                       aria-label="Delete conversation"
                       disabled={isBusy}
@@ -383,17 +383,17 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                 </div>
 
                 {convo?.summary && !isExpanded && (
-                  <div className="border-t border-white/8 px-5 py-3 bg-primary-500/5 flex items-start gap-2">
+                  <div className="border-t border-gray-200 px-5 py-3 bg-primary-500/5 flex items-start gap-2">
                     <Sparkles size={12} className="text-primary-400 mt-0.5 flex-shrink-0" />
-                    <p className="text-xs text-gray-300 leading-relaxed">{convo.summary}</p>
+                    <p className="text-xs text-gray-700 leading-relaxed">{convo.summary}</p>
                   </div>
                 )}
                 {isExpanded && (
-                  <div className="border-t border-white/8 px-5 py-4 bg-surface-800/40">
+                  <div className="border-t border-gray-200 px-5 py-4 bg-white">
                     {convo?.summary && (
                       <div className="mb-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-primary-500/10 border border-primary-500/20">
                         <Sparkles size={12} className="text-primary-400 mt-0.5 flex-shrink-0" />
-                        <p className="text-xs text-gray-300 leading-relaxed">{convo.summary}</p>
+                        <p className="text-xs text-gray-700 leading-relaxed">{convo.summary}</p>
                       </div>
                     )}
                     {!msgs ? (
@@ -405,11 +405,11 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                         {msgs.map((m) => (
                           <div key={m.id} className="flex gap-2 text-sm">
                             <span className={`font-mono text-xs px-1.5 py-0.5 rounded ${
-                              m.role === 'user' ? 'bg-accent-700/40 text-accent-200' : 'bg-primary-700/40 text-primary-200'
-                            }`}>
+ m.role === 'user' ? 'bg-primary-700/40 text-primary-200' : 'bg-primary-700/40 text-primary-200'
+ }`}>
                               {m.role === 'user' ? 'YOU' : 'AI'}
                             </span>
-                            <span className="text-gray-200 flex-1 leading-relaxed whitespace-pre-wrap">{m.content}</span>
+                            <span className="text-gray-800 flex-1 leading-relaxed whitespace-pre-wrap">{m.content}</span>
                           </div>
                         ))}
                       </div>

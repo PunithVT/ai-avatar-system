@@ -93,7 +93,7 @@ export function AvatarUpload() {
     <div className="card flex flex-col gap-5">
       {/* Header */}
       <div>
-        <h2 className="text-xl font-bold text-white">Upload Avatar</h2>
+        <h2 className="text-xl font-bold text-gray-900">Upload Avatar</h2>
         <p className="text-sm text-gray-500 mt-0.5">JPG · PNG · WEBP · up to 10 MB</p>
       </div>
 
@@ -101,7 +101,7 @@ export function AvatarUpload() {
 
       {/* Name field */}
       <div className="space-y-1.5">
-        <label className="text-sm font-medium text-gray-300">Avatar Name</label>
+        <label className="text-sm font-medium text-gray-700">Avatar Name</label>
         <input
           type="text"
           value={name}
@@ -120,11 +120,11 @@ export function AvatarUpload() {
           onDragOver={handleDrag}
           onDrop={handleDrop}
           className={`relative rounded-2xl border-2 border-dashed p-10 text-center cursor-pointer
-            transition-all duration-300
-            ${dragActive
-              ? 'border-primary-400 bg-primary-500/10 scale-[1.01] shadow-glow-sm'
-              : 'border-white/15 hover:border-primary-500/50 hover:bg-primary-500/5'
-            }`}
+ transition-all duration-300
+ ${dragActive
+ ? 'border-primary-400 bg-primary-500/10 scale-[1.01] shadow-xs'
+ : 'border-gray-200 hover:border-primary-500/50 hover:bg-primary-500/5'
+ }`}
         >
           <input
             type="file"
@@ -137,20 +137,20 @@ export function AvatarUpload() {
           <div className="pointer-events-none flex flex-col items-center gap-4">
             {/* Icon */}
             <div className={`w-16 h-16 rounded-2xl flex items-center justify-center border transition-all duration-300
-              ${dragActive
-                ? 'bg-primary-500/20 border-primary-400/50'
-                : 'bg-surface-700/80 border-white/10'
-              }`}
+ ${dragActive
+ ? 'bg-primary-500/20 border-primary-400/50'
+ : 'bg-gray-100 border-gray-200'
+ }`}
             >
               {dragActive ? (
                 <Sparkles size={28} className="text-primary-400 animate-pulse" />
               ) : (
-                <ImagePlus size={28} className="text-gray-400" />
+                <ImagePlus size={28} className="text-gray-500" />
               )}
             </div>
 
             <div>
-              <p className="text-white font-semibold text-base mb-1">
+              <p className="text-gray-900 font-semibold text-base mb-1">
                 {dragActive ? 'Drop to upload' : 'Drag & drop your photo'}
               </p>
               <p className="text-gray-500 text-sm">
@@ -168,39 +168,39 @@ export function AvatarUpload() {
         </div>
       ) : (
         /* Preview */
-        <div className="relative rounded-2xl overflow-hidden border border-white/10 group">
+        <div className="relative rounded-2xl overflow-hidden border border-gray-200 group">
           <img
             src={preview}
             alt="Avatar preview"
             className="w-full max-h-64 object-cover"
           />
           {/* Overlay */}
-          <div className="absolute inset-0 bg-gradient-to-t from-surface-950/90 via-surface-950/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+          <div className="absolute inset-0 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
 
           {/* Remove button */}
           <button
             onClick={clearPreview}
-            className="absolute top-3 right-3 w-8 h-8 rounded-full bg-surface-900/80 backdrop-blur-sm border border-white/15
-                       flex items-center justify-center text-gray-400 hover:text-white hover:border-red-500/40
-                       transition-all duration-200 opacity-0 group-hover:opacity-100"
+            className="absolute top-3 right-3 w-8 h-8 rounded-full bg-white backdrop-blur-sm border border-gray-200
+ flex items-center justify-center text-gray-500 hover:text-gray-900 hover:border-error-600/40
+ transition-all duration-200 opacity-0 group-hover:opacity-100"
           >
             <X size={15} />
           </button>
 
           {/* File name tag */}
           <div className="absolute bottom-3 left-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg
-                          bg-surface-900/80 backdrop-blur-sm border border-white/10">
-            <CheckCircle2 size={13} className="text-green-400" />
-            <span className="text-xs text-gray-300 truncate max-w-[180px]">{fileName}</span>
+ bg-white backdrop-blur-sm border border-gray-200">
+            <CheckCircle2 size={13} className="text-success-600" />
+            <span className="text-xs text-gray-700 truncate max-w-[180px]">{fileName}</span>
           </div>
         </div>
       )}
 
       {/* Error */}
       {error && (
-        <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-red-500/10 border border-red-500/20 animate-slide-up">
-          <AlertCircle size={14} className="text-red-400 flex-shrink-0" />
-          <p className="text-sm text-red-400">{error}</p>
+        <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-error-50 border border-error-600/20 animate-slide-up">
+          <AlertCircle size={14} className="text-error-600 flex-shrink-0" />
+          <p className="text-sm text-error-600">{error}</p>
         </div>
       )}
 

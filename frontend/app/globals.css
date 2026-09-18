@@ -1,331 +1,159 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * HireAI design system.
+ *
+ * Fonts are loaded in app/layout.tsx via next/font so they are self-hosted and
+ * do not cause a flash of unstyled text — a @import here would block render.
+ */
+
 @layer base {
   :root {
-    --color-primary: 168 85 247;
-    --color-accent: 59 130 246;
-    --color-surface: 10 10 15;
-    --glow-primary: rgba(168, 85, 247, 0.4);
-    --glow-accent: rgba(59, 130, 246, 0.4);
-  }
-
-  * {
-    box-sizing: border-box;
+    color-scheme: light;
   }
 
   html {
-    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
 
   body {
-    @apply bg-surface-900 text-white font-sans antialiased;
-    background-image:
-      radial-gradient(ellipse at 20% 50%, rgba(168, 85, 247, 0.08) 0%, transparent 50%),
-      radial-gradient(ellipse at 80% 20%, rgba(59, 130, 246, 0.06) 0%, transparent 50%);
-    min-height: 100vh;
+    @apply bg-gray-25 text-gray-900;
+    font-size: 15px;
+    line-height: 1.55;
   }
 
-  ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+  /* Rule 2: Urbanist headlines. H1 is weight 400 — thin on purpose; the
+     system gets its authority from spacing and restraint, not from bold. */
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display tracking-heading;
   }
-
-  ::-webkit-scrollbar-track {
-    @apply bg-surface-800;
-  }
-
-  ::-webkit-scrollbar-thumb {
-    @apply bg-surface-500 rounded-full;
-  }
-
-  ::-webkit-scrollbar-thumb:hover {
-    @apply bg-primary-700;
-  }
+  h1 { font-weight: 400; }
+  h2, h3 { font-weight: 500; }
 
   ::selection {
-    @apply bg-primary-700 text-white;
+    background: theme('colors.primary.100');
+    color: theme('colors.primary.900');
+  }
+
+  /* One focus treatment everywhere, matching --shadow-ring. */
+  :focus-visible {
+    outline: none;
+    @apply ring-4 ring-primary-600/[.12] ring-offset-0;
+  }
+
+  /* The system is quiet; motion should never be the loud part. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important;
+    }
   }
 }
 
 @layer components {
-  /* ── Buttons ── */
-  .btn-primary {
-    @apply relative inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-semibold text-white
-           bg-gradient-to-r from-primary-600 to-accent-600
-           hover:from-primary-500 hover:to-accent-500
-           shadow-glow-sm hover:shadow-glow
-           transition-all duration-300 ease-spring
-           disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none
-           active:scale-95 overflow-hidden;
+  /* ── Rule 3: the eyebrow label. The most recognisable signature in the
+     system, so it gets a first-class class rather than being re-typed. */
+  .eyebrow {
+    @apply font-mono text-eyebrow uppercase text-gray-400;
   }
 
-  .btn-primary::before {
-    content: '';
-    @apply absolute inset-0 bg-white opacity-0 hover:opacity-10 transition-opacity duration-200;
+  /* Rule 6: the single italic accent, for a soft emphasis in headings. */
+  .accent-italic {
+    @apply font-accent italic font-normal;
+  }
+
+  /* ── Surfaces ──────────────────────────────────────────────────────────
+     Rule 4: no gradients. Depth comes from a hairline border and the
+     lightest shadow, never from a colour ramp. */
+  .card {
+    @apply rounded-xl border border-gray-200 bg-white shadow-xs;
+  }
+
+  /* The 2% black tint the system uses instead of a tinted background. */
+  .card-tint {
+    @apply rounded-xl border border-gray-200 shadow-xs;
+    background: rgba(0, 0, 0, .02);
+  }
+
+  .card-hover {
+    @apply transition-shadow duration-200 hover:shadow-sm;
+  }
+
+  /* Rule 4: hero panels are solid ink, not a gradient. */
+  .panel-hero {
+    @apply rounded-2xl bg-ink text-gray-25;
+  }
+
+  /* ── Controls — 8px radius per rule 5 ─────────────────────────────────── */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5
+           text-sm font-medium transition-colors duration-150
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-primary-600 text-white shadow-xs hover:bg-primary-700;
   }
 
   .btn-secondary {
-    @apply relative inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-medium
-           bg-surface-700 hover:bg-surface-600
-           border border-white/10 hover:border-primary-500/50
-           text-gray-300 hover:text-white
-           transition-all duration-200
-           disabled:opacity-40 disabled:cursor-not-allowed
-           active:scale-95;
+    @apply btn border border-gray-300 bg-white text-gray-700 shadow-xs hover:bg-gray-50;
   }
 
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
-           text-gray-400 hover:text-white hover:bg-white/5
-           transition-all duration-200 active:scale-95;
+    @apply btn bg-transparent text-gray-600 hover:bg-gray-100;
   }
 
   .btn-danger {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium
-           bg-red-600/20 hover:bg-red-600/40 text-red-400 hover:text-red-300
-           border border-red-500/20 hover:border-red-500/50
-           transition-all duration-200;
+    @apply btn bg-error-600 text-white shadow-xs hover:bg-error-700;
   }
 
   .btn-icon {
-    @apply w-10 h-10 flex items-center justify-center rounded-xl
-           bg-surface-700 hover:bg-surface-600
-           border border-white/10 hover:border-primary-500/40
-           text-gray-400 hover:text-white
-           transition-all duration-200 active:scale-95;
+    @apply inline-flex h-10 w-10 items-center justify-center rounded-md
+           border border-gray-300 bg-white text-gray-600 shadow-xs
+           transition-colors duration-150 hover:bg-gray-50 hover:text-gray-900
+           disabled:cursor-not-allowed disabled:opacity-50;
   }
 
-  /* ── Glass Cards ── */
-  .glass-card {
-    @apply relative rounded-2xl overflow-hidden
-           bg-surface-800/60 backdrop-blur-xl
-           border border-white/10
-           shadow-glass;
+  .input {
+    @apply w-full rounded-md border border-gray-300 bg-white px-3.5 py-2.5
+           text-gray-900 placeholder:text-gray-400 shadow-xs
+           transition-shadow duration-150
+           focus:border-primary-300 focus:outline-none focus:ring-4 focus:ring-primary-50;
   }
 
-  .glass-card-hover {
-    @apply glass-card hover:bg-surface-700/60 hover:border-primary-500/30
-           transition-all duration-300 hover:shadow-glow-sm;
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-gray-700;
   }
 
-  .card {
-    @apply glass-card p-6;
-  }
-
-  .card-glow {
-    @apply glass-card p-6;
-    background: linear-gradient(135deg, rgba(168,85,247,0.08) 0%, rgba(59,130,246,0.04) 100%);
-  }
-
-  /* ── Inputs ── */
-  .input-field {
-    @apply w-full px-4 py-3 rounded-xl
-           bg-surface-700/80 border border-white/10
-           text-white placeholder:text-gray-500
-           focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500/50
-           transition-all duration-200;
-  }
-
-  /* ── Badges ── */
+  /* ── Badges — fully rounded per rule 5, hairline via inset ring ───────── */
   .badge {
-    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium;
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5
+           text-xs font-medium;
   }
+  .badge-gray   { @apply badge bg-gray-100 text-gray-700    ring-1 ring-inset ring-gray-500/[.12]; }
+  .badge-green  { @apply badge bg-success-50 text-success-700 ring-1 ring-inset ring-success-600/[.12]; }
+  .badge-yellow { @apply badge bg-warning-50 text-warning-700 ring-1 ring-inset ring-warning-700/[.12]; }
+  .badge-red    { @apply badge bg-error-50 text-error-700     ring-1 ring-inset ring-error-700/[.12]; }
+  .badge-brand  { @apply badge bg-primary-50 text-primary-700 ring-1 ring-inset ring-primary-600/[.12]; }
 
-  .badge-purple {
-    @apply badge bg-primary-500/20 text-primary-300 border border-primary-500/30;
-  }
-
-  .badge-blue {
-    @apply badge bg-accent-500/20 text-accent-300 border border-accent-500/30;
-  }
-
-  .badge-green {
-    @apply badge bg-green-500/20 text-green-300 border border-green-500/30;
-  }
-
-  .badge-amber {
-    @apply badge bg-amber-500/20 text-amber-300 border border-amber-500/30;
-  }
-
-  .badge-red {
-    @apply badge bg-red-500/20 text-red-300 border border-red-500/30;
-  }
-
-  /* ── Text Gradients ── */
-  .gradient-text {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary-400 to-accent-400;
-  }
-
-  .gradient-text-gold {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-amber-400 to-orange-400;
-  }
-
-  /* ── Avatar Ring ── */
-  .avatar-ring {
-    @apply ring-2 ring-primary-500/60 ring-offset-2 ring-offset-surface-900;
-  }
-
-  /* ── Dividers ── */
   .divider {
-    @apply w-full h-px bg-gradient-to-r from-transparent via-white/10 to-transparent;
+    @apply h-px w-full bg-gray-200;
   }
 
-  /* ── Waveform Bars ── */
-  .waveform-bar {
-    @apply rounded-full bg-gradient-to-t from-primary-600 to-accent-400;
-    animation: waveform 1.2s ease-in-out infinite;
-  }
-
-  .waveform-bar:nth-child(2) { animation-delay: 0.1s; }
-  .waveform-bar:nth-child(3) { animation-delay: 0.2s; }
-  .waveform-bar:nth-child(4) { animation-delay: 0.3s; }
-  .waveform-bar:nth-child(5) { animation-delay: 0.4s; }
-  .waveform-bar:nth-child(6) { animation-delay: 0.3s; }
-  .waveform-bar:nth-child(7) { animation-delay: 0.2s; }
-  .waveform-bar:nth-child(8) { animation-delay: 0.1s; }
-
-  /* ── Loading shimmer ── */
-  .skeleton {
-    @apply rounded-lg bg-surface-700;
-    background: linear-gradient(90deg, #1a1a24 25%, #22222f 50%, #1a1a24 75%);
-    background-size: 1000px 100%;
-    animation: shimmer 2s linear infinite;
-  }
-
-  /* ── Feature card ── */
-  .feature-card {
-    @apply glass-card p-6 cursor-default
-           hover:scale-105 hover:border-primary-500/40
-           transition-all duration-300 ease-spring;
-  }
-
-  .feature-card::before {
-    content: '';
-    @apply absolute inset-0 opacity-0 hover:opacity-100 transition-opacity duration-300;
-    background: radial-gradient(circle at 50% 0%, rgba(168,85,247,0.08) 0%, transparent 60%);
-  }
-
-  /* ── Scrollbar in message list ── */
-  .messages-scroll {
+  /* Scrollbars, kept in the monochrome register rather than left as the
+     browser default, which reads as unfinished against this much white. */
+  .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: rgba(168,85,247,0.3) transparent;
+    scrollbar-color: theme('colors.gray.300') transparent;
   }
-
-  /* ── Voice level indicator ── */
-  .voice-level {
-    @apply h-1 rounded-full bg-gradient-to-r from-primary-600 to-accent-500;
-    transition: width 0.1s ease-out;
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-gray-300;
   }
-
-  /* ── Neon border ── */
-  .neon-border {
-    @apply border border-primary-500/50;
-    box-shadow: 0 0 8px rgba(168,85,247,0.3), inset 0 0 8px rgba(168,85,247,0.05);
-  }
-
-  /* ── Status dot ── */
-  .status-dot {
-    @apply w-2.5 h-2.5 rounded-full;
-  }
-
-  .status-dot.online {
-    @apply bg-green-400;
-    box-shadow: 0 0 6px rgba(74, 222, 128, 0.7);
-  }
-
-  .status-dot.processing {
-    @apply bg-amber-400 animate-pulse;
-  }
-
-  .status-dot.offline {
-    @apply bg-gray-500;
-  }
-}
-
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
-
-  .bg-noise {
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
-  }
-
-  .mask-gradient-b {
-    -webkit-mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
-    mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
-  }
-
-  .no-scrollbar {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
-  }
-
-  .no-scrollbar::-webkit-scrollbar {
-    display: none;
-  }
-
-  .glass {
-    background: rgba(255, 255, 255, 0.04);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-  }
-}
-
-/* ── Custom Keyframes ── */
-@keyframes waveform {
-  0%, 100% { height: 4px; opacity: 0.5; }
-  50% { height: 24px; opacity: 1; }
-}
-
-@keyframes shimmer {
-  0% { background-position: -1000px 0; }
-  100% { background-position: 1000px 0; }
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(0px); }
-  50% { transform: translateY(-12px); }
-}
-
-@keyframes aurora {
-  0%, 100% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-}
-
-@keyframes avatar-breathe {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.018); }
-}
-
-@keyframes avatar-glow {
-  0%, 100% { box-shadow: 0 0 24px rgba(124, 58, 237, 0.25), 0 0 0px rgba(59, 130, 246, 0); }
-  50% { box-shadow: 0 0 48px rgba(124, 58, 237, 0.5), 0 0 80px rgba(59, 130, 246, 0.15); }
-}
-
-@keyframes avatar-blink {
-  0%, 92%, 100% { transform: scaleY(1); }
-  96% { transform: scaleY(0.06); }
-}
-
-.avatar-idle {
-  animation: avatar-breathe 3.8s ease-in-out infinite;
-}
-
-.avatar-idle-glow {
-  animation: avatar-glow 3.8s ease-in-out infinite;
-}
-
-.avatar-eye {
-  animation: avatar-blink 5s ease-in-out infinite;
-  transform-origin: center 60%;
-}
-
-/* ── Toaster overrides ── */
-.react-hot-toast > div {
-  font-family: 'Inter', sans-serif !important;
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { @apply bg-gray-400; }
 }

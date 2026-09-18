@@ -7,7 +7,7 @@ interface WaveformVisualizerProps {
   stream?: MediaStream | null
   /** If no stream, renders a static decorative waveform */
   staticBars?: number
-  /** Bar color – supports Tailwind gradient strings via CSS vars or hex */
+  /** Bar colour — a flat value; the system does not use gradients. */
   color?: string
   height?: number
   className?: string
@@ -136,7 +136,7 @@ export function InlineWaveform({ active }: { active: boolean }) {
           key={i}
           className="w-1 rounded-full"
           style={{
-            background: 'linear-gradient(to top, #7c3aed, #3b82f6)',
+            background: '#444ce7', // primary-600 — rule 4: flat, not a ramp
             height: active ? undefined : '4px',
             minHeight: '4px',
             animation: active ? `waveform 1.2s ease-in-out ${i * 0.1}s infinite` : 'none',

@@ -10,13 +10,13 @@ export function ConnectionStatus() {
     <div className="flex items-center gap-2 text-sm">
       {wsConnected ? (
         <>
-          <Wifi size={14} className="text-green-500" />
-          <span className="text-green-600 dark:text-green-400">Connected</span>
+          <Wifi size={14} className="text-success-600" />
+          <span className="text-success-600">Connected</span>
         </>
       ) : (
         <>
-          <WifiOff size={14} className="text-red-500" />
-          <span className="text-red-600 dark:text-red-400">Disconnected</span>
+          <WifiOff size={14} className="text-error-600" />
+          <span className="text-error-600">Disconnected</span>
         </>
       )}
     </div>
