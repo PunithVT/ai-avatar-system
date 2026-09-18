@@ -9,11 +9,12 @@
   <a href="https://github.com/PunithVT/ai-avatar-system/forks"><img src="https://img.shields.io/github/forks/PunithVT/ai-avatar-system?style=for-the-badge&color=3b82f6" alt="Forks"/></a>
   <a href="https://github.com/PunithVT/ai-avatar-system/issues"><img src="https://img.shields.io/github/issues/PunithVT/ai-avatar-system?style=for-the-badge" alt="Issues"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge" alt="MIT License"/></a>
+  <a href="https://github.com/sponsors/PunithVT"><img src="https://img.shields.io/badge/Sponsor-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor"/></a>
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/Next.js-14-black?logo=next.js&style=flat-square" />
-  <img src="https://img.shields.io/badge/FastAPI-0.109-009688?logo=fastapi&style=flat-square" />
+  <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js&style=flat-square" />
+  <img src="https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&style=flat-square" />
   <img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&style=flat-square" />
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&style=flat-square" />
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&style=flat-square" />
@@ -163,7 +164,7 @@ ai-avatar-system/
 │   ├── tests/                  # pytest suite
 │   ├── Dockerfile              # CUDA 11.8 base image
 │   └── requirements.txt
-├── frontend/                   # Next.js 14 application
+├── frontend/                   # Next.js 16 application
 │   ├── app/                    # App Router pages
 │   ├── components/             # React components (ChatInterface, IdleAvatar, etc.)
 │   ├── lib/api.ts              # Axios API client
@@ -624,7 +625,7 @@ JWT_EXPIRATION_HOURS=24
 ### Frontend
 | Library | Purpose |
 |---|---|
-| Next.js 14 + React 18 | App framework |
+| Next.js 16 + React 18 | App framework |
 | TypeScript 5 | Type safety |
 | Tailwind CSS | Styling |
 | Zustand | Global state |
