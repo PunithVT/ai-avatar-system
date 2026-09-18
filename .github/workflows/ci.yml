@@ -24,6 +24,7 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      infrastructure: ${{ steps.filter.outputs.infrastructure }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -35,6 +36,9 @@ jobs:
               - '.github/workflows/ci.yml'
             frontend:
               - 'frontend/**'
+              - '.github/workflows/ci.yml'
+            infrastructure:
+              - 'infrastructure/**'
               - '.github/workflows/ci.yml'
 
   # ── Backend lint ────────────────────────────────────────────────────────
@@ -266,6 +270,41 @@ jobs:
       # low/moderate advisories are reported but don't block a merge.
       - name: npm audit
         run: npm audit --audit-level=high
+
+  # ── Terraform validate ──────────────────────────────────────────────────
+  # infrastructure/ had no CI at all: the paths filter watched only backend and
+  # frontend, so the ECS work in #20 landed with every job skipped while the PR
+  # still reported clean. These checks need no AWS credentials and take
+  # seconds — `validate` alone would have caught the duplicate variable
+  # declarations and the unpinned module that made `terraform init` fail.
+  #
+  # It stops at validate deliberately: `plan` needs real credentials and reads
+  # live state, which is not something a pull request should do.
+  terraform-validate:
+    name: Terraform Validate
+    needs: changes
+    if: needs.changes.outputs.infrastructure == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./infrastructure
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: Format check
+        run: terraform fmt -check -recursive -diff
+
+      # -backend=false: the S3 backend is commented out and would otherwise
+      # need credentials and a pre-existing bucket just to check syntax.
+      - name: Init
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform validate
 
   # ── Security scan ───────────────────────────────────────────────────────
   security-scan:
