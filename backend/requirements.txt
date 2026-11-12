@@ -43,6 +43,9 @@ aioboto3==15.5.0
 
 # WebSocket
 websockets==12.0
+# WebRTC media delivery (MEDIA_TRANSPORT=webrtc; off by default). Pure-Python
+# stack; shares PyAV with faster-whisper and resolves to the same version.
+aiortc==1.16.0
 python-socketio==5.16.2
 
 # AI/ML

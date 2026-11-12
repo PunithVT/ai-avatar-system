@@ -21,6 +21,7 @@ from app.middleware.security import RequestLoggingMiddleware, SecurityHeadersMid
 from app.models import Session as SessionModel
 from app.services.cache import cache_service
 from app.services.storage import storage_service
+from app.services.webrtc import WEBRTC_AVAILABLE, media_descriptor
 from app.telemetry import init_telemetry
 from app.tokens import subject_from_token
 from app.websocket import websocket_manager
@@ -105,6 +106,9 @@ async def lifespan(app: FastAPI):
         warmup_task.cancel()
         await asyncio.gather(warmup_task, return_exceptions=True)
     await websocket_manager.stop_cleanup_task()
+    # Peer connections hold UDP sockets and sender tasks of their own; they
+    # do not go away just because the WebSocket that negotiated them did.
+    await websocket_manager.close_all_streams()
     # Without this the MuseTalk worker process outlived the server on a
     # reload or restart, still holding its VRAM.
     try:
@@ -314,6 +318,10 @@ async def health_check(response: Response):
     except Exception as e:
         health["avatar_engine_state"] = f"error: {e}"
     health["active_ws_sessions"] = len(websocket_manager.active_connections)
+    # Configured vs. possible: MEDIA_TRANSPORT=webrtc on an image without
+    # aiortc quietly serves clips, and this is where that shows.
+    health["media_transport"] = settings.MEDIA_TRANSPORT
+    health["webrtc_available"] = WEBRTC_AVAILABLE
 
     # Only a hard-dependency failure takes the instance out of rotation.
     if health["status"] == "unhealthy":
@@ -404,7 +412,10 @@ async def websocket_endpoint(
     # First frame of every accepted connection. Refusals are also "opened"
     # (see above), so a client cannot take the socket opening as success;
     # this frame is what tells it the connection is real.
-    await websocket_manager.send_message(session_id, {"type": "ready"})
+    # `media` tells it whether a WebRTC offer would be welcome (and with
+    # which ICE servers); when it says no, nothing else about the session
+    # differs from before the field existed.
+    await websocket_manager.send_message(session_id, {"type": "ready", "media": media_descriptor()})
     try:
         while True:
             # This loop must never block on a full turn — handle_text_input /
@@ -439,6 +450,13 @@ async def websocket_endpoint(
                 # Explicit barge-in from a "stop" button — cancel the current
                 # turn without starting a new one.
                 await websocket_manager.interrupt_active_turn(session_id)
+
+            elif msg_type == "webrtc_offer":
+                # Answers (or refuses) over this socket; never raises.
+                await websocket_manager.handle_webrtc_offer(session_id, data.get("sdp"))
+
+            elif msg_type == "webrtc_close":
+                await websocket_manager.handle_webrtc_close(session_id)
 
             elif msg_type == "set_voice":
                 # Accept voice_id only — never a raw filesystem path from the client.

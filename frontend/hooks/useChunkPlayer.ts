@@ -4,13 +4,12 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { ChunkSequencer, type Clip } from '@/lib/chat/chunkSequencer'
 
 /**
- * The avatar's media output, as the rest of the chat sees it.
+ * The clip transport: a queue of per-sentence MP4s swapped onto one <video>.
  *
- * Deliberately small. Today it is backed by a queue of per-sentence MP4s
- * swapped onto one <video>; a WebRTC track will slot in behind the same four
- * members, so nothing outside this file should reach for the element.
+ * One of the two halves behind AvatarPlayer (see useAvatarPlayer); the other
+ * is the WebRTC stream. The chat talks to AvatarPlayer, never to this.
  */
-export interface AvatarPlayer {
+export interface ClipPlayer {
   /** Queue a clip. Returns true if playback was idle and this clip started it. */
   enqueue(url: string): boolean
   /** Stop now: pause, drop the queue, release the media. Always safe to call. */
@@ -31,7 +30,7 @@ export interface AvatarPlayer {
 export function useChunkPlayer(
   videoRef: RefObject<HTMLVideoElement | null>,
   preloadRef: RefObject<HTMLVideoElement | null>,
-): AvatarPlayer {
+): ClipPlayer {
   const [isPlaying, setIsPlaying] = useState(false)
   const [muted, setMutedState] = useState(false)
   const mutedRef = useRef(false)
@@ -191,7 +190,7 @@ export function useChunkPlayer(
     }
   }, [controller, videoRef])
 
-  return useMemo<AvatarPlayer>(
+  return useMemo<ClipPlayer>(
     () => ({
       enqueue: controller.enqueue,
       stop: controller.stop,

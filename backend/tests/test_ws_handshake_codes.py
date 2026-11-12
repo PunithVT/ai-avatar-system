@@ -90,12 +90,64 @@ async def test_an_accepted_connection_announces_itself_first(seeded, monkeypatch
     the client resets its reconnect backoff on this frame instead.
     """
     import app.websocket as wsmod
+    from app.config import settings
+
+    async def no_load(session_id):
+        return None
+
+    monkeypatch.setattr(wsmod.websocket_manager, "_load_session_data", no_load)
+    monkeypatch.setattr(settings, "MEDIA_TRANSPORT", "clips")
+    token = create_access_token(data={"sub": "owner"})
+    with TestClient(main.app) as tc:
+        with tc.websocket_connect(f"/ws/session/s1?token={token}") as ws:
+            frame = ws.receive_json()
+            assert frame["type"] == "ready"
+            # With the default transport the frame offers nothing new: no
+            # WebRTC, so the client carries on exactly as it always has.
+            assert frame["media"]["webrtc"] is False
+
+
+async def test_the_ready_frame_offers_webrtc_only_when_it_is_configured(seeded, monkeypatch):
+    import app.websocket as wsmod
+    from app.config import settings
 
     async def no_load(session_id):
         return None
 
     monkeypatch.setattr(wsmod.websocket_manager, "_load_session_data", no_load)
     token = create_access_token(data={"sub": "owner"})
+    turn = '[{"urls": ["turn:turn.example.com:3478"], "username": "u", "credential": "p"}]'
+    monkeypatch.setattr(settings, "WEBRTC_ICE_SERVERS", turn)
+    monkeypatch.setattr(settings, "MEDIA_TRANSPORT", "clips")
+
+    def ready() -> dict:
+        with TestClient(main.app) as tc:
+            with tc.websocket_connect(f"/ws/session/s1?token={token}") as ws:
+                return ws.receive_json()
+
+    servers = [{"urls": ["turn:turn.example.com:3478"], "username": "u", "credential": "p"}]
+    assert ready() == {"type": "ready", "media": {"webrtc": False, "ice_servers": servers}}
+    monkeypatch.setattr(settings, "MEDIA_TRANSPORT", "webrtc")
+    assert ready() == {"type": "ready", "media": {"webrtc": True, "ice_servers": servers}}
+
+
+async def test_signalling_frames_are_dispatched_and_never_drop_the_socket(seeded, monkeypatch):
+    """An offer the server cannot honour is answered, and the connection lives on."""
+    import app.websocket as wsmod
+
+    async def no_load(session_id):
+        return None
+
+    monkeypatch.setattr(wsmod.websocket_manager, "_load_session_data", no_load)
+    monkeypatch.setattr(wsmod.settings, "MEDIA_TRANSPORT", "clips")
+    token = create_access_token(data={"sub": "owner"})
     with TestClient(main.app) as tc:
         with tc.websocket_connect(f"/ws/session/s1?token={token}") as ws:
-            assert ws.receive_json() == {"type": "ready"}
+            assert ws.receive_json()["type"] == "ready"
+            ws.send_json({"type": "webrtc_offer", "sdp": "v=0"})
+            assert ws.receive_json()["type"] == "webrtc_error"
+            ws.send_json({"type": "webrtc_offer"})
+            assert ws.receive_json()["type"] == "webrtc_error"
+            ws.send_json({"type": "webrtc_close"})
+            ws.send_json({"type": "ping"})
+            assert ws.receive_json() == {"type": "pong"}
