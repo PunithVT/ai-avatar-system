@@ -26,6 +26,7 @@ function setup() {
   const transport = new AvatarTransport(clips)
   const peer: RtcPeer = {
     addTransceiver: () => {},
+    setMicTrack: async () => {},
     createOffer: async () => ({ type: 'offer', sdp: 'OFFER' }),
     setLocalDescription: async () => {},
     setRemoteDescription: async () => {},

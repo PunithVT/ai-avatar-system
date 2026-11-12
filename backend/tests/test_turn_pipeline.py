@@ -9,6 +9,7 @@ replaced with a recording stand-in, so what is measured is the orchestration.
 import asyncio
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import app.websocket as wsmod
@@ -1441,3 +1442,1019 @@ async def test_a_stream_that_does_not_drain_is_taken_down_before_the_next_url_cl
     assert [c["chunk_index"] for c in url_chunks] == [0, 1, 2, 3], url_chunks
     assert [bool(c.get("resend")) for c in url_chunks] == [True, True, False, False]
     assert stream.closed
+
+
+# ── the microphone over the stream (server-side turn-taking) ─────────────
+#
+# The detector and the track are stand-ins: what is measured is what the
+# manager does with "the user started speaking" and "that was an utterance".
+# The real models, and real audio over a real peer connection, are in
+# test_turn_taking.py.
+
+
+class FakeDetector:
+    """A TurnDetector whose events are fired by the test."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.on_speech_start = self.on_speech_paused = self.on_speech_resumed = None
+        self.on_speech_progress = self.on_speech_end = None
+        self.in_utterance = False
+        self.max_secs: list[float] = []
+        self.fed = 0
+        self.resets = 0
+        self.closed = False
+        self.avatar_speaking: list[bool] = []
+        # Called with the detector on every feed, from the reader's task.
+        self.on_feed = None
+
+    async def feed(self, pcm):
+        self.fed += 1
+        if self.on_feed is not None:
+            await self.on_feed(self)
+
+    def reset(self):
+        self.resets += 1
+
+    def set_avatar_speaking(self, active):
+        self.avatar_speaking.append(active)
+
+    def set_max_utterance_secs(self, secs):
+        self.max_secs.append(secs)
+
+    async def close(self):
+        self.closed = True
+
+
+class MicTrack:
+    """A remote audio track that never runs dry, until its stream is closed."""
+
+    kind = "audio"
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.taken = 0
+
+    async def recv(self):
+        import av
+        from aiortc.mediastreams import MediaStreamError
+
+        await asyncio.sleep(0.001)
+        if self._stream.closed:
+            raise MediaStreamError
+        self.taken += 1
+        frame = av.AudioFrame.from_ndarray(
+            np.zeros((1, 1920), np.int16), format="s16", layout="stereo"
+        )
+        frame.sample_rate = 48000
+        return frame
+
+
+UTTERANCE = np.zeros(16000, np.int16)
+STARTED = {"type": "user_speech", "state": "started"}
+STOPPED_TURN = {"type": "user_speech", "state": "stopped", "reason": "turn"}
+STOPPED_IGNORED = {"type": "user_speech", "state": "stopped", "reason": "ignored"}
+LISTENING = {"type": "mic_state", "listening": True}
+NOT_LISTENING = {"type": "mic_state", "listening": False}
+
+
+@pytest.fixture
+async def mic(rig, monkeypatch):
+    """The rig with a live stream that carries a microphone track."""
+    monkeypatch.setattr(settings, "MEDIA_TRANSPORT", "webrtc")
+    monkeypatch.setattr(settings, "VOICE_TURN_DETECTION", "smart")
+    monkeypatch.setattr(settings, "STT_PARTIALS", "off")
+    monkeypatch.setattr(wsmod, "mic_enabled", lambda: True)
+    m = rig.manager
+
+    class Mic:
+        detectors: list[FakeDetector] = []
+        transcript = "what the user said"
+        stt_delay = 0.0
+        stt_calls: list = []
+        stt_running = 0
+        stt_peak = 0
+        stream = None
+        track = None
+
+        @property
+        def detector(self) -> FakeDetector:
+            return self.detectors[-1]
+
+        def attach(self, stream):
+            """`stream`'s offer carried a microphone."""
+            self.stream = stream
+            self.track = MicTrack(stream)
+            m._on_remote_audio("s1", stream, self.track)
+
+        async def on(self):
+            await m.handle_mic("s1", True)
+            return self.detector
+
+        async def turn(self):
+            task = m._active_turns.get("s1")
+            if task:
+                await asyncio.gather(task, return_exceptions=True)
+            await _settle(m)
+
+    x = Mic()
+    x.detectors, x.stt_calls = [], []
+
+    async def create(mode=None, **kwargs):
+        x.detectors.append(FakeDetector(**kwargs))
+        return x.detectors[-1]
+
+    async def transcribe(audio, language="en"):
+        n = len(x.stt_calls)
+        x.stt_calls.append((audio, language))
+        x.stt_running += 1
+        x.stt_peak = max(x.stt_peak, x.stt_running)
+        try:
+            await asyncio.sleep(x.stt_delay)
+        finally:
+            x.stt_running -= 1
+        return x.transcript(n) if callable(x.transcript) else x.transcript
+
+    monkeypatch.setattr(wsmod.TurnDetector, "create", staticmethod(create))
+    monkeypatch.setattr(wsmod.stt_service, "transcribe", transcribe)
+    x.attach(_go_live(rig))
+    yield x
+    await m.disconnect("s1")
+    await _settle(m)
+
+
+def _of(rig, kind):
+    return [x for x in rig.socket.sent if x["type"] == kind]
+
+
+async def test_the_microphone_is_heard_only_between_active_true_and_false(rig, mic):
+    m = rig.manager
+    await asyncio.sleep(0.03)
+    # The track is being read — nothing may pile up in aiortc — but no
+    # detector exists and nothing has been told to the client.
+    assert mic.track.taken > 5
+    assert mic.detectors == [] and not _of(rig, "mic_state")
+
+    detector = await mic.on()
+    assert _of(rig, "mic_state") == [LISTENING]
+    await asyncio.sleep(0.03)
+    assert detector.fed > 5
+
+    await m.handle_mic("s1", False)
+    assert _of(rig, "mic_state") == [LISTENING, NOT_LISTENING]
+    assert detector.resets == 1, "the utterance in progress is discarded"
+    fed, taken = detector.fed, mic.track.taken
+    await asyncio.sleep(0.03)
+    assert detector.fed == fed, "no audio is looked at after active:false"
+    assert mic.track.taken > taken, "though the track is still drained"
+    await _settle(m)
+    assert detector.closed
+
+    # Events from a detector that was mid-frame when it was switched off
+    # go nowhere: no message, no transcription, no turn.
+    sent = len(rig.socket.sent)
+    await detector.on_speech_start()
+    await detector.on_speech_paused(UTTERANCE)
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+    assert len(rig.socket.sent) == sent and mic.stt_calls == [] and rig.llm_calls == []
+
+    # Switched on again: a fresh detector, not the discarded one.
+    again = await mic.on()
+    assert again is not detector and _of(rig, "mic_state")[-1] == LISTENING
+
+
+async def test_an_utterance_from_the_stream_microphone_is_a_normal_turn(rig, mic):
+    m = rig.manager
+    m.session_data["s1"]["language"] = "de"
+    rig.reply = "A reply."
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+
+    assert mic.stt_calls == [(UTTERANCE, "de")], "the samples, in the session's language"
+    sent = rig.socket.sent
+    # Up to the transcript, exactly this and in this order...
+    assert sent[:5] == [
+        LISTENING,
+        STARTED,
+        STOPPED_TURN,
+        {"type": "status", "message": "Transcribing audio…", "stage": "transcription"},
+        # ...the very message a recorded audio turn sends: no `final` key.
+        {"type": "transcription", "text": "what the user said"},
+    ]
+    # ...and from there the turn every other input gets.
+    rest = [x["type"] for x in sent[5:]]
+    assert rest[0] == "status" and "token" in rest and "message" in rest
+    assert rest[-1] == "video_chunk_end" and "video_chunk" in rest
+    assert m.session_data["s1"]["messages"] == [
+        {"role": "user", "content": "what the user said"},
+        {"role": "assistant", "content": "A reply."},
+    ]
+    assert rig.persisted == [("user", "what the user said"), ("assistant", "A reply.")]
+
+
+async def test_speech_with_no_words_in_it_is_ignored_not_answered(rig, mic):
+    mic.transcript = "  "
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+    assert _of(rig, "user_speech") == [STARTED, STOPPED_TURN, STOPPED_IGNORED]
+    assert not _of(rig, "transcription") and not _of(rig, "error")
+    assert rig.llm_calls == [] and rig.manager.session_data["s1"]["messages"] == []
+
+
+async def test_the_turn_rate_limit_covers_the_stream_microphone(rig, mic, monkeypatch):
+    monkeypatch.setattr(settings, "WS_TURNS_PER_MINUTE", 1)
+    rig.reply = "Ok."
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+    assert len(rig.llm_calls) == 1 and len(mic.stt_calls) == 1
+
+    await detector.on_speech_start()
+    await detector.on_speech_progress(UTTERANCE)
+    await detector.on_speech_paused(UTTERANCE)
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+    # Refused before any of it reached Whisper — not even speculatively.
+    assert len(mic.stt_calls) == 1 and len(rig.llm_calls) == 1
+    assert [x for x in rig.socket.sent if x.get("code") == "rate_limited"]
+    assert _of(rig, "user_speech")[-2:] == [STARTED, STOPPED_IGNORED]
+    assert rig.socket.sent[-1] == STOPPED_IGNORED
+
+
+async def test_speaking_over_a_reply_interrupts_it_and_keeps_history_in_order(rig, mic):
+    """
+    Barge-in is the server's in this mode. The interrupted reply is committed
+    before the new question — the ordering interrupt_active_turn exists for.
+    """
+    m = rig.manager
+    rig.reply = "Here is a long answer that keeps going. " * 6
+    rig.token_delay = 0.01
+    rig.animate_delay = 30
+    detector = await mic.on()
+    await m.handle_text_input("s1", "first question")
+    await asyncio.sleep(0.2)  # mid-reply
+    first_turn = m._active_turns["s1"]
+    mic.stream.speaking = True  # and the avatar is talking
+
+    await detector.on_speech_start()
+    assert first_turn.cancelling() or first_turn.done()
+    kinds = [x["type"] for x in rig.socket.sent]
+    assert kinds.index("user_speech") < kinds.index("interrupted")
+    # Flushed before the client was told, as for a client's own `interrupt`.
+    assert mic.stream.flushes and mic.stream.flushes[-1] <= kinds.index("interrupted")
+    assert m.session_data["s1"]["messages"][-1]["role"] == "assistant", "committed at once"
+
+    rig.reply = "Second answer."
+    rig.token_delay = rig.animate_delay = 0
+    mic.transcript = "second question"
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+
+    history = m.session_data["s1"]["messages"]
+    assert [x["role"] for x in history] == ["user", "assistant", "user", "assistant"], history
+    assert history[1]["content"].startswith("Here is a long answer")
+    assert history[2]["content"] == "second question"
+    assert rig.llm_calls[-1][-1] == {"role": "user", "content": "second question"}
+    assert [r for r, _ in rig.persisted] == ["user", "assistant", "user", "assistant"]
+    assert len(_of(rig, "interrupted")) == 1
+
+
+async def test_speech_while_the_avatar_talks_after_its_turn_finished_still_cuts_it_off(rig, mic):
+    m = rig.manager
+    detector = await mic.on()
+    mic.stream.speaking = True  # speech queued by a turn whose task is long done
+    assert "s1" not in m._active_turns
+    await detector.on_speech_start()
+    assert mic.stream.flushes, "the stream is what holds the speech"
+    assert _of(rig, "interrupted")
+
+
+async def test_speech_with_nothing_to_interrupt_interrupts_nothing(rig, mic):
+    detector = await mic.on()
+    await detector.on_speech_start()
+    assert not _of(rig, "interrupted")
+
+
+async def test_the_detector_follows_the_avatars_speech_on_the_stream(rig, mic):
+    m = rig.manager
+    mic.stream.speaking = True
+    detector = await mic.on()
+    assert detector.avatar_speaking == [True], "it may already be mid-sentence"
+    await m._on_stream_speaking("s1", mic.stream, False)
+    await m._on_stream_speaking("s1", mic.stream, True)
+    assert detector.avatar_speaking == [True, False, True]
+    assert [x["active"] for x in _of(rig, "speaking")] == [False, True]
+
+
+async def test_the_final_transcription_starts_at_the_pause_and_is_not_repeated(rig, mic):
+    rig.reply = "Ok."
+    mic.stt_delay = 0.05
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_paused(UTTERANCE)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert len(mic.stt_calls) == 1, "under way before the turn model has answered"
+    assert not _of(rig, "transcription"), "but nothing is shown until the turn is real"
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+    assert len(mic.stt_calls) == 1, "the turn used it rather than transcribing again"
+    assert _of(rig, "transcription") == [{"type": "transcription", "text": "what the user said"}]
+    assert len(rig.llm_calls) == 1
+
+
+async def test_a_speculative_transcript_is_discarded_when_the_speaker_carries_on(rig, mic):
+    rig.reply = "Ok."
+    mic.stt_delay = 0.05
+    mic.transcript = lambda n: ["tell me about", "tell me about the weather"][n]
+    detector = await mic.on()
+    longer = np.zeros(32000, np.int16)
+    await detector.on_speech_start()
+    await detector.on_speech_paused(UTTERANCE)
+    await asyncio.sleep(0.01)
+    detector.on_speech_resumed()
+    await detector.on_speech_paused(longer)
+    await detector.on_speech_end(longer)
+    await mic.turn()
+
+    assert [len(a) for a, _ in mic.stt_calls] == [16000, 32000]
+    # The first call could not be stopped; the second waited for it.
+    assert mic.stt_peak == 1, "never two transcriptions of one session at once"
+    assert _of(rig, "transcription") == [
+        {"type": "transcription", "text": "tell me about the weather"}
+    ]
+    assert rig.llm_calls[-1][-1]["content"] == "tell me about the weather"
+    assert len(rig.llm_calls) == 1, "the half-sentence never became a turn"
+
+
+async def test_a_failed_speculative_transcript_is_retried_for_the_turn(rig, mic):
+    rig.reply = "Ok."
+
+    def transcript(n):
+        if n == 0:
+            raise RuntimeError("cuda out of memory")
+        return "second time lucky"
+
+    mic.transcript = transcript
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_paused(UTTERANCE)
+    await asyncio.sleep(0.01)
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+    assert _of(rig, "transcription") == [{"type": "transcription", "text": "second time lucky"}]
+
+
+async def test_running_transcripts_are_sent_while_speaking_and_start_nothing(rig, mic, monkeypatch):
+    monkeypatch.setattr(settings, "STT_PARTIALS", "on")
+    monkeypatch.setattr(settings, "STT_PARTIAL_INTERVAL_SECS", 1.25)
+    rig.reply = "Ok."
+    mic.transcript = lambda n: f"words so far {n}"
+    detector = await mic.on()
+    assert detector.kwargs == {"progress_interval_secs": 1.25}
+
+    await detector.on_speech_start()
+    await detector.on_speech_progress(UTTERANCE)
+    await _settle(rig.manager)
+    await detector.on_speech_progress(UTTERANCE)
+    await _settle(rig.manager)
+    assert _of(rig, "transcription") == [
+        {"type": "transcription", "text": "words so far 0", "final": False},
+        {"type": "transcription", "text": "words so far 1", "final": False},
+    ]
+    assert rig.llm_calls == [] and "s1" not in rig.manager._active_turns
+    assert rig.manager.session_data["s1"]["messages"] == [], "a partial is not a message"
+
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+    assert _of(rig, "transcription")[-1] == {"type": "transcription", "text": "words so far 2"}
+    assert len(rig.llm_calls) == 1
+
+
+async def test_a_running_transcript_never_arrives_after_the_final_one(rig, mic, monkeypatch):
+    """
+    A partial still inside Whisper when the turn ends: it cannot be stopped,
+    the final waits its turn behind it, and its text is dropped on arrival.
+    """
+    monkeypatch.setattr(settings, "STT_PARTIALS", "on")
+    rig.reply = "Ok."
+    mic.stt_delay = 0.05
+    mic.transcript = lambda n: ["a stale partial", "the final words"][n]
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_progress(UTTERANCE)
+    await asyncio.sleep(0.01)  # the partial is in flight
+    assert mic.stt_running == 1
+    await detector.on_speech_progress(UTTERANCE)  # a second does not queue behind it
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+
+    assert len(mic.stt_calls) == 2 and mic.stt_peak == 1
+    transcripts = _of(rig, "transcription")
+    assert transcripts == [{"type": "transcription", "text": "the final words"}], transcripts
+    assert len(rig.llm_calls) == 1
+
+
+async def test_running_transcripts_default_to_gpu_only(rig, mic, monkeypatch):
+    monkeypatch.setattr(settings, "STT_PARTIALS", "auto")
+    monkeypatch.setattr(type(wsmod.stt_service), "on_gpu", property(lambda self: False))
+    detector = await mic.on()
+    assert detector.kwargs == {"progress_interval_secs": 0.0}
+    await rig.manager.handle_mic("s1", False)
+    monkeypatch.setattr(type(wsmod.stt_service), "on_gpu", property(lambda self: True))
+    detector = await mic.on()
+    assert detector.kwargs == {"progress_interval_secs": settings.STT_PARTIAL_INTERVAL_SECS}
+
+
+async def test_a_partial_does_not_take_a_slot_another_sessions_final_may_need(
+    rig, mic, monkeypatch
+):
+    monkeypatch.setattr(settings, "STT_PARTIALS", "on")
+    monkeypatch.setattr(type(wsmod.stt_service), "busy", property(lambda self: True))
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_progress(UTTERANCE)
+    await _settle(rig.manager)
+    assert mic.stt_calls == []
+
+
+async def test_the_listener_goes_when_the_stream_goes_down(rig, mic):
+    m = rig.manager
+    detector = await mic.on()
+    reader_task = m._mics["s1"].reader_task
+    await m._stream_down("s1", mic.stream)
+    await _settle(m)
+    await asyncio.gather(reader_task, return_exceptions=True)
+
+    assert "s1" not in m._mics and reader_task.done()
+    assert detector.resets == 1 and detector.closed
+    # Unrequested, and before the client hears it is back on clips: its cue
+    # to take hands-free back into the browser.
+    kinds = [(x["type"], x.get("listening", x.get("transport"))) for x in rig.socket.sent]
+    assert kinds.index(("mic_state", False)) < kinds.index(("media_transport", "clips"))
+    sent = len(rig.socket.sent)
+    await detector.on_speech_start()
+    await detector.on_speech_end(UTTERANCE)
+    assert len(rig.socket.sent) == sent and mic.stt_calls == []
+
+    # Asking again without a stream is refused; the client keeps its own detector.
+    await m.handle_mic("s1", True)
+    assert rig.socket.sent[-1] == NOT_LISTENING and len(mic.detectors) == 1
+
+
+async def test_a_stream_that_was_never_listened_to_goes_down_without_a_mic_state(rig, mic):
+    await rig.manager._stream_down("s1", mic.stream)
+    await _settle(rig.manager)
+    assert not _of(rig, "mic_state") and "s1" not in rig.manager._mics
+
+
+async def test_the_listener_goes_on_disconnect_and_on_shutdown(rig, mic):
+    m = rig.manager
+    detector = await mic.on()
+    reader_task = m._mics["s1"].reader_task
+    await m.disconnect("s1")
+    await _settle(m)
+    await asyncio.gather(reader_task, return_exceptions=True)
+    assert "s1" not in m._mics and reader_task.done() and detector.closed
+
+    m.active_connections["s2"] = rig.socket
+    m.session_data["s2"] = {"messages": [], "user_id": "u1"}
+    stream = FakeStream(rig.socket)
+    m._streams["s2"] = stream
+    m._webrtc_live.add("s2")
+    m._on_remote_audio("s2", stream, MicTrack(stream))
+    await m.handle_mic("s2", True)
+    task = m._mics["s2"].reader_task
+    await m.close_all_streams()
+    await _settle(m)
+    await asyncio.gather(task, return_exceptions=True)
+    assert m._mics == {} and task.done() and mic.detector.closed
+    m.active_connections.pop("s2")
+    m.session_data.pop("s2")
+
+
+async def test_a_superseding_connection_does_not_inherit_the_microphone(rig, mic, monkeypatch):
+    m = rig.manager
+    detector = await mic.on()
+
+    async def no_load(session_id):
+        return None
+
+    monkeypatch.setattr(m, "_load_session_data", no_load)
+    newer = FakeWS()
+    await m.connect("s1", newer, user_id="u1")
+    await _settle(m)
+    assert "s1" not in m._mics and detector.closed
+    assert not [x for x in newer.sent if x["type"] == "mic_state"]
+    await detector.on_speech_start()
+    assert newer.sent == [], "the old tab's voice does not reach the new one"
+
+
+async def test_asking_before_the_stream_is_live_is_answered_when_it_is(rig, mic):
+    m = rig.manager
+    await m.disconnect("s1")  # start again without a live stream
+    m.active_connections["s1"] = rig.socket
+    m._send_locks["s1"] = asyncio.Lock()
+    m.session_data["s1"] = {"messages": [], "user_id": "u1", "language": "en"}
+    rig.socket.sent.clear()
+
+    stream = FakeStream(rig.socket)
+    m._streams["s1"] = stream  # negotiated, media path still coming up
+    mic.attach(stream)
+    await m.handle_mic("s1", True)
+    assert not _of(rig, "mic_state"), "neither refused nor claimed yet"
+    assert len(mic.detectors) == 0
+
+    await m._on_stream_state("s1", stream, "connected")
+    assert [x["type"] for x in rig.socket.sent] == ["media_transport", "mic_state"]
+    assert rig.socket.sent[-1] == LISTENING
+
+    # Or the stream never makes it: then the answer is no.
+    other = FakeStream(rig.socket)
+    await m._stream_down("s1", stream)
+    m._streams["s1"] = other
+    mic.attach(other)
+    rig.socket.sent.clear()
+    await m.handle_mic("s1", True)
+    await m._stream_down("s1", other)
+    await _settle(m)
+    assert _of(rig, "mic_state") == [NOT_LISTENING]
+
+
+async def test_a_stream_whose_offer_carried_no_microphone_cannot_be_listened_to(rig, monkeypatch):
+    monkeypatch.setattr(wsmod, "mic_enabled", lambda: True)
+    _go_live(rig)  # audio was recvonly: no remote track was ever reported
+    await rig.manager.handle_mic("s1", True)
+    assert rig.socket.sent == [NOT_LISTENING]
+    assert rig.manager._mics["s1"].wanted is False
+
+
+async def test_mic_messages_are_refused_where_the_server_does_not_take_turns(rig, monkeypatch):
+    m = rig.manager
+    monkeypatch.setattr(wsmod, "mic_enabled", lambda: False)
+    stream = _go_live(rig)
+    # Even if a track somehow arrived, nothing is built for it.
+    await m.handle_mic("s1", True)
+    await m.handle_mic("s1", False)
+    await m.handle_mic("s1", "yes")  # only a real `true` switches it on
+    assert rig.socket.sent == [NOT_LISTENING] * 3
+    assert m._mics == {} and stream.flushes == []
+
+
+async def test_a_send_that_fails_from_the_readers_own_task_still_tears_everything_down(rig, mic):
+    """
+    The detector's events run on the reader task. One of them can be what
+    discovers the socket is dead — and the teardown that follows must not be
+    cut short by cancelling the task it is running on.
+    """
+    m = rig.manager
+    stream = mic.stream
+
+    async def dead(msg):
+        if msg.get("type") == "user_speech":
+            raise RuntimeError("socket closed")
+        rig.socket.sent.append(msg)
+
+    rig.socket.send_json = dead
+    fired = asyncio.Event()
+
+    async def speak(detector):
+        if not fired.is_set():
+            fired.set()
+            await detector.on_speech_start()
+
+    detector = await mic.on()
+    reader_task = m._mics["s1"].reader_task
+    detector.on_feed = speak
+    await asyncio.wait_for(asyncio.gather(reader_task, return_exceptions=True), 2)
+    await _settle(m)
+    assert "s1" not in m.session_data and "s1" not in m._mics
+    assert stream.closed, "the peer connection was released"
+    assert rig.socket.closed_with == 1000
+
+
+async def test_every_mic_frame_gets_exactly_one_mic_state_in_order(rig, mic):
+    """
+    The client matches acknowledgements to the frames it sent by counting.
+    One that had to wait for the stream, and one overtaken while it waited,
+    are each still owed their own.
+    """
+    m = rig.manager
+    await m.disconnect("s1")
+    m.active_connections["s1"] = rig.socket
+    m._send_locks["s1"] = asyncio.Lock()
+    m.session_data["s1"] = {"messages": [], "user_id": "u1", "language": "en"}
+    rig.socket.sent.clear()
+    stream = FakeStream(rig.socket)
+    m._streams["s1"] = stream  # not live yet
+    mic.attach(stream)
+
+    await m.handle_mic("s1", True)  # waits for the stream
+    await m.handle_mic("s1", False)  # overtakes it
+    assert rig.socket.sent == [NOT_LISTENING, NOT_LISTENING]
+
+    await m.handle_mic("s1", True)
+    await m.handle_mic("s1", True)  # asked twice while waiting
+    assert len(rig.socket.sent) == 2
+    await m._on_stream_state("s1", stream, "connected")
+    assert rig.socket.sent[2:] == [
+        {"type": "media_transport", "transport": "webrtc"},
+        LISTENING,
+        LISTENING,
+    ]
+    assert len(mic.detectors) == 1
+
+    await m.handle_mic("s1", True)  # already listening: confirmed, nothing rebuilt
+    assert rig.socket.sent[-1] == LISTENING and len(mic.detectors) == 1
+    await m.handle_mic("s1", False)
+    await m.handle_mic("s1", False)
+    assert rig.socket.sent[-2:] == [NOT_LISTENING, NOT_LISTENING]
+    assert len(_of(rig, "mic_state")) == 7, "seven frames, seven answers"
+
+
+# ── defects found in review of the stream microphone ─────────────────────
+
+
+def _hold(rig, match):
+    """
+    Park the first send that matches, as a slow socket would, until released.
+    Returns (parked, release). The stock FakeWS never yields inside a send,
+    so nothing can happen "during" one; a real socket does.
+    """
+    parked, release = asyncio.Event(), asyncio.Event()
+    plain = rig.socket.send_json
+    held = []
+
+    async def send_json(msg):
+        if not held and match(msg):
+            held.append(msg)
+            parked.set()
+            await release.wait()
+        await plain(msg)
+
+    rig.socket.send_json = send_json
+    return parked, release
+
+
+FIRST = np.full(16000, 1, np.int16)
+SECOND = np.full(16000, 2, np.int16)
+
+
+def _both_or_one(mic):
+    """A transcriber that says which of FIRST and SECOND it was given."""
+
+    def transcript(n):
+        audio = mic.stt_calls[n][0]
+        words = [w for w, mark in (("first", 1), ("second", 2)) if mark in audio]
+        return " ".join(words)
+
+    return transcript
+
+
+async def test_speech_that_resumes_before_the_transcript_is_one_turn_with_all_the_words(
+    rig, mic, monkeypatch
+):
+    """
+    Smart Turn calls a finished-sounding sentence complete at once; the next
+    sentence starts before the first has been transcribed. That used to be a
+    barge-in on the first sentence's own turn: its words were dropped and
+    only the continuation was answered.
+    """
+    # One turn's worth of budget: the continuation is not charged again.
+    monkeypatch.setattr(settings, "WS_TURNS_PER_MINUTE", 1)
+    m = rig.manager
+    rig.reply = "Answer."
+    mic.stt_delay = 0.2
+    mic.transcript = _both_or_one(mic)
+    detector = await mic.on()
+
+    await detector.on_speech_start()
+    await detector.on_speech_paused(FIRST)
+    await detector.on_speech_end(FIRST)
+    await asyncio.sleep(0.05)  # inside Whisper
+    first_turn = m._active_turns["s1"]
+    await detector.on_speech_start()
+    assert first_turn.cancelling() or first_turn.done(), "its work is discarded"
+    await detector.on_speech_paused(SECOND)
+    await detector.on_speech_end(SECOND)
+    await mic.turn()
+
+    whole = mic.stt_calls[-1][0]
+    assert len(whole) == 32000 and np.array_equal(whole, np.concatenate([FIRST, SECOND]))
+    assert mic.stt_peak == 1
+    assert _of(rig, "user_speech") == [STARTED, STOPPED_TURN, STARTED, STOPPED_TURN]
+    assert _of(rig, "transcription") == [{"type": "transcription", "text": "first second"}]
+    # No reply was cut, so none is announced as cut; and nothing was refused.
+    assert not _of(rig, "interrupted") and not _of(rig, "error")
+    assert m.session_data["s1"]["messages"] == [
+        {"role": "user", "content": "first second"},
+        {"role": "assistant", "content": "Answer."},
+    ]
+    assert len(rig.llm_calls) == 1 and rig.llm_calls[0][-1]["content"] == "first second"
+    assert rig.persisted == [("user", "first second"), ("assistant", "Answer.")]
+    mic_state = m._mics["s1"]
+    assert mic_state.carry is None and mic_state.turn is None and mic_state.turn_audio is None
+
+
+async def test_a_third_sentence_joins_the_first_two(rig, mic):
+    rig.reply = "Answer."
+    mic.stt_delay = 0.2
+    mic.transcript = lambda n: f"{len(mic.stt_calls[n][0]) // 16000} sentences"
+    detector = await mic.on()
+    for _ in range(3):
+        await detector.on_speech_start()
+        await detector.on_speech_end(FIRST)
+        await asyncio.sleep(0.02)
+    await mic.turn()
+    assert _of(rig, "transcription") == [{"type": "transcription", "text": "3 sentences"}]
+    assert len(rig.llm_calls) == 1
+
+
+async def test_speech_after_the_transcript_was_sent_is_a_barge_in_and_repeats_nothing(rig, mic):
+    """The other ordering: the user has SEEN the first sentence. It is not prepended."""
+    m = rig.manager
+    rig.reply = "Here is a long answer that keeps going. " * 6
+    rig.token_delay = 0.01
+    rig.animate_delay = 30
+    mic.transcript = _both_or_one(mic)
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(FIRST)
+    await asyncio.sleep(0.15)  # transcribed, sent, and the reply under way
+    assert _of(rig, "transcription") == [{"type": "transcription", "text": "first"}]
+    assert m._mics["s1"].turn is None
+
+    await detector.on_speech_start()
+    assert len(_of(rig, "interrupted")) == 1
+    rig.reply, rig.token_delay, rig.animate_delay = "Second answer.", 0, 0
+    await detector.on_speech_end(SECOND)
+    await mic.turn()
+
+    assert mic.stt_calls[-1][0] is SECOND, "only the new utterance"
+    assert [x["text"] for x in _of(rig, "transcription")] == ["first", "second"]
+    users = [x["content"] for x in m.session_data["s1"]["messages"] if x["role"] == "user"]
+    assert users == ["first", "second"]
+
+
+async def test_audio_kept_for_a_continuation_goes_when_the_listener_stops(rig, mic):
+    m = rig.manager
+    rig.reply = "Answer."
+    mic.stt_delay = 0.2
+    mic.transcript = _both_or_one(mic)
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(FIRST)
+    await asyncio.sleep(0.02)
+    await detector.on_speech_start()
+    kept = m._mics["s1"]
+    assert kept.carry is FIRST
+
+    await m.handle_mic("s1", False)
+    assert kept.carry is None and kept.turn is None and kept.turn_audio is None
+    await asyncio.sleep(0.25)
+    assert not _of(rig, "transcription") and rig.llm_calls == []
+
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(SECOND)
+    await mic.turn()
+    assert mic.stt_calls[-1][0] is SECOND
+    assert _of(rig, "transcription") == [{"type": "transcription", "text": "second"}]
+
+
+async def test_the_length_cap_covers_a_continuation_and_what_it_continues(rig, mic):
+    rig.reply = "Answer."
+    mic.stt_delay = 0.2
+    long_first = np.full(20 * 16000, 1, np.int16)
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(long_first)
+    await asyncio.sleep(0.02)
+    await detector.on_speech_start()
+    # The detector is told how much room is left, so it cuts the utterance
+    # there (and does not let the rest of it barge in on the reply)...
+    assert detector.max_secs == [10.0]
+    # ...and even if it handed on more, no more than the cap is transcribed.
+    await detector.on_speech_progress(np.full(15 * 16000, 2, np.int16))
+    await detector.on_speech_end(np.full(15 * 16000, 2, np.int16))
+    assert detector.max_secs == [10.0, 30.0], "the next utterance has the whole cap again"
+    await mic.turn()
+    whole = mic.stt_calls[-1][0]
+    assert len(whole) == 30 * 16000
+    assert np.array_equal(whole[: 20 * 16000], long_first) and set(whole[20 * 16000 :]) == {2}
+
+
+async def test_on_cpu_a_speculative_transcript_never_queues_behind_another(rig, mic, monkeypatch):
+    """
+    A discarded guess cannot be stopped. One per session is the most that can
+    ever be in the way of the real transcript: while it is inside Whisper no
+    second guess is lined up behind it.
+    """
+    monkeypatch.setattr(type(wsmod.stt_service), "on_gpu", property(lambda self: False))
+    rig.reply = "Ok."
+    mic.stt_delay = 0.05
+    mic.transcript = lambda n: f"pass {n}"
+    detector = await mic.on()
+    longer = np.zeros(32000, np.int16)
+    await detector.on_speech_start()
+    await detector.on_speech_paused(UTTERANCE)  # nothing else running: started
+    await asyncio.sleep(0.01)
+    assert len(mic.stt_calls) == 1
+    detector.on_speech_resumed()
+    await detector.on_speech_paused(longer)  # the stale pass is still in Whisper
+    assert rig.manager._mics["s1"].speculative is None
+    await asyncio.sleep(0.1)
+    assert len(mic.stt_calls) == 1, "nothing was waiting to start behind it"
+
+    await detector.on_speech_end(longer)
+    await mic.turn()
+    assert [len(a) for a, _ in mic.stt_calls] == [16000, 32000]
+    assert _of(rig, "transcription") == [{"type": "transcription", "text": "pass 1"}]
+
+
+async def test_on_cpu_no_speculative_transcript_starts_beside_someone_elses(rig, mic, monkeypatch):
+    stt = type(wsmod.stt_service)
+    monkeypatch.setattr(stt, "on_gpu", property(lambda self: False))
+    monkeypatch.setattr(stt, "idle", property(lambda self: False))  # another session's
+    rig.reply = "Ok."
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_paused(UTTERANCE)
+    await _settle(rig.manager)
+    assert mic.stt_calls == []
+    # The turn is not affected: it transcribes for itself, once.
+    await detector.on_speech_end(UTTERANCE)
+    await mic.turn()
+    assert len(mic.stt_calls) == 1 and len(rig.llm_calls) == 1
+
+    # On a GPU the pass is cheap enough to guess with, whatever else runs.
+    monkeypatch.setattr(stt, "on_gpu", property(lambda self: True))
+    await detector.on_speech_start()
+    await detector.on_speech_paused(UTTERANCE)
+    await _settle(rig.manager)
+    assert len(mic.stt_calls) == 2
+
+
+async def test_starting_a_turn_cuts_whatever_is_in_the_slot_first(rig):
+    """
+    _spawn_turn on its own, with no interrupt before it: the previous turn
+    is cancelled and its reply committed before the new question is added.
+    """
+    m = rig.manager
+    rig.reply = "Here is a long answer that keeps going. " * 6
+    rig.token_delay = 0.01
+    rig.animate_delay = 30
+    first = m._spawn_turn("s1", m._handle_text_input_inner("s1", "one"))
+    await asyncio.sleep(0.2)
+    rig.reply, rig.token_delay, rig.animate_delay = "Two.", 0, 0
+    second = m._spawn_turn("s1", m._handle_text_input_inner("s1", "two"))
+    assert first.cancelling() and m._active_turns["s1"] is second
+    await asyncio.gather(first, second, return_exceptions=True)
+    await _settle(m)
+    history = m.session_data["s1"]["messages"]
+    assert [x["role"] for x in history] == ["user", "assistant", "user", "assistant"], history
+    assert history[1]["content"].startswith("Here is a long answer")
+    assert rig.socket.types().count("interrupted") == 1
+
+
+async def test_two_tasks_starting_turns_cannot_orphan_one(rig, mic):
+    """
+    The receive loop and the microphone both run interrupt-then-spawn, and
+    the interrupt awaits a send. A typed message handled during the
+    microphone's send found nothing to interrupt and started its turn; the
+    microphone then stored its own over it, and the typed turn ran on with
+    nothing able to stop it.
+    """
+    m = rig.manager
+    rig.reply = "Here is a long answer that keeps going. " * 6
+    rig.token_delay = 0.01
+    rig.animate_delay = 30
+    spawned: list[asyncio.Task] = []
+    plain_spawn = m._spawn_turn
+
+    def spawn(session_id, coro):
+        spawned.append(plain_spawn(session_id, coro))
+        return spawned[-1]
+
+    m._spawn_turn = spawn
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await m.handle_text_input("s1", "typed one")  # typed while the user is talking
+    await asyncio.sleep(0.1)
+
+    parked, release = _hold(rig, lambda msg: msg["type"] == "interrupted")
+    ending = asyncio.create_task(detector.on_speech_end(UTTERANCE))
+    await parked.wait()  # the microphone has cut "typed one" and is telling the client
+    await m.handle_text_input("s1", "typed two")  # nothing left to interrupt: spawns
+    typed_two = m._active_turns["s1"]
+    release.set()
+    await ending
+    await asyncio.sleep(0.05)
+
+    assert len(spawned) == 3
+    alive = [t for t in spawned if not t.done()]
+    assert alive == [m._active_turns["s1"]], "one turn, and it is the one that can be stopped"
+    assert typed_two.cancelled()
+    assert await m.interrupt_active_turn("s1") is True
+    await asyncio.gather(*spawned, return_exceptions=True)
+    assert all(t.done() for t in spawned)
+    assert len(rig.llm_calls) <= 2, "typed two never got as far as the model"
+
+
+async def test_mic_off_during_the_stopped_send_starts_no_turn(rig, mic):
+    """`active:false` handled between the utterance closing and its turn being spawned."""
+    m = rig.manager
+    mic.stt_delay = 0.05
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_paused(UTTERANCE)
+    parked, release = _hold(rig, lambda msg: msg == STOPPED_TURN)
+    ending = asyncio.create_task(detector.on_speech_end(UTTERANCE))
+    await parked.wait()
+    switching_off = asyncio.create_task(m.handle_mic("s1", False))
+    await asyncio.sleep(0)  # the listener is stopped; its answer waits for the socket
+    release.set()
+    await asyncio.gather(ending, switching_off)
+    await asyncio.sleep(0.1)
+    await _settle(m)
+
+    assert "s1" not in m._active_turns
+    assert not _of(rig, "transcription") and not _of(rig, "status") and rig.llm_calls == []
+    # "stopped, turn" had gone out; it is taken back.
+    assert _of(rig, "user_speech") == [STARTED, STOPPED_TURN, STOPPED_IGNORED]
+    assert _of(rig, "mic_state") == [LISTENING, NOT_LISTENING]
+
+
+async def test_mic_off_withdraws_an_utterance_that_has_not_been_shown(rig, mic):
+    """
+    The utterance closed, its turn is waiting on Whisper, and the user
+    switches hands-free off. A sentence transcribed and answered after
+    `mic_state listening:false` is the microphone still at work.
+    """
+    m = rig.manager
+    mic.stt_delay = 0.2
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(UTTERANCE)
+    await asyncio.sleep(0.05)
+    turn = m._active_turns["s1"]
+    await m.handle_mic("s1", False)
+    assert "s1" not in m._active_turns and turn.cancelling()
+    await asyncio.sleep(0.3)  # Whisper finishes; nobody is waiting
+    await _settle(m)
+
+    assert turn.cancelled()
+    assert not _of(rig, "transcription") and rig.llm_calls == []
+    assert m.session_data["s1"]["messages"] == [] and rig.persisted == []
+    # Not announced as an interruption — no reply was cut — but the client
+    # is told the utterance it was waiting on is not coming.
+    assert not _of(rig, "interrupted")
+    assert _of(rig, "user_speech") == [STARTED, STOPPED_TURN, STOPPED_IGNORED]
+    assert rig.socket.sent[-2:] == [NOT_LISTENING, STOPPED_IGNORED]
+
+
+async def test_mic_off_leaves_a_turn_whose_words_were_shown(rig, mic):
+    m = rig.manager
+    rig.reply = "A reply that takes a moment."
+    rig.token_delay = 0.02
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(UTTERANCE)
+    await asyncio.sleep(0.05)
+    assert _of(rig, "transcription"), "the user has seen their words"
+    turn = m._active_turns["s1"]
+    await m.handle_mic("s1", False)
+    assert m._active_turns.get("s1") is turn and not turn.cancelling()
+    await mic.turn()
+    assert m.session_data["s1"]["messages"] == [
+        {"role": "user", "content": "what the user said"},
+        {"role": "assistant", "content": "A reply that takes a moment."},
+    ]
+    assert STOPPED_IGNORED not in rig.socket.sent
+
+
+async def test_a_reconnect_does_not_tell_the_new_tab_about_the_old_ones_utterance(
+    rig, mic, monkeypatch
+):
+    m = rig.manager
+    mic.stt_delay = 0.2
+    detector = await mic.on()
+    await detector.on_speech_start()
+    await detector.on_speech_end(UTTERANCE)
+    await asyncio.sleep(0.02)
+
+    async def no_load(session_id):
+        return None
+
+    monkeypatch.setattr(m, "_load_session_data", no_load)
+    newer = FakeWS()
+    await m.connect("s1", newer, user_id="u1")
+    await asyncio.sleep(0.3)
+    await _settle(m)
+    assert newer.sent == [] and rig.llm_calls == []

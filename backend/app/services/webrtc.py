@@ -177,9 +177,23 @@ def ice_servers() -> list[dict]:
     return out
 
 
+def mic_enabled() -> bool:
+    """
+    True when this server takes the user's microphone over the peer
+    connection and decides the turns itself (see services/turn_taking.py).
+    """
+    if not webrtc_enabled():
+        return False
+    # Imported here, and only once the transport is on: this is what loads
+    # Pipecat, which a server on the default transport never needs.
+    from app.services.turn_taking import voice_turns_enabled
+
+    return voice_turns_enabled()
+
+
 def media_descriptor() -> dict:
     """The `media` field of the `ready` frame."""
-    return {"webrtc": webrtc_enabled(), "ice_servers": ice_servers()}
+    return {"webrtc": webrtc_enabled(), "ice_servers": ice_servers(), "mic": mic_enabled()}
 
 
 # ── decoding ────────────────────────────────────────────────────────────────
@@ -460,6 +474,16 @@ class AvatarStream:
                                 is no longer being sent
       on_speaking(active)     — queued speech started (True) / ran out (False)
       on_clip_released(token) — see above
+      on_remote_audio(track)  — the browser's microphone track, when
+                                `accept_mic` is set and the offer's audio is
+                                sendrecv. Fired during handle_offer. The
+                                owner must read it for as long as the stream
+                                lives: aiortc queues what arrives without
+                                bound.
+
+    The stream only ever SENDS unless `accept_mic` is set before the offer is
+    handled. Media the browser offers to send is otherwise refused in the
+    answer (a=sendonly), which also stops aiortc from decoding it.
     """
 
     def __init__(
@@ -477,6 +501,10 @@ class AvatarStream:
         self.on_state: Optional[Callable[[str], Any]] = None
         self.on_speaking: Optional[Callable[[bool], Any]] = None
         self.on_clip_released: Optional[Callable[[Any], Any]] = None
+        self.on_remote_audio: Optional[Callable[[Any], Any]] = None
+        # Whether an offered microphone is taken. Off unless the owner asks.
+        self.accept_mic = False
+        self._remote_audio: Any = None
 
         self._idle = idle_frame
         self._silence = np.zeros(AUDIO_FRAME_SAMPLES, np.int16)
@@ -639,6 +667,9 @@ class AvatarStream:
         servers = [RTCIceServer(**server) for server in ice_servers()]
         pc = self._pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
         pc.on("connectionstatechange", self._on_connection_state)
+        # Before the offer is applied: that is when aiortc announces the
+        # tracks the browser means to send.
+        pc.on("track", self._on_remote_track)
 
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         offered = {t.kind for t in pc.getTransceivers()}
@@ -646,10 +677,32 @@ class AvatarStream:
             # addTrack would otherwise invent a transceiver the offer never
             # asked for, and the answer would not match the offer.
             raise ValueError("offer must ask for both audio and video")
+        # addTrack reuses the transceiver the offer created for that kind, so
+        # the avatar's voice and the user's microphone share ONE audio m-line.
         pc.addTrack(self.audio)
         pc.addTrack(self.video)
+        for transceiver in pc.getTransceivers():
+            # Receive on the microphone's transceiver and nowhere else. A
+            # sendrecv offer answered in kind would have aiortc decode
+            # whatever the browser sent — video included — into a queue
+            # nobody reads. (A recvonly offer is answered sendonly whatever
+            # is set here; this changes nothing for it.)
+            takes_mic = (
+                self._remote_audio is not None and transceiver.receiver.track is self._remote_audio
+            )
+            if not takes_mic and transceiver.direction == "sendrecv":
+                transceiver.direction = "sendonly"
         await pc.setLocalDescription(await pc.createAnswer())
         return pc.localDescription.sdp
+
+    def _on_remote_track(self, track) -> None:
+        # Only the first audio track, and only when the owner asked for one.
+        if track.kind != "audio" or not self.accept_mic or self._remote_audio is not None:
+            return
+        if self._retired:
+            return
+        self._remote_audio = track
+        self._fire(self.on_remote_audio, track)
 
     def _on_connection_state(self) -> None:
         if self._retired or self._pc is None:
@@ -899,6 +952,7 @@ class AvatarStream:
             return []
         self._retired = True
         self.on_state = self.on_speaking = self.on_clip_released = None
+        self.on_remote_audio = None
         self._generation += 1
         self._speaking = False
         return [token for token in self._empty_queues() if token is not None]

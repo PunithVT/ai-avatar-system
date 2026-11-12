@@ -5,14 +5,23 @@ import { RtcSession, transportOf, type RtcPeer, type RtcPeerEvents } from '@/lib
 import type { IceServer, MediaCapabilities, RtcSignal } from '@/lib/types'
 
 /** RTCPeerConnection behind the narrow interface RtcSession drives. */
-function browserPeer(iceServers: IceServer[], events: RtcPeerEvents<MediaStreamTrack>): RtcPeer {
+function browserPeer(
+  iceServers: IceServer[],
+  events: RtcPeerEvents<MediaStreamTrack>,
+): RtcPeer<MediaStreamTrack> {
   const pc = new RTCPeerConnection({ iceServers })
+  let audioSender: RTCRtpSender | null = null
   pc.ontrack = (event) => events.onTrack(event.track)
   pc.onconnectionstatechange = () => events.onConnectionState(pc.connectionState)
   pc.onicegatheringstatechange = () => events.onIceGatheringState(pc.iceGatheringState)
   return {
     addTransceiver: (kind, init) => {
-      pc.addTransceiver(kind, init)
+      const transceiver = pc.addTransceiver(kind, init)
+      if (kind === 'audio') audioSender = transceiver.sender
+    },
+    setMicTrack: async (track) => {
+      if (!audioSender) throw new Error('no audio sender')
+      await audioSender.replaceTrack(track)
     },
     createOffer: async () => ({ type: 'offer', sdp: (await pc.createOffer()).sdp }),
     setLocalDescription: (description) => pc.setLocalDescription(description),
@@ -46,6 +55,11 @@ export interface RtcPlayer {
   serverError(): void
   mediaTransport(transport: 'webrtc' | 'clips'): void
   socketClosed(): void
+  /**
+   * Put the microphone on the stream's audio sender, or take it off (null).
+   * Resolves false if there is no live stream that was offered one.
+   */
+  setMicTrack(track: MediaStreamTrack | null): Promise<boolean>
   /** Keep the stream silent (user mute, a stop in progress, a clip over it). */
   setSilenced(silenced: boolean): void
   /** The user asked for sound, from a gesture. */
@@ -226,6 +240,7 @@ export function useRtcPlayer(streamRef: RefObject<HTMLVideoElement | null>, opti
       serverError: () => sessionRef.current?.serverError(),
       mediaTransport: (transport) => sessionRef.current?.mediaTransport(transport),
       socketClosed: () => sessionRef.current?.socketClosed(),
+      setMicTrack: (track) => sessionRef.current?.setMicTrack(track) ?? Promise.resolve(false),
       setSilenced: element.setSilenced,
       enableAudio: element.enableAudio,
     }),

@@ -140,10 +140,16 @@ export class ReplyGate {
    * Feed every server frame, in order. Returns false for reply content
    * (`token`, `message`) that belongs to a turn the user already ended.
    */
-  admit(frame: { type: string; stage?: string }): boolean {
+  admit(frame: { type: string; stage?: string; final?: boolean }): boolean {
     switch (frame.type) {
-      case 'interrupted':
       case 'transcription':
+        // A running transcript (`final: false`) is the user still talking.
+        // It says nothing about the old reply having been cancelled, so it
+        // must not let that reply's in-flight tokens back in.
+        if (frame.final === false) return true
+        this.open = true
+        return true
+      case 'interrupted':
       case 'video_chunk_start':
         this.open = true
         return true

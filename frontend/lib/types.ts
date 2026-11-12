@@ -35,7 +35,11 @@ export interface SessionSummary {
 // can rely on field presence without optional-chaining everywhere.
 export type WsMessage =
   | { type: 'token'; token: string }
-  | { type: 'transcription'; text: string }
+  // What the user said. Without `final` (or with `final: true`) it is the
+  // finished transcript and creates the user's message. `final: false` is a
+  // running transcript of an utterance still being spoken on the stream
+  // microphone: provisional, and each one replaces the one before.
+  | { type: 'transcription'; text: string; final?: boolean }
   | { type: 'message'; role: 'assistant'; content: string }
   | { type: 'video_chunk_start'; total_chunks: number }
   // One sentence of the reply. Delivered either as a clip to fetch
@@ -76,6 +80,14 @@ export type WsMessage =
   | { type: 'media_transport'; transport: 'webrtc' | 'clips' }
   // The stream went from idle to carrying speech, or back.
   | { type: 'speaking'; active: boolean }
+  // ── Stream microphone (only ever sent when `ready.media.mic` was true) ──
+  // Whether the server is listening to the microphone on the stream. The
+  // acknowledgement of a `mic` frame — and, with `listening: false`, also
+  // sent unasked when the server stops on its own.
+  | { type: 'mic_state'; listening: boolean }
+  // Turn-taking, as the server hears it. `reason` comes with 'stopped':
+  // 'turn' = being transcribed and answered, 'ignored' = nothing will follow.
+  | { type: 'user_speech'; state: 'started' | 'stopped'; reason?: 'turn' | 'ignored' }
 
 export interface IceServer {
   urls: string | string[]
@@ -86,6 +98,12 @@ export interface IceServer {
 export interface MediaCapabilities {
   webrtc: boolean
   ice_servers?: IceServer[]
+  /**
+   * The server can take the microphone up the stream and decide the turns
+   * itself. Absent and false mean the same thing: the browser detects speech
+   * and uploads each utterance, as it always has.
+   */
+  mic?: boolean
 }
 
 /** Signalling frames the client sends. Full SDP both ways; no trickle ICE. */
@@ -96,6 +114,15 @@ export type RtcSignal =
   // whatever it had put there that has not played. Sent promptly: the server
   // takes about 30 s to notice a dead media path by itself.
   | { type: 'webrtc_close' }
+
+/**
+ * Tells the server whether to listen to the stream microphone. `active: true`
+ * only ever follows a live track having been put on the peer connection.
+ */
+export interface MicSignal {
+  type: 'mic'
+  active: boolean
+}
 
 export interface VoiceApiResponse {
   id: string

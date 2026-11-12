@@ -33,6 +33,9 @@ async def test_health_endpoint(client: AsyncClient):
     # without aiortc is otherwise invisible.
     assert data["media_transport"] in ("clips", "webrtc")
     assert isinstance(data["webrtc_available"], bool)
+    # And who takes the turns in hands-free on that transport.
+    assert data["voice_turn_detection"] in ("smart", "vad", "off")
+    assert isinstance(data["voice_turn_detection_available"], bool)
 
 
 @pytest.mark.asyncio
