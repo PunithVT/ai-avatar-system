@@ -11,11 +11,11 @@ python-multipart==0.0.31
 # which pinned pyasn1<0.5.0 and pulled in ecdsa — 10 advisories between them
 # with no fix reachable behind that pin. PyJWT uses `cryptography` instead and
 # drops both transitive dependencies.
-PyJWT[crypto]==2.14.0
+PyJWT[crypto]==2.15.0
 # Transitive (via rsa/google-auth), pinned explicitly because it was stuck
 # at 0.4.8 with 8 advisories by python-jose's pyasn1<0.5.0 cap. With jose
 # gone nothing constrains it, so pin the fixed line.
-pyasn1==0.6.4
+pyasn1==0.6.5
 # bcrypt used directly for password hashing — passlib 1.7.4 (2020) is
 # incompatible with bcrypt 5.x and is unmaintained, so we dropped it.
 bcrypt>=4.1.0
@@ -46,10 +46,13 @@ websockets==12.0
 python-socketio==5.16.2
 
 # AI/ML
-# anthropic >=0.45 supports Claude 4.x models (Opus 4.7, Sonnet 4.6, Haiku 4.5)
-# and the cache_control parameter used in app/services/llm.py
-anthropic>=0.45.0
-openai>=1.50.0
+# Pinned to the releases this code is tested against. Both were open-ended
+# (`>=`), so a fresh install silently jumped major versions: anthropic went
+# from 0.x to 2.x, which removed the `temperature` argument llm.py passed on
+# every call — every Claude request then failed before it was sent, on any
+# machine installed after that release. Bump deliberately, with the tests.
+anthropic==2.8.0
+openai==3.49.0
 torch==2.2.0
 torchvision==0.17.0
 torchaudio==2.2.0
@@ -64,8 +67,18 @@ opencv-python==4.9.0.80
 # touches Image.ANTIALIAS, the notable 10.0 removal). moviepy pins
 # pillow<12 but is not a dependency of this service — it backs MuseTalk's
 # standalone Gradio app.py, which we never invoke.
-Pillow==12.3.0
+#
+# 13.0.0 clears a further 40 advisories filed against 12.3.0 and requires
+# Python >=3.11 — one of the two reasons the project moved off Python 3.10
+# (the other is filelock, below; 3.10 itself is past end-of-life).
+Pillow==13.0.0
 librosa==0.10.1
+# librosa 0.10 imports pkg_resources, which setuptools removed in 81 and which
+# a fresh virtualenv (uv, or pip on Python 3.12+) does not include at all.
+# Without it every lip-sync job — and the speech-to-text decode fallback —
+# failed on import. Pinned so the environment does not depend on what the
+# venv tool happened to preinstall.
+setuptools>=68,<81
 soundfile==0.12.1
 scipy==1.12.0
 
@@ -91,6 +104,11 @@ gtts==2.5.1
 pydub==0.25.1
 
 # Avatar Animation
+# einops is imported by MuseTalk itself (musetalk/utils/audio_processor.py).
+# It was installed only by scripts/setup_musetalk.sh, into a host virtualenv —
+# so the Docker image, built from this file alone, never had it, and the
+# lip-sync worker died on import in every container.
+einops==0.8.1
 face-alignment==1.4.1
 imageio==2.33.1
 imageio-ffmpeg==0.4.9
@@ -109,6 +127,14 @@ prometheus-client==0.19.0
 prometheus-fastapi-instrumentator==8.1.0
 sentry-sdk==2.8.0
 
+# Transitive, pinned only as floors so a fresh install cannot resolve to a
+# release with open advisories: filelock (via torch / huggingface-hub, 17),
+# tornado (via flower, 3), dnspython (via email-validator, 1). filelock's
+# fixed line needs Python >=3.11.
+filelock>=4.2.1
+tornado>=6.6
+dnspython>=2.9.0
+
 # Utilities
 httpx==0.26.0
 aiofiles==23.2.1
@@ -117,8 +143,8 @@ pyyaml==6.0.1
 requests==2.33.0
 
 # Testing
-pytest==7.4.4
-pytest-asyncio==0.23.3
-pytest-cov==4.1.0
+pytest==9.0.3
+pytest-asyncio==1.4.1.post1
+pytest-cov==7.1.0
 aiosqlite==0.19.0  # in-memory async DB for the test suite
 httpx==0.26.0  # AsyncClient for endpoint tests (also a runtime dep above)

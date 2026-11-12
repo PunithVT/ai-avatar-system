@@ -1,6 +1,6 @@
 # Ruff configuration — matches the CI lint job (.github/workflows/ci.yml).
 # Target the same interpreter CI runs so version-specific lints agree.
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 
 # Exclude generated / vendored trees that we don't own.
