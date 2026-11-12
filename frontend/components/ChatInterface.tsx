@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { Activity, Download, MessageCircle, Zap } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
@@ -8,9 +8,10 @@ import { api } from '@/lib/api'
 import { useStore } from '@/store/useStore'
 import { useChatSocket } from '@/hooks/useChatSocket'
 import { useChatSession } from '@/hooks/useChatSession'
-import { useChunkPlayer } from '@/hooks/useChunkPlayer'
+import { useAvatarPlayer } from '@/hooks/useAvatarPlayer'
 import { usePushToTalk } from '@/hooks/usePushToTalk'
 import { useHandsFree } from '@/hooks/useHandsFree'
+import { isNewSentence } from '@/lib/chat/avatarTransport'
 import { ReplyGate, initialTurnState, turnReducer } from '@/lib/chat/turnState'
 import {
   EMOTION_CONFIG, detectEmotion, fromServer, liveMessage, reconcilePersisted, type Message,
@@ -19,7 +20,7 @@ import { AvatarStage } from '@/components/chat/AvatarStage'
 import { MessageList } from '@/components/chat/MessageList'
 import { Composer } from '@/components/chat/Composer'
 import { ShortcutsDialog } from '@/components/chat/ShortcutsDialog'
-import type { Avatar, WsMessage } from '@/lib/types'
+import type { Avatar, RtcSignal, WsMessage } from '@/lib/types'
 
 interface ChatInterfaceProps {
   avatarId: string
@@ -48,7 +49,7 @@ function isTextField(target: EventTarget | null): boolean {
  *
  *   useChatSession  — create / resume / end the session
  *   useChatSocket   — the WebSocket and its reconnects
- *   useChunkPlayer  — everything the avatar plays
+ *   useAvatarPlayer — everything the avatar plays, clips or live stream
  *   usePushToTalk / useHandsFree — the microphone
  *   turnReducer     — spinner, typing dots, streaming text, latency
  */
@@ -65,7 +66,12 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const preloadRef = useRef<HTMLVideoElement>(null)
-  const player = useChunkPlayer(videoRef, preloadRef)
+  const streamRef = useRef<HTMLVideoElement>(null)
+  // WebRTC signalling rides the chat socket, which is created further down
+  // (it needs the message handler, which needs the player).
+  const sendSignalRef = useRef<(signal: RtcSignal) => boolean>(() => false)
+  const sendSignal = useCallback((signal: RtcSignal) => sendSignalRef.current(signal), [])
+  const player = useAvatarPlayer(videoRef, preloadRef, streamRef, sendSignal)
 
   // Mic level, written by the capture hooks and painted by the meter without
   // passing through React state.
@@ -159,6 +165,10 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
 
   // ── Server events ────────────────────────────────────────────────────────
   const handleMessage = (data: WsMessage) => {
+    // Transport negotiation and the stream's `speaking` state. Before the
+    // gate: none of it is reply text, and all of it must be seen.
+    player.handleFrame(data)
+
     // Text from a reply the user has already stopped or talked over.
     if (!replyGate.admit(data)) return
 
@@ -186,10 +196,13 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
 
       case 'video_chunk': {
         if (!acceptChunksRef.current) break
-        const startedPlayback = player.enqueue(data.video_url)
+        const startedPlayback = player.enqueue(data)
         if (startedPlayback) {
-          const first = !firstChunkSeenRef.current
-          firstChunkSeenRef.current = true
+          // A re-sent chunk (the stream died before playing it) releases the
+          // spinner like any other, but it is not the reply's first sentence
+          // for the latency badge: that one was announced on the stream.
+          const first = !firstChunkSeenRef.current && isNewSentence(data)
+          if (isNewSentence(data)) firstChunkSeenRef.current = true
           dispatch({
             type: 'first-chunk',
             latencyMs: first && sendTimeRef.current ? Date.now() - sendTimeRef.current : turn.latencyMs,
@@ -223,7 +236,10 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
         break
 
       case 'interrupted':
-        // The server cancelled a turn. If we have already sent the next one,
+        // The server cancelled a turn — or, on the live stream, cut off
+        // speech still playing after its turn had finished, so there may be
+        // no turn in flight here at all; both branches are safe to run then.
+        // If we have already sent the next one,
         // this is about the previous turn: stop its playback and keep its
         // partial text, but leave the new turn's spinner alone.
         if (awaitingReplyRef.current) {
@@ -237,6 +253,11 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
       case 'pong':
       case 'ping':
       case 'ready':
+      // Handled by the player, above.
+      case 'webrtc_answer':
+      case 'webrtc_error':
+      case 'media_transport':
+      case 'speaking':
         break
     }
   }
@@ -250,14 +271,20 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
     },
     // The server cancels the turn when the socket drops and nothing is
     // resent, so a spinner left up here would never clear. Clips already
-    // delivered keep playing — they are plain URLs and still valid.
+    // delivered keep playing — they are plain URLs and still valid. A live
+    // stream does not survive: its peer connection belongs to this socket.
     onDrop: () => {
+      player.handleSocketClosed()
       awaitingReplyRef.current = false
       replyGate.reset()
       commitPartialReply()
       dispatch({ type: 'reset' })
     },
   })
+  const { send: socketSend } = socket
+  useLayoutEffect(() => {
+    sendSignalRef.current = socketSend
+  }, [socketSend])
 
   // ── Session ──────────────────────────────────────────────────────────────
   const sessionId = useChatSession({
@@ -281,6 +308,8 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
     },
     onTeardown: () => {
       sessionIdRef.current = null
+      // disconnect() closes silently (no onDrop), so say it here.
+      player.handleSocketClosed()
       socket.disconnect()
     },
   })
@@ -490,7 +519,11 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
           videoRef={videoRef}
           preloadRef={preloadRef}
           avatarImageUrl={avatarImageUrl}
-          showVideo={player.isPlaying}
+          streamRef={streamRef}
+          showVideo={player.clipOnScreen}
+          streamLive={player.streamOnScreen}
+          isSpeaking={player.isPlaying}
+          transport={player.transport}
           isProcessing={turn.isProcessing}
           statusMsg={turn.statusMsg}
           connectionStatus={connectionStatus}

@@ -11,7 +11,7 @@ export const CHAT_LANGUAGES = [
   { code: 'ko', label: 'KO' },
 ]
 
-/** The still shown whenever no clip is playing. */
+/** The still shown whenever neither a clip nor the live stream is on screen. */
 function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
   if (!imageUrl) {
     return (
@@ -40,9 +40,20 @@ function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
 interface Props {
   videoRef: RefObject<HTMLVideoElement | null>
   preloadRef: RefObject<HTMLVideoElement | null>
+  /** The element the WebRTC stream plays in. Unused on the clip transport. */
+  streamRef: RefObject<HTMLVideoElement | null>
   avatarImageUrl: string | null
   /** A clip is on screen. */
   showVideo: boolean
+  /**
+   * The live stream is on screen. It stays there between sentences — the
+   * server sends the avatar's idle face — so it replaces the idle still.
+   */
+  streamLive: boolean
+  /** The avatar is talking, on either transport. */
+  isSpeaking: boolean
+  /** How sentences are arriving; shown next to the connection status. */
+  transport: 'clips' | 'webrtc'
   isProcessing: boolean
   statusMsg: string
   connectionStatus: SocketStatus
@@ -69,29 +80,48 @@ const STATUS_DOT: Record<SocketStatus, string> = {
 
 /** The video panel: avatar, processing overlay and the controls under it. */
 export function AvatarStage({
-  videoRef, preloadRef, avatarImageUrl, showVideo, isProcessing, statusMsg,
-  connectionStatus, stalled, onReconnect, onStartNew, audioBlocked, onEnableAudio,
-  language, onLanguageChange, muted, onToggleMute, onShowShortcuts,
+  videoRef, preloadRef, streamRef, avatarImageUrl, showVideo, streamLive, isSpeaking, transport,
+  isProcessing, statusMsg, connectionStatus, stalled, onReconnect, onStartNew, audioBlocked,
+  onEnableAudio, language, onLanguageChange, muted, onToggleMute, onShowShortcuts,
 }: Props) {
-  const isSpeaking = showVideo && !isProcessing
+  // On the stream the picture is already live while the next sentence is
+  // being prepared, so "processing" must neither cover it nor switch the
+  // speaking ring off mid-reply the way it does between clips.
+  const showRing = isSpeaking && (streamLive || !isProcessing)
+  const pictureOnScreen = showVideo || streamLive
 
   return (
     <div className="card flex flex-col rounded-2xl p-4">
-      <div className={`relative aspect-video w-full overflow-hidden rounded-xl bg-gray-25 ${isSpeaking ? 'speaking-ring' : ''}`}>
-        {/* Idle still: always mounted, faded out while a clip plays. */}
+      <div className={`relative aspect-video w-full overflow-hidden rounded-xl bg-gray-25 ${showRing ? 'speaking-ring' : ''}`}>
+        {/* Idle still: always mounted, faded out while a clip or the stream shows. */}
         <div
           className="absolute inset-0 transition-opacity duration-500"
-          style={{ opacity: showVideo ? 0 : 1, zIndex: showVideo ? 0 : 5 }}
+          style={{ opacity: pictureOnScreen ? 0 : 1, zIndex: pictureOnScreen ? 0 : 5 }}
         >
           <IdleAvatar imageUrl={avatarImageUrl} />
         </div>
+
+        {/* The WebRTC stream, when that transport is live. A separate element
+            from the clip <video> so that a sentence the server still sends as
+            a clip can play above it without tearing the stream down. Source,
+            mute and playback belong to useRtcPlayer. Muted in the markup so
+            the very first frame can never be audible ahead of that hook. */}
+        <video
+          ref={streamRef}
+          className="absolute inset-0 h-full w-full object-cover transition-opacity duration-500"
+          style={{ opacity: streamLive ? 1 : 0, zIndex: streamLive ? 5 : 0 }}
+          playsInline
+          muted
+          aria-label="Avatar live video"
+          aria-hidden={!streamLive}
+        />
 
         {/* Source, mute and playback are driven by useChunkPlayer — nothing
             here sets them, so the two cannot disagree. */}
         <video
           ref={videoRef}
           className="absolute inset-0 h-full w-full object-cover transition-opacity duration-500"
-          style={{ opacity: showVideo ? 1 : 0, zIndex: showVideo ? 5 : 0 }}
+          style={{ opacity: showVideo ? 1 : 0, zIndex: showVideo ? 6 : 0 }}
           playsInline
           aria-label="Avatar video"
         />
@@ -100,7 +130,7 @@ export function AvatarStage({
 
         {/* Some browsers (Safari, iOS) pause a clip that is un-muted without a
             tap. The player falls back to playing it muted; this is the tap. */}
-        {audioBlocked && showVideo && !isProcessing && (
+        {audioBlocked && (showVideo || isSpeaking) && (streamLive || !isProcessing) && (
           <button
             type="button"
             onClick={onEnableAudio}
@@ -111,7 +141,16 @@ export function AvatarStage({
           </button>
         )}
 
-        {isProcessing && (
+        {isProcessing && streamLive && (
+          // The stream is already showing the avatar: say what is happening
+          // without covering it.
+          <div className="absolute left-3 top-3 z-20 flex items-center gap-2 rounded-full border border-white/15 bg-ink/70 px-2.5 py-1 backdrop-blur-sm">
+            <span className="h-3 w-3 animate-spin rounded-full border-2 border-transparent border-t-gray-25" aria-hidden="true" />
+            <span className="text-xs text-gray-25">{statusMsg}</span>
+          </div>
+        )}
+
+        {isProcessing && !streamLive && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-gray-25/85 backdrop-blur-sm">
             <div className="relative">
               <div className="h-16 w-16 animate-spin-slow rounded-full border-2 border-primary-600/20" />
@@ -134,6 +173,16 @@ export function AvatarStage({
                   ? 'This conversation is no longer available'
                   : connectionStatus}
             </span>
+            {/* Diagnostic: which transport is carrying the avatar. Nothing is
+                shown for clips, the default. */}
+            {transport === 'webrtc' && connectionStatus === 'connected' && (
+              <span
+                className="font-mono text-eyebrow uppercase text-gray-400"
+                title="The avatar is arriving as one continuous WebRTC stream"
+              >
+                · Live stream
+              </span>
+            )}
           </div>
           {stalled === 'gone' && onStartNew && (
             <button

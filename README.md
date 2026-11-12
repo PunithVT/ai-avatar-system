@@ -477,6 +477,48 @@ exactly as it did before and the reply proceeds.
 
 ---
 
+## 📡 Live Stream (WebRTC, optional)
+
+By default each spoken sentence reaches the browser as its own MP4, played one
+after another. It works everywhere, but every sentence boundary is a small
+stutter, and each clip is uploaded, fetched and decoded before it can start.
+
+`MEDIA_TRANSPORT=webrtc` replaces that with **one continuous audio and video
+stream** per conversation:
+
+- Between sentences the stream shows the avatar's still face, so the picture
+  never tears down and there is no gap or flash at a sentence boundary.
+- Interrupting is immediate: the server drops what it had queued and the
+  stream is back on the idle face in the same instant.
+- Clips go straight onto the stream — no upload, no fetch, nothing stored.
+
+It is **off by default** and falls back on its own. A browser that cannot
+connect simply keeps receiving clips, and if a stream fails mid-reply the
+sentences it had not finished are re-sent as clips, in order — nothing is lost.
+
+```env
+MEDIA_TRANSPORT=webrtc
+# Add a TURN relay for users behind strict firewalls:
+WEBRTC_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302"]}]
+```
+
+**Before enabling it in production:**
+
+- The backend must be reachable from browsers over **UDP**. A default Docker
+  bridge network does not give you that: run the backend container with host
+  networking, or put a TURN relay in front. There is no setting that bounds
+  the port range.
+- Each open conversation encodes video continuously on the CPU — measured at
+  roughly a fifth of a core while idle, more while speaking.
+- `GET /health` reports `media_transport` and `webrtc_available`; the chat
+  header shows "Live stream" when a conversation is actually on it.
+
+The microphone still travels over the WebSocket; moving it onto the same
+connection (which is what makes a proper turn detector possible) is the next
+step on the roadmap.
+
+---
+
 ## 🙌 Hands-Free Mode
 
 Tap the **Radio** button next to the mic and just talk — no tap-to-record. The
@@ -704,7 +746,8 @@ pytest --cov=app --cov-report=html  # HTML coverage
 - [x] **Barge-in** — interrupt the avatar mid-reply by speaking ✅
 - [x] **Local LLMs** — Ollama / vLLM / LM Studio via OpenAI-compatible API ✅
 - [x] **Hands-free mode** — VAD-driven always-listening with auto end-of-turn (no tap-to-record) ✅
-- [ ] **WebRTC streaming** — sub-second full-duplex audio/video instead of chunked MP4
+- [x] **WebRTC delivery** — one continuous audio/video stream instead of chunked MP4 (opt-in: `MEDIA_TRANSPORT=webrtc`)
+- [ ] **WebRTC microphone + semantic turn detection** — full-duplex audio on the same connection
 - [ ] **Wav2Lip engine** — lighter lip-sync option for weaker GPUs
 - [ ] **Emotion-driven animation** — detected emotion changes facial expression
 - [ ] **Embeddable widget** — drop a talking avatar into any website with 3 lines of JS
