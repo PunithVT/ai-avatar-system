@@ -9,10 +9,11 @@ OpenAI. The Anthropic path takes advantage of:
     fresh input, which dominates per-token cost for chatty avatars that
     share a system prompt across many turns. Workspace-isolated as of
     Anthropic's Feb 2026 change.
-  * **Extended thinking (opt-in)** — when callers pass `thinking=True`
-    we set `thinking={"type": "enabled", "budget_tokens": ...}` so the
-    model reasons internally before answering. Reserved for hard turns;
-    using it on every turn would multiply token cost.
+  * **Thinking (opt-in)** — when callers pass `thinking=True` the model
+    is asked to reason deliberately before answering: adaptive thinking at
+    high effort on current models, a token budget on legacy ones. Reserved
+    for hard turns; the live conversation path runs at low effort instead,
+    because time-to-first-word is what a listener notices.
 
 Exceptions are re-raised as `LLMError` subclasses so the WebSocket pipeline
 can distinguish rate-limit / auth / network failures and surface
@@ -22,6 +23,7 @@ appropriate user-facing messages.
 from __future__ import annotations
 
 import logging
+import re
 from typing import AsyncGenerator, Dict, List, Optional
 
 import anthropic
@@ -36,10 +38,33 @@ DEFAULT_SYSTEM_PROMPT = (
     "Keep replies concise and conversational so they can be spoken aloud."
 )
 
-# Extended-thinking budget. Claude 4.x Opus supports up to 128k thinking
-# tokens; for an interactive avatar we want responses fast, so we cap the
-# budget low. Increase for research/agentic use cases.
+# Thinking budget for the models that still take one (see _is_legacy_claude).
+# Current models size their own thinking and are steered with `effort`.
 _DEFAULT_THINKING_BUDGET = 4096
+
+# Claude 3.x, and 4.0 through 4.6 — optionally with a date suffix.
+_LEGACY_CLAUDE_RE = re.compile(r"^claude-(?:3\b|(?:opus|sonnet|haiku)-4(?:-([0-6]))?(?:-\d{8})?$)")
+
+
+def _is_legacy_claude(model: str) -> bool:
+    """
+    True for Claude models from before the 4.7 request surface.
+
+    The two generations are steered differently, and each REJECTS the
+    other's controls with a 400 — which here means every turn of every
+    conversation failing with "the AI provider returned an error":
+
+      legacy (<= 4.6)   thinking takes `budget_tokens`; `effort` is an error
+                        on several of them
+      current (>= 4.7)  thinking is adaptive and its depth is set with
+                        `output_config.effort`; a token budget is rejected
+
+    `temperature` is sent to NEITHER. The current API version rejects
+    sampling parameters on every model and the 1.x+ SDK no longer has the
+    argument at all — this module used to pass it unconditionally, so on a
+    fresh install every Claude request raised a TypeError before it was sent.
+    """
+    return bool(_LEGACY_CLAUDE_RE.match(model or ""))
 
 
 class LLMError(Exception):
@@ -56,6 +81,10 @@ class LLMAuthError(LLMError):
 
 class LLMUnavailable(LLMError):
     """Network failure, timeout, or 5xx from the provider."""
+
+
+class LLMRefused(LLMError):
+    """The model declined the request (stop_reason == "refusal")."""
 
 
 def _cacheable_system(system_prompt: Optional[str]) -> list[dict]:
@@ -105,6 +134,7 @@ class LLMService:
         self.model = settings.LLM_MODEL
         self.temperature = settings.LLM_TEMPERATURE
         self.max_tokens = settings.LLM_MAX_TOKENS
+        self.effort = settings.LLM_EFFORT or None
         # Opt-in reasoning cap for OpenAI-compatible "thinking" models (e.g.
         # Ollama cloud glm-*:cloud / kimi-*:cloud). "none" disables reasoning
         # so they return normal `content`. Empty → not sent (default behavior).
@@ -159,21 +189,7 @@ class LLMService:
         system_prompt: Optional[str],
         thinking: bool,
     ) -> str:
-        kwargs: dict = {
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "system": _cacheable_system(system_prompt),
-            "messages": messages,
-        }
-        # Extended thinking — model "thinks" privately before answering. The
-        # thinking tokens still count against output budget so we widen
-        # max_tokens to cover both. Per Anthropic docs, temperature must be 1
-        # when extended thinking is enabled.
-        if thinking:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": _DEFAULT_THINKING_BUDGET}
-            kwargs["max_tokens"] = max(self.max_tokens + _DEFAULT_THINKING_BUDGET, self.max_tokens)
-            kwargs["temperature"] = 1.0
+        kwargs = self._anthropic_kwargs(messages, system_prompt, thinking)
 
         try:
             response = await self.client.messages.create(**kwargs)
@@ -191,7 +207,48 @@ class LLMService:
                 self._log_usage(response.usage, thinking)
                 return block.text
 
+        if getattr(response, "stop_reason", None) == "refusal":
+            raise LLMRefused("The model declined this request")
         raise LLMError("Anthropic response contained no text block")
+
+    def _anthropic_kwargs(
+        self,
+        messages: List[Dict[str, str]],
+        system_prompt: Optional[str],
+        thinking: bool = False,
+    ) -> dict:
+        """
+        Request parameters for the configured Claude model.
+
+        The one place that knows which generation takes what — see
+        _is_legacy_claude. `thinking=True` asks for deliberate reasoning
+        (reserved for hard turns; nothing on the live path uses it).
+        """
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "system": _cacheable_system(system_prompt),
+            "messages": messages,
+        }
+
+        if _is_legacy_claude(self.model):
+            if thinking:
+                # Thinking tokens count against the output budget, so widen
+                # max_tokens to cover both.
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": _DEFAULT_THINKING_BUDGET}
+                kwargs["max_tokens"] = self.max_tokens + _DEFAULT_THINKING_BUDGET
+            return kwargs
+
+        # Current models think adaptively by default, and how much is governed
+        # by effort. Their default effort is tuned for hard problems; for a
+        # spoken reply that is seconds of silence before the first word, so
+        # the conversational path asks for the configured (low) effort.
+        effort = "high" if thinking else self.effort
+        if effort:
+            kwargs["output_config"] = {"effort": effort}
+        if thinking:
+            kwargs["thinking"] = {"type": "adaptive"}
+        return kwargs
 
     def _openai_extra(self) -> dict:
         """Extra request params for the OpenAI-compatible path.
@@ -253,14 +310,23 @@ class LLMService:
     ) -> AsyncGenerator[str, None]:
         try:
             async with self.client.messages.stream(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                system=_cacheable_system(system_prompt),
-                messages=messages,
+                **self._anthropic_kwargs(messages, system_prompt)
             ) as stream:
+                produced = False
+                # text_stream yields answer text only — thinking blocks, which
+                # current models may emit first, never reach the listener.
                 async for text in stream.text_stream:
+                    produced = True
                     yield text
+                final = await stream.get_final_message()
+            self._log_usage(getattr(final, "usage", None), thinking=False)
+            # A decline arrives as a normal 200 with stop_reason "refusal",
+            # not as an exception. With no text it used to look like a reply
+            # that simply said nothing.
+            if getattr(final, "stop_reason", None) == "refusal" and not produced:
+                raise LLMRefused("The model declined this request")
+        except LLMError:
+            raise
         except Exception as e:
             mapped = _map_anthropic_exception(e)
             logger.error("anthropic_stream_failed", extra={"error_type": type(e).__name__})

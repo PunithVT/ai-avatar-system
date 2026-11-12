@@ -19,21 +19,22 @@ def test_tracked_worker_script_is_shipped():
     assert tracked.is_file(), "backend/musetalk_worker.py is missing — MuseTalk will not start"
 
 
-def test_resolve_worker_prefers_clone_then_falls_back(tmp_path):
-    animator = AvatarAnimator()
+def test_resolve_worker_prefers_the_tracked_copy(tmp_path):
+    """
+    The tracked backend copy wins even when the clone has its own.
 
-    # Clone has its own copy → use it.
+    The clone's copy is a snapshot from whenever setup_musetalk.sh last ran,
+    in a gitignored directory — preferring it meant a checkout set up earlier
+    kept running an old worker that no later fix ever reached.
+    """
+    animator = AvatarAnimator()
+    tracked = Path(__file__).resolve().parent.parent / "musetalk_worker.py"
+
     clone = tmp_path / "MuseTalk"
     (clone / "scripts").mkdir(parents=True)
-    in_clone = clone / "scripts" / "musetalk_worker.py"
-    in_clone.write_text("# worker")
-    assert animator._resolve_worker_script(clone) == in_clone
+    (clone / "scripts" / "musetalk_worker.py").write_text("# stale snapshot")
+    assert animator._resolve_worker_script(clone) == tracked
 
-    # Clone lacks the script → fall back to the tracked backend copy.
     empty_clone = tmp_path / "EmptyClone"
     (empty_clone / "scripts").mkdir(parents=True)
-    resolved = animator._resolve_worker_script(empty_clone)
-    assert resolved.name == "musetalk_worker.py"
-    assert resolved.is_file()
-    # It's the tracked backend copy, not anything under the empty clone.
-    assert "EmptyClone" not in str(resolved)
+    assert animator._resolve_worker_script(empty_clone) == tracked

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional, Tuple
@@ -18,6 +19,17 @@ class AvatarProcessor:
         self.resolution = settings.AVATAR_RESOLUTION
 
     async def process_image(self, image_path: str, output_path: str) -> Tuple[str, dict]:
+        """
+        Process an uploaded avatar image.
+
+        Runs in a worker thread. Decoding, face detection, resampling and
+        JPEG encoding of an image up to 10 MB is hundreds of milliseconds of
+        CPU; done inline in a coroutine it froze the event loop, stalling
+        every live conversation on the server for the length of each upload.
+        """
+        return await asyncio.to_thread(self._process_image_sync, image_path, output_path)
+
+    def _process_image_sync(self, image_path: str, output_path: str) -> Tuple[str, dict]:
         """
         Process uploaded avatar image
 
@@ -42,7 +54,7 @@ class AvatarProcessor:
             orig_width, orig_height = image.size
 
             # Detect face and crop
-            face_box = await self._detect_face(np.array(image))
+            face_box = self._detect_face(np.array(image))
 
             if face_box:
                 x, y, w, h = face_box
@@ -68,14 +80,18 @@ class AvatarProcessor:
             image = image.resize((self.resolution, self.resolution), Image.Resampling.LANCZOS)
 
             # Enhance image
-            image = await self._enhance_image(image)
+            image = self._enhance_image(image)
 
             # Save processed image
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             image.save(output_path, quality=95)
 
             # Create thumbnail
-            thumbnail_path = output_path.replace(".", "_thumb.")
+            # Derived from the file name only. str.replace(".", ...) rewrote
+            # EVERY dot in the path, so a temp directory containing one
+            # produced a path into a directory that does not exist.
+            out = Path(output_path)
+            thumbnail_path = str(out.with_name(f"{out.stem}_thumb{out.suffix}"))
             thumbnail = image.copy()
             thumbnail.thumbnail((256, 256), Image.Resampling.LANCZOS)
             thumbnail.save(thumbnail_path, quality=85)
@@ -94,7 +110,7 @@ class AvatarProcessor:
             logger.error(f"Failed to process avatar image: {e}")
             raise
 
-    async def _detect_face(self, image: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    def _detect_face(self, image: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """Detect face in image using OpenCV"""
         try:
             # Load face cascade
@@ -120,7 +136,7 @@ class AvatarProcessor:
             logger.warning(f"Face detection error: {e}")
             return None
 
-    async def _enhance_image(self, image: Image.Image) -> Image.Image:
+    def _enhance_image(self, image: Image.Image) -> Image.Image:
         """Enhance image quality"""
         try:
             from PIL import ImageEnhance
@@ -138,20 +154,6 @@ class AvatarProcessor:
         except Exception as e:
             logger.warning(f"Image enhancement error: {e}")
             return image
-
-    async def create_thumbnail(
-        self, image_path: str, thumbnail_path: str, size: Tuple[int, int] = (256, 256)
-    ) -> str:
-        """Create thumbnail from image"""
-        try:
-            image = Image.open(image_path)
-            image.thumbnail(size, Image.Resampling.LANCZOS)
-            image.save(thumbnail_path, quality=85)
-            return thumbnail_path
-
-        except Exception as e:
-            logger.error(f"Failed to create thumbnail: {e}")
-            raise
 
 
 # Global instance

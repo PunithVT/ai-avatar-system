@@ -6,7 +6,9 @@ In local mode files are saved under LOCAL_STORAGE_PATH and served via
 FastAPI StaticFiles at /uploads/...
 """
 
+import asyncio
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -41,8 +43,14 @@ class LocalStorageService:
         metadata: Optional[dict] = None,
     ) -> str:
         dest = _local_path(key)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(file_data)
+
+        def _write() -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(file_data)
+
+        # Off the event loop: this runs once per spoken sentence, on the same
+        # loop that is streaming every other session.
+        await asyncio.to_thread(_write)
         url = _local_url(key)
         logger.debug(f"Saved {key} → {url}")
         return url
@@ -51,13 +59,33 @@ class LocalStorageService:
         p = _local_path(key)
         if not p.exists():
             raise FileNotFoundError(f"Local file not found: {key}")
-        return p.read_bytes()
+        return await asyncio.to_thread(p.read_bytes)
 
     def get_local_path(self, key: str) -> str:
         return str(_local_path(key).resolve())
 
     async def delete_file(self, key: str):
         _local_path(key).unlink(missing_ok=True)
+
+    async def delete_prefix(self, prefix: str) -> int:
+        """
+        Delete everything stored under `prefix` (a "directory"). Returns the
+        number of files removed. Refuses a prefix that does not resolve to a
+        strict subdirectory of the storage root.
+        """
+        root = Path(settings.LOCAL_STORAGE_PATH).resolve()
+        target = _local_path(prefix.rstrip("/")).resolve()
+        if target == root or root not in target.parents:
+            raise ValueError(f"Refusing to delete outside the storage root: {prefix!r}")
+        if not target.is_dir():
+            return 0
+
+        def _remove() -> int:
+            count = sum(1 for f in target.rglob("*") if f.is_file())
+            shutil.rmtree(target, ignore_errors=True)
+            return count
+
+        return await asyncio.to_thread(_remove)
 
     def get_url(self, key: str) -> str:
         return _local_url(key)
@@ -106,10 +134,13 @@ class S3StorageService:
                     logger.info(f"S3 bucket {self.bucket_name} exists")
                 except ClientError:
                     logger.info(f"Creating S3 bucket {self.bucket_name}")
-                    await s3.create_bucket(
-                        Bucket=self.bucket_name,
-                        CreateBucketConfiguration={"LocationConstraint": self.region},
-                    )
+                    # us-east-1 is the one region where a LocationConstraint
+                    # is not merely unnecessary but rejected outright — and it
+                    # is this setting's default.
+                    kwargs: dict = {"Bucket": self.bucket_name}
+                    if self.region != "us-east-1":
+                        kwargs["CreateBucketConfiguration"] = {"LocationConstraint": self.region}
+                    await s3.create_bucket(**kwargs)
         except Exception as e:
             logger.error(f"Failed to initialise S3: {e}")
             raise
@@ -158,6 +189,27 @@ class S3StorageService:
     async def delete_file(self, key: str):
         async with self.session.client("s3") as s3:
             await s3.delete_object(Bucket=self.bucket_name, Key=key)
+
+    async def delete_prefix(self, prefix: str) -> int:
+        """Delete every object under `prefix`. Returns the number removed."""
+        if not prefix.strip("/"):
+            raise ValueError("Refusing to delete the whole bucket")
+        removed = 0
+        async with self.session.client("s3") as s3:
+            token = None
+            while True:
+                kwargs: dict = {"Bucket": self.bucket_name, "Prefix": prefix}
+                if token:
+                    kwargs["ContinuationToken"] = token
+                page = await s3.list_objects_v2(**kwargs)
+                keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                if keys:
+                    await s3.delete_objects(Bucket=self.bucket_name, Delete={"Objects": keys})
+                    removed += len(keys)
+                if not page.get("IsTruncated"):
+                    break
+                token = page.get("NextContinuationToken")
+        return removed
 
     def get_url(self, key: str) -> str:
         if self.cloudfront_domain:

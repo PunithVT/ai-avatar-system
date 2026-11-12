@@ -14,10 +14,19 @@ gTTS remains as the last-ditch network fallback.
 
 Synthesis result reports which engine produced the audio so the caller can
 notify the user when voice cloning was silently dropped during fallback.
+
+TTS_PROVIDER picks where the chain starts:
+
+    chatterbox  the full chain above (default)
+    edge        start at Edge TTS — the right setting for an install without
+                the Chatterbox package, which otherwise re-attempted the import
+                and logged an error on every sentence of every reply
+    gtts        gTTS only
 """
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -86,6 +95,17 @@ class TTSService:
         self.provider = provider
         self.model = None
         self._init_lock = asyncio.Lock()
+        # Set once the chatterbox package turns out not to be installed, so it
+        # is discovered once rather than on every sentence.
+        self._chatterbox_missing = False
+        # One generation at a time. The model is a single object holding the
+        # CURRENT speaker's conditioning as mutable state; two sessions
+        # generating at once would each be reading and replacing it.
+        self._generate_lock = threading.Lock()
+        # Conditioning captured from the freshly-loaded model (its built-in
+        # voice), and per reference recording for cloned voices.
+        self._default_conds = None
+        self._conds_cache: dict = {}
 
     def _check_cuda(self) -> bool:
         try:
@@ -111,20 +131,94 @@ class TTSService:
 
             if self.provider != "chatterbox":
                 raise ValueError(f"Unsupported TTS provider: {self.provider}")
+            if self._chatterbox_missing:
+                raise ModuleNotFoundError("chatterbox is not installed")
 
             try:
                 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+            except ModuleNotFoundError as e:
+                missing = e.name or ""
+                if missing == "chatterbox" or missing.startswith("chatterbox."):
+                    self._chatterbox_missing = True
+                    logger.warning(
+                        "TTS_PROVIDER=chatterbox but the chatterbox package is not installed — "
+                        "using Edge TTS. Install requirements-tts.txt for voice cloning, or set "
+                        "TTS_PROVIDER=edge to make this the configured engine."
+                    )
+                else:
+                    # chatterbox IS installed but one of its own dependencies
+                    # is not. Say which: reporting this as "chatterbox is not
+                    # installed" sends whoever reads the log to reinstall the
+                    # wrong thing.
+                    logger.error(f"Chatterbox is installed but failed to import: {e}")
+                raise
 
+            try:
                 device = "cuda" if self._check_cuda() else "cpu"
                 logger.info(f"Loading Chatterbox multilingual TTS on {device}...")
                 self.model = await asyncio.to_thread(
                     ChatterboxMultilingualTTS.from_pretrained, device=device
                 )
+                self._default_conds = getattr(self.model, "conds", None)
                 logger.info(f"Chatterbox loaded (sr={self.model.sr}, device={device})")
 
             except Exception as e:
                 logger.error(f"Failed to load Chatterbox: {e}")
                 raise
+
+    async def warm(self) -> None:
+        """Load the configured model ahead of the first turn. Never raises."""
+        if self.provider != "chatterbox":
+            return
+        try:
+            await self.initialize()
+        except Exception as e:
+            logger.warning(f"TTS warm-up skipped: {e}")
+
+    def _generate_sync(self, text: str, language: str, speaker_wav: Optional[str]):
+        """
+        Run one Chatterbox generation with the right speaker.
+
+        Chatterbox keeps the active speaker's conditioning on the model
+        (`model.conds`). `generate(audio_prompt_path=...)` replaces it;
+        `generate()` without one REUSES whatever is there. On a shared model
+        that meant a session with no cloned voice spoke in the voice of
+        whichever cloned session had generated last — one user's cloned voice
+        coming out of another user's avatar.
+
+        So the conditioning is set explicitly for every call, under a lock:
+        the built-in voice's for an uncloned session, and a cached copy per
+        reference recording for a cloned one (which also stops the reference
+        audio being re-encoded for every sentence).
+
+        The cache relies on `prepare_conditionals` and `conds`. If a
+        Chatterbox release drops either, this degrades to passing
+        `audio_prompt_path` per call — correct, just slower — still under the
+        lock.
+        """
+        model = self.model
+        with self._generate_lock:
+            can_manage = hasattr(model, "conds") and self._default_conds is not None
+            if speaker_wav:
+                if can_manage and hasattr(model, "prepare_conditionals"):
+                    try:
+                        st = Path(speaker_wav).stat()
+                        key = (speaker_wav, st.st_mtime_ns, st.st_size)
+                    except OSError:
+                        key = (speaker_wav, 0, 0)
+                    conds = self._conds_cache.get(key)
+                    if conds is None:
+                        model.prepare_conditionals(speaker_wav)
+                        conds = model.conds
+                        if len(self._conds_cache) >= 64:
+                            self._conds_cache.pop(next(iter(self._conds_cache)))
+                        self._conds_cache[key] = conds
+                    model.conds = conds
+                    return model.generate(text, language_id=language)
+                return model.generate(text, language_id=language, audio_prompt_path=speaker_wav)
+            if can_manage:
+                model.conds = self._default_conds
+            return model.generate(text, language_id=language)
 
     async def synthesize(
         self,
@@ -149,6 +243,22 @@ class TTSService:
         """
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
+        if self.provider in ("edge", "edge-tts", "gtts"):
+            return await self._synthesize_networked(
+                text,
+                output_path,
+                language,
+                configured=self.provider,
+                wanted_clone=bool(speaker_wav),
+            )
+        if self._chatterbox_missing:
+            # Known not to be installed: go straight to the fallback rather
+            # than fail the import again. Only count it as a fallback worth
+            # telling the user about when a cloned voice was actually lost.
+            return await self._synthesize_networked(
+                text, output_path, language, configured="edge", wanted_clone=bool(speaker_wav)
+            )
+
         try:
             if self.model is None:
                 await self.initialize()
@@ -159,11 +269,7 @@ class TTSService:
                 logger.warning(f"Speaker WAV not found: {speaker_wav!r} — using default voice")
                 speaker_wav = None
 
-            kwargs = {"language_id": language}
-            if speaker_wav:
-                kwargs["audio_prompt_path"] = speaker_wav
-
-            wav = await asyncio.to_thread(self.model.generate, text, **kwargs)
+            wav = await asyncio.to_thread(self._generate_sync, text, language, speaker_wav)
             await asyncio.to_thread(torchaudio.save, output_path, wav, self.model.sr)
 
             logger.info(
@@ -177,7 +283,9 @@ class TTSService:
             )
 
         except Exception as e:
-            if speaker_wav:
+            if self._chatterbox_missing:
+                pass  # already explained once, in initialize()
+            elif speaker_wav:
                 logger.warning(
                     f"Chatterbox voice-clone failed — cloned voice NOT applied, "
                     f"falling back to a default neural voice. Error: {e}"
@@ -185,6 +293,33 @@ class TTSService:
             else:
                 logger.warning(f"Chatterbox failed ({e}), trying Edge TTS fallback")
 
+            return await self._synthesize_networked(
+                text,
+                output_path,
+                language,
+                configured="edge" if self._chatterbox_missing and not speaker_wav else None,
+                wanted_clone=bool(speaker_wav),
+            )
+
+    async def _synthesize_networked(
+        self,
+        text: str,
+        output_path: str,
+        language: str,
+        configured: Optional[str],
+        wanted_clone: bool,
+    ) -> SynthResult:
+        """
+        Edge TTS, then gTTS.
+
+        `configured` is the engine the operator asked for, if this chain was
+        entered by choice ("edge"/"gtts") rather than because Chatterbox
+        failed (None). `fallback` in the result is True whenever what was
+        delivered is worse than what was asked for — a different engine, or a
+        cloned voice that could not be applied.
+        """
+        engine = "gtts"
+        if configured != "gtts":
             # Prefer Edge TTS (Microsoft neural voices — much better prosody
             # than gTTS, still free and CPU-only); gTTS is the last resort.
             try:
@@ -193,14 +328,18 @@ class TTSService:
             except Exception as edge_err:
                 logger.warning(f"Edge TTS failed ({edge_err}), falling back to gTTS")
                 await self._gtts_fallback(text, output_path, language)
-                engine = "gtts"
+        else:
+            await self._gtts_fallback(text, output_path, language)
 
-            return SynthResult(
-                output_path=output_path,
-                engine=engine,
-                fallback=True,
-                voice_cloned=False,
-            )
+        asked_for = {"edge": "edge-tts", "edge-tts": "edge-tts", "gtts": "gtts"}.get(
+            configured or ""
+        )
+        return SynthResult(
+            output_path=output_path,
+            engine=engine,
+            fallback=wanted_clone or engine != asked_for,
+            voice_cloned=False,
+        )
 
     async def _edge_fallback(self, text: str, output_path: str, language: str = "en") -> str:
         """Free neural-voice fallback via Microsoft Edge TTS (no key, no GPU)."""

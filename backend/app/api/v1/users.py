@@ -40,6 +40,10 @@ def _truncate_password(password: str) -> bytes:
     return encoded[:_BCRYPT_MAX_BYTES].decode("utf-8", "ignore").encode("utf-8")
 
 
+# Placeholder address given to guest rows (the column is NOT NULL and unique).
+_GUEST_EMAIL_DOMAIN = "@guests.example.com"
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     if not plain_password or not hashed_password:
         return False
@@ -230,7 +234,7 @@ async def create_guest(response: Response, db: AsyncSession = Depends(get_db)):
     marker = uuid.uuid4().hex
     user = User(
         id=f"guest-{marker}",
-        email=f"guest-{marker}@guests.example.com",
+        email=f"guest-{marker}{_GUEST_EMAIL_DOMAIN}",
         username=f"guest-{marker[:12]}",
         full_name="Guest",
         # "*" is not a valid bcrypt hash, so verify_password can never match
@@ -294,7 +298,37 @@ async def update_current_user(
             user.full_name = update_data.full_name
 
         if update_data.password is not None:
+            # Changing a password needs the current one. Without it, anyone
+            # holding a live session — a borrowed laptop, a stolen cookie —
+            # could set a new password and take the account for good. Guests
+            # are exempt: they have no password, and setting one is how they
+            # keep their data.
+            if not user.is_guest and not (
+                update_data.current_password
+                and verify_password(update_data.current_password, user.hashed_password)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Current password is incorrect",
+                )
             user.hashed_password = get_password_hash(update_data.password)
+
+        # A guest who now has both an email and a password is a real account.
+        # Left flagged as a guest it was still swept by the retention task:
+        # the user "signed up", and 48 idle hours later the account and
+        # everything in it were deleted.
+        #
+        # "Has an email" means one they supplied. Every guest row already
+        # carries a placeholder address, so checking only that the column is
+        # non-empty promoted a guest on a password alone — to a permanent
+        # account nobody could ever sign in to, since sign-in is by email.
+        if user.is_guest and update_data.password is not None:
+            if user.email.endswith(_GUEST_EMAIL_DOMAIN):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="An email is required to create an account",
+                )
+            user.is_guest = False
 
         await db.commit()
         await db.refresh(user)

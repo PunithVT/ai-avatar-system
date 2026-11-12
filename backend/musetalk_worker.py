@@ -9,34 +9,62 @@ Lifecycle:
        "vae_type": ...,
        "use_float16": true/false   <- optional, default false (enable on GPU for ~2x speedup)
      }
-  2. Loads all models once, prints "READY\\n" to stdout.
+  2. Loads all models once, writes "READY\\n" on the protocol channel.
   3. Loop: reads one JSON job line {
-           "image": ..., "audio": ...,
-           "output": ..., "coord_cache": ...}
-           runs inference, prints {"status":"ok","output":...}\\n
-           or {"status":"error","msg":...}\\n
+           "id": ..., "image": ..., "audio": ...,
+           "output": ..., "coord_cache": ...,
+           "cancel_file": ...}   <- if this path appears, drop the job
+           runs inference, writes {"id":...,"status":"ok","output":...}\\n
+           or {"id":...,"status":"error","msg":...}\\n
 
 All paths may be absolute or relative to cwd (the MuseTalk repo root).
+
+THE PROTOCOL CHANNEL IS NOT sys.stdout
+The parent reads this process's original stdout as a line protocol. Upstream
+MuseTalk prints to stdout freely — load_all_model() announces the UNet path
+before any model is loaded, preprocessing prints "reading images..." on every
+job — and each of those lines landed in the protocol stream. The parent took
+the first one for the READY line, decided the worker had failed to start, and
+killed it; lip-sync fell back to the static image on every sentence.
+
+So before anything else is imported, the original stdout is duplicated onto a
+private handle that only _reply() writes to, and fd 1 itself is pointed at
+stderr. Every print() in every library — and anything a child process such as
+ffmpeg writes — now goes to the stderr log, and cannot reach the parent.
 """
 
-import copy
-import json
 import os
-import pickle
-import shutil
 import sys
-import traceback
-from typing import Any, List
 
-import cv2
-import numpy as np
-import torch
-from musetalk.utils.audio_processor import AudioProcessor
-from musetalk.utils.blending import get_image
-from musetalk.utils.face_parsing import FaceParsing
-from musetalk.utils.preprocessing import coord_placeholder, get_landmark_and_bbox, read_imgs
-from musetalk.utils.utils import datagen, load_all_model
-from transformers import WhisperModel
+if __name__ == "__main__":
+    _PROTO = os.fdopen(os.dup(1), "w", buffering=1)
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+else:
+    # Imported rather than run (the test suite loads the pure helpers this
+    # way): leave the importing process's streams alone.
+    _PROTO = sys.stdout
+
+import json  # noqa: E402
+import pickle  # noqa: E402
+import subprocess  # noqa: E402
+import traceback  # noqa: E402
+from collections import OrderedDict  # noqa: E402
+from typing import Any, List  # noqa: E402
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+from musetalk.utils.audio_processor import AudioProcessor  # noqa: E402
+from musetalk.utils.blending import get_image  # noqa: E402
+from musetalk.utils.face_parsing import FaceParsing  # noqa: E402
+from musetalk.utils.preprocessing import (  # noqa: E402
+    coord_placeholder,
+    get_landmark_and_bbox,
+    read_imgs,
+)
+from musetalk.utils.utils import datagen, load_all_model  # noqa: E402
+from transformers import WhisperModel  # noqa: E402
 
 FPS = 25
 EXTRA_MARGIN = 10
@@ -45,9 +73,137 @@ AUDIO_PAD_L = 2
 AUDIO_PAD_R = 2
 
 
+# Prepared avatars kept in memory: (coords, frames, VAE latents) per image.
+# Face detection and the VAE encode depend only on the avatar image, which is
+# the same for every sentence of a conversation, so redoing them per job was
+# pure overhead on the path that decides time-to-first-frame.
+_AVATAR_CACHE_SIZE = 8
+_avatar_cache: "OrderedDict[tuple, tuple]" = OrderedDict()
+
+
+class JobCancelled(Exception):
+    """The parent abandoned this job; stop working on it."""
+
+
+def _check_cancelled(job) -> None:
+    """
+    Stop if the parent has asked for this job to be dropped.
+
+    The signal is a file, because this process is single-threaded and busy:
+    it cannot read another line from stdin until the current job returns.
+    Without a way to stop, a job whose caller had gone (the user spoke over
+    the avatar) ran to completion anyway, and the reply the user was now
+    actually waiting for queued behind work nobody would ever watch.
+    """
+    cancel_file = job.get("cancel_file")
+    if cancel_file and os.path.exists(cancel_file):
+        raise JobCancelled()
+
+
 def _reply(obj: dict):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    _PROTO.write(json.dumps(obj) + "\n")
+    _PROTO.flush()
+
+
+def _encode_video(frames, audio_path: str, output_path: str, fps: int = FPS) -> None:
+    """
+    Encode BGR frames + the audio track into an MP4 in ONE ffmpeg pass.
+
+    Previously every frame was written to disk as a PNG, encoded to H.264,
+    and then that file was decoded and encoded a second time by the mux step
+    (which also re-ran with default quality, discarding the crf chosen for the
+    first pass). Frames are now piped raw into a single encode.
+
+    argv list, not a shell string: a path containing a space used to split
+    into two arguments, and os.system() ignored the exit code — a failed mux
+    still reported "ok" with no output file.
+
+    +faststart puts the index at the front so a browser can begin playback
+    before the whole file has arrived.
+    """
+    if not frames:
+        raise RuntimeError("No frames to encode")
+    h, w = frames[0].shape[:2]
+    # libx264 with yuv420p needs even dimensions.
+    pad = "pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+        "-i", audio_path,
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-vf", f"{pad},format=yuv420p",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path,
+    ]  # fmt: skip
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=sys.stderr
+    )
+    try:
+        for frame in frames:
+            if frame.shape[:2] != (h, w):
+                frame = cv2.resize(frame, (w, h))
+            proc.stdin.write(np.ascontiguousarray(frame, dtype=np.uint8).tobytes())
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass  # ffmpeg died early; the return code below reports it
+    rc = proc.wait()
+    if rc != 0 or not os.path.isfile(output_path):
+        raise RuntimeError(f"ffmpeg failed to encode the video (exit {rc})")
+
+
+def _prepare_avatar(image_path: str, coord_cache, vae):
+    """
+    Face box, source frame and VAE latents for an avatar image, cached.
+
+    Keyed on path + mtime + size so replacing the image invalidates the entry.
+    """
+    try:
+        st = os.stat(image_path)
+        key = (image_path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (image_path, 0, 0)
+    hit = _avatar_cache.get(key)
+    if hit is not None:
+        _avatar_cache.move_to_end(key)
+        return hit
+
+    input_img_list = [image_path]
+    coord_list: List[Any]
+    frame_list: List[Any]
+    if coord_cache and os.path.exists(coord_cache):
+        with open(coord_cache, "rb") as f:
+            coord_list = list(pickle.load(f))
+        frame_list = list(read_imgs(input_img_list))
+    else:
+        _coords, _frames = get_landmark_and_bbox(input_img_list, 0)
+        coord_list, frame_list = list(_coords), list(_frames)
+        if coord_cache:
+            os.makedirs(os.path.dirname(coord_cache), exist_ok=True)
+            with open(coord_cache, "wb") as f:
+                pickle.dump(coord_list, f)
+
+    if not frame_list or all(c == coord_placeholder for c in coord_list):
+        raise RuntimeError("No face detected in avatar image")
+
+    input_latent_list = []
+    for bbox, frame in zip(coord_list, frame_list):
+        if bbox == coord_placeholder:
+            continue
+        x1, y1, x2, y2 = bbox
+        y2 = min(y2 + EXTRA_MARGIN, frame.shape[0])
+        crop = cv2.resize(frame[y1:y2, x1:x2], (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        input_latent_list.append(vae.get_latents_for_unet(crop))  # type: ignore[arg-type]
+
+    if not input_latent_list:
+        raise RuntimeError("No valid face crops produced")
+
+    prepared = (coord_list, frame_list, input_latent_list)
+    _avatar_cache[key] = prepared
+    while len(_avatar_cache) > _AVATAR_CACHE_SIZE:
+        _avatar_cache.popitem(last=False)
+    return prepared
 
 
 def _load_face_restorer(mode: str, model_path: str, device):
@@ -120,31 +276,19 @@ def _restore(restorer, frame):
         return frame
 
 
+@torch.no_grad()
 def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device, restorer=None):
+    # no_grad: this is pure inference. Without it autograd recorded the whole
+    # UNet + VAE-decode graph for every batch — memory and time spent on
+    # gradients nothing ever asked for.
     image_path = job["image"]
     audio_path = job["audio"]
     output_path = job["output"]
-    coord_cache = job.get("coord_cache")
 
-    input_img_list = [image_path]
-
-    # ── face coordinates (cached per avatar image) ───────────────────────────
-    coord_list: List[Any]
-    frame_list: List[Any]
-    if coord_cache and os.path.exists(coord_cache):
-        with open(coord_cache, "rb") as f:
-            coord_list = list(pickle.load(f))
-        frame_list = list(read_imgs(input_img_list))
-    else:
-        _coords, _frames = get_landmark_and_bbox(input_img_list, 0)
-        coord_list, frame_list = list(_coords), list(_frames)
-        if coord_cache:
-            os.makedirs(os.path.dirname(coord_cache), exist_ok=True)
-            with open(coord_cache, "wb") as f:
-                pickle.dump(coord_list, f)
-
-    if not frame_list or all(c == coord_placeholder for c in coord_list):
-        raise RuntimeError("No face detected in avatar image")
+    _check_cancelled(job)
+    coord_list, frame_list, input_latent_list = _prepare_avatar(
+        image_path, job.get("coord_cache"), vae
+    )
 
     # ── audio features ───────────────────────────────────────────────────────
     weight_dtype = unet.model.dtype
@@ -160,19 +304,6 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
         audio_padding_length_right=AUDIO_PAD_R,
     )
 
-    # ── VAE-encode frames ────────────────────────────────────────────────────
-    input_latent_list = []
-    for bbox, frame in zip(coord_list, frame_list):
-        if bbox == coord_placeholder:
-            continue
-        x1, y1, x2, y2 = bbox
-        y2 = min(y2 + EXTRA_MARGIN, frame.shape[0])
-        crop = cv2.resize(frame[y1:y2, x1:x2], (256, 256), interpolation=cv2.INTER_LANCZOS4)
-        input_latent_list.append(vae.get_latents_for_unet(crop))  # type: ignore[arg-type]
-
-    if not input_latent_list:
-        raise RuntimeError("No valid face crops produced")
-
     frame_list_cycle: List[Any] = frame_list + list(reversed(frame_list))  # type: ignore[operator]
     coord_list_cycle: List[Any] = coord_list + list(reversed(coord_list))  # type: ignore[operator]
     latent_list_cycle: List[Any] = input_latent_list + list(reversed(input_latent_list))
@@ -187,6 +318,7 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
     )
     res_frame_list = []
     for whisper_batch, latent_batch in gen:
+        _check_cancelled(job)
         audio_feat = pe(whisper_batch)
         latent_batch = latent_batch.to(dtype=weight_dtype)
         pred = unet.model(latent_batch, timesteps, encoder_hidden_states=audio_feat).sample
@@ -194,11 +326,14 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
             res_frame_list.append(f)
 
     # ── blend back ───────────────────────────────────────────────────────────
-    frames_dir = output_path + "_frames"
-    os.makedirs(frames_dir, exist_ok=True)
+    out_frames = []
     for i, res_frame in enumerate(res_frame_list):
+        if i % 8 == 0:
+            _check_cancelled(job)
         bbox = coord_list_cycle[i % len(coord_list_cycle)]
-        ori = copy.deepcopy(frame_list_cycle[i % len(frame_list_cycle)])
+        # .copy(), not deepcopy: an ndarray copy is all that is needed and the
+        # cached source frame must not be drawn on.
+        ori = frame_list_cycle[i % len(frame_list_cycle)].copy()
         x1, y1, x2, y2 = bbox
         y2 = min(y2 + EXTRA_MARGIN, ori.shape[0])
         try:
@@ -206,19 +341,11 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
         except Exception:
             continue
         combined = get_image(ori, res_frame, [x1, y1, x2, y2], mode="jaw", fp=fp)
-        combined = _restore(restorer, combined)
-        cv2.imwrite(f"{frames_dir}/{str(i).zfill(8)}.png", combined)
+        out_frames.append(_restore(restorer, combined))
 
     # ── assemble video ───────────────────────────────────────────────────────
-    tmp_vid = output_path + ".tmp.mp4"
-    os.system(
-        f"ffmpeg -y -v warning -r {FPS} -f image2 "
-        f"-i {frames_dir}/%08d.png "
-        f"-vcodec libx264 -vf format=yuv420p -crf 18 {tmp_vid}"
-    )
-    os.system(f"ffmpeg -y -v warning -i {audio_path} -i {tmp_vid} {output_path}")
-    shutil.rmtree(frames_dir)
-    os.remove(tmp_vid)
+    _check_cancelled(job)
+    _encode_video(out_frames, audio_path, output_path)
 
 
 def main():
@@ -263,8 +390,8 @@ def main():
         init.get("face_restore", "off"), init.get("face_restore_model", ""), device
     )
 
-    sys.stdout.write("READY\n")
-    sys.stdout.flush()
+    _PROTO.write("READY\n")
+    _PROTO.flush()
 
     # ── job loop ──────────────────────────────────────────────────────────────
     for raw in sys.stdin:
@@ -275,11 +402,19 @@ def main():
             job = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        # Echo the job id back. The parent may abandon a job it was waiting on
+        # (the user interrupted the avatar); the result still arrives here
+        # later, and without an id the parent would take it for the answer to
+        # its NEXT job and stay one result behind for the life of the process.
+        job_id = job.get("id")
         try:
             _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device, restorer)
-            _reply({"status": "ok", "output": job["output"]})
+            _reply({"id": job_id, "status": "ok", "output": job["output"]})
+        except JobCancelled:
+            _reply({"id": job_id, "status": "cancelled"})
         except Exception as e:
-            _reply({"status": "error", "msg": str(e), "tb": traceback.format_exc()})
+            traceback.print_exc(file=sys.stderr)
+            _reply({"id": job_id, "status": "error", "msg": f"{type(e).__name__}: {e}"})
 
 
 if __name__ == "__main__":

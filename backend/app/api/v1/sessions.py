@@ -11,6 +11,7 @@ from app.api.v1.users import require_current_user
 from app.database import get_db
 from app.models import Avatar, Message, Session, User
 from app.schemas import SessionCreate, SessionResponse
+from app.services.storage import storage_service
 from app.websocket import websocket_manager
 
 logger = logging.getLogger(__name__)
@@ -255,6 +256,16 @@ async def delete_session(
 
         await db.delete(session)
         await db.commit()
+
+        # Close any live socket, then remove the clips generated for this
+        # session. Nothing else ever deleted them: every spoken sentence left
+        # an MP4 behind permanently, still fetchable after the conversation
+        # it belonged to was gone.
+        await websocket_manager.disconnect(session_id)
+        try:
+            await storage_service.delete_prefix(f"videos/{session_id}/")
+        except Exception as e:
+            logger.warning(f"Could not delete media for session {session_id}: {e}")
         logger.info(f"Session deleted: {session_id}")
 
     except HTTPException:

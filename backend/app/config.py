@@ -47,15 +47,24 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: Optional[str] = None
 
     # LLM Configuration
-    # Anthropic models (2026): claude-opus-4-7 (most capable), claude-sonnet-4-6
-    # (balanced — current default), claude-haiku-4-5 (fastest). OpenAI users
-    # should override LLM_MODEL via .env (e.g. gpt-4o, gpt-4o-mini).
+    # Claude: claude-sonnet-5-5 (default — fast and capable, the right fit for
+    # spoken conversation), claude-opus-5-5 (most capable Opus, slower to the
+    # first word), claude-haiku-5-5 (fastest and cheapest). Older models still
+    # work; llm.py sends each generation the parameters it accepts.
+    # OpenAI users should override LLM_MODEL via .env (e.g. gpt-4o).
     # "ollama" runs fully local & free: set LLM_MODEL to e.g. llama3.1 and
     # optionally OPENAI_BASE_URL (defaults to http://localhost:11434/v1).
     LLM_PROVIDER: str = "anthropic"  # anthropic, openai, ollama
-    LLM_MODEL: str = "claude-sonnet-4-6"
+    LLM_MODEL: str = "claude-sonnet-5-5"
+    # OpenAI-compatible providers only. The Claude API no longer accepts
+    # sampling parameters, so this is never sent to Anthropic.
     LLM_TEMPERATURE: float = 0.7
     LLM_MAX_TOKENS: int = 2000
+    # Claude 4.7 and later only: how hard the model works before answering
+    # (low | medium | high | xhigh | max). "low" keeps the pause before the
+    # avatar starts speaking short; raise it if replies need more reasoning
+    # and the delay is acceptable. Empty uses the model's own default.
+    LLM_EFFORT: str = "low"
     # For OpenAI-compatible reasoning ("thinking") models — notably Ollama
     # cloud models like glm-*:cloud / kimi-*:cloud — set to "none" to disable
     # the reasoning phase. Without it those models emit their text as
@@ -117,10 +126,19 @@ class Settings(BaseSettings):
     # only ~1% lower WER than large-v3. Falls back to base/small if VRAM is tight.
     STT_PROVIDER: str = "whisper"  # whisper, google, azure
     WHISPER_MODEL: str = "large-v3-turbo"  # tiny, base, small, medium, large-v3, large-v3-turbo
+    # Decoding beam width. 1 (greedy) is the usual choice for live speech: on
+    # the turbo model it is markedly faster than a beam of 5 for a small
+    # accuracy cost, and transcription sits directly in front of every voice
+    # reply. Raise it if accuracy on your audio matters more than latency.
+    WHISPER_BEAM_SIZE: int = 1
 
     # TTS Configuration
-    # chatterbox: Resemble AI's open-source SOTA TTS (default, voice cloning + 23 langs)
-    TTS_PROVIDER: str = "chatterbox"
+    # chatterbox: Resemble AI's open-source TTS — voice cloning, 23 languages.
+    #             Needs requirements-tts.txt; without it synthesis uses Edge TTS.
+    # edge:       Microsoft neural voices. No GPU, no key, no cloning. Pick this
+    #             when Chatterbox is not installed.
+    # gtts:       Google TTS only (lowest quality; the last-resort fallback).
+    TTS_PROVIDER: str = "chatterbox"  # chatterbox, edge, gtts
 
     # Security
     # Union[..., str] lets pydantic-settings keep a non-JSON env value as a
@@ -166,11 +184,31 @@ class Settings(BaseSettings):
     GUEST_ACCOUNTS_ENABLED: bool = True
     GUEST_RETENTION_HOURS: int = 48
 
+    # Generated video clips are one spoken sentence each and are useless once
+    # played — the transcript is the record. The daily cleanup deletes clips
+    # older than this from LOCAL storage. On S3, set a lifecycle rule on the
+    # videos/ prefix instead (infrastructure/main.tf does). 0 keeps them forever.
+    MEDIA_RETENTION_HOURS: int = 24
+
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
     RATE_LIMIT_PER_HOUR: int = 1000
 
+    # Load the speech and lip-sync models when the server starts instead of on
+    # the first turn. Off by default so development restarts stay quick; turn
+    # it on wherever a real person is the first to speak after a deploy —
+    # otherwise that person waits a minute or more for the models.
+    PRELOAD_MODELS: bool = False
+
     # WebSocket
+    # Turns (text or audio) one user may START per minute across all their
+    # sessions. Each one is an LLM call and, for audio, a transcription. The
+    # HTTP rate limiter does not see WebSocket frames, so this is the only
+    # bound on that path. 0 disables it.
+    WS_TURNS_PER_MINUTE: int = 30
+    # Largest decoded audio message accepted. Hands-free turns are capped at
+    # 30 s in the browser, which is well under 1 MB of Opus.
+    WS_MAX_AUDIO_BYTES: int = 8 * 1024 * 1024
     WS_MAX_CONNECTIONS: int = 1000
     WS_PING_INTERVAL: int = 30
     WS_PING_TIMEOUT: int = 10

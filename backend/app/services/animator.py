@@ -5,6 +5,8 @@ import logging
 import os
 import sys
 import tempfile
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +46,11 @@ class AvatarAnimator:
         self._worker_lock = asyncio.Lock()
         self._worker_env: dict = {}
         self._worker_stderr_path: Optional[Path] = None
+        # The in-flight worker start, shared by every caller waiting on it.
+        self._worker_start: Optional[asyncio.Task] = None
+        # Set when a start fails; suppresses further attempts for a while.
+        self._worker_failed_at: Optional[float] = None
+        self._worker_failure: Optional[str] = None
 
         if self.device == "cuda":
             gpu_name = torch.cuda.get_device_name(0)
@@ -116,24 +123,31 @@ class AvatarAnimator:
         Locate the persistent-worker script.
 
         `musetalk_worker.py` is OUR custom driver, not part of the upstream
-        MuseTalk repo that setup_musetalk.sh clones — so a fresh clone won't
-        have it under models/MuseTalk/scripts/. We ship a tracked copy at
-        backend/musetalk_worker.py and prefer whichever exists, so MuseTalk
-        works even if setup hasn't copied the file into the clone yet.
-        The process still runs with cwd=musetalk_dir + PYTHONPATH set to the
-        clone, so its `from musetalk.utils …` imports resolve regardless of
-        where the script file physically lives.
+        MuseTalk repo that setup_musetalk.sh clones. The tracked copy at
+        backend/musetalk_worker.py is authoritative: it is the one that
+        changes with this codebase, and it speaks the protocol this class
+        expects (job ids, a private result channel).
+
+        setup_musetalk.sh also copies it into models/MuseTalk/scripts/, and
+        that copy used to win. It is a snapshot from whenever setup last ran,
+        under a gitignored directory, so it silently went stale — face
+        restoration and every later worker fix never reached a checkout that
+        had been set up earlier. It is now only the fallback for a deployment
+        that ships the clone without the backend tree.
+
+        The process runs with cwd=musetalk_dir and PYTHONPATH set to the
+        clone, so `from musetalk.utils …` resolves wherever the file lives.
         """
-        in_clone = musetalk_dir / "scripts" / "musetalk_worker.py"
-        if in_clone.exists():
-            return in_clone
         # backend/app/services/animator.py → backend/musetalk_worker.py
         tracked = Path(__file__).resolve().parent.parent.parent / "musetalk_worker.py"
         if tracked.exists():
-            logger.info(f"Using tracked MuseTalk worker at {tracked}")
             return tracked
+        in_clone = musetalk_dir / "scripts" / "musetalk_worker.py"
+        if in_clone.exists():
+            logger.warning(f"Tracked MuseTalk worker missing; using the copy at {in_clone}")
+            return in_clone
         raise FileNotFoundError(
-            f"musetalk_worker.py not found in {in_clone} or {tracked}. "
+            f"musetalk_worker.py not found in {tracked} or {in_clone}. "
             "Re-run scripts/setup_musetalk.sh."
         )
 
@@ -149,11 +163,67 @@ class AvatarAnimator:
 
     # ── persistent worker management ─────────────────────────────────────────
 
+    # After a failed start, wait this long before trying again. Loading takes
+    # minutes and holds the worker lock; without a cool-off, a worker that
+    # cannot start (missing weights, CUDA out of memory) was respawned for
+    # every single sentence, each one stalling its turn for a full load before
+    # falling back to the static image anyway.
+    _WORKER_RETRY_COOLDOWN_SECS = 120
+
+    def worker_state(self) -> str:
+        """One-line engine status for /health — is lip-sync actually running?"""
+        if self.engine != "musetalk":
+            return self.engine
+        if self._worker_proc is not None and self._worker_proc.returncode is None:
+            return "musetalk (worker ready)"
+        if self._worker_start is not None and not self._worker_start.done():
+            return "musetalk (worker loading models)"
+        if self._worker_failure:
+            return f"musetalk (worker failed — static-image fallback): {self._worker_failure}"
+        return "musetalk (worker not started)"
+
     async def _ensure_worker(self) -> asyncio.subprocess.Process:
-        """Start the persistent worker if not already running."""
+        """
+        Return the running worker, starting it if needed.
+
+        The start runs as its own task and callers wait on it through
+        `shield`. A caller being cancelled (the user interrupted the avatar,
+        or closed the tab, during the minutes-long model load) therefore no
+        longer abandons a half-started process: previously that left a worker
+        holding several GB of VRAM that nothing referenced, and the next call
+        spawned another alongside it.
+        """
         if self._worker_proc is not None and self._worker_proc.returncode is None:
             return self._worker_proc
 
+        if self._worker_start is None or self._worker_start.done():
+            if (
+                self._worker_failed_at is not None
+                and time.monotonic() - self._worker_failed_at < self._WORKER_RETRY_COOLDOWN_SECS
+            ):
+                raise RuntimeError(
+                    f"MuseTalk worker unavailable (retrying later): {self._worker_failure}"
+                )
+            self._worker_start = asyncio.create_task(self._start_worker(), name="musetalk-start")
+            # Every waiter may have been cancelled by the time this fails;
+            # retrieve the exception so asyncio does not log it as unhandled.
+            self._worker_start.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+        return await asyncio.shield(self._worker_start)
+
+    async def _start_worker(self) -> asyncio.subprocess.Process:
+        try:
+            proc = await self._spawn_worker()
+        except BaseException as e:
+            self._worker_failed_at = time.monotonic()
+            self._worker_failure = str(e).splitlines()[0][:200] if str(e) else type(e).__name__
+            raise
+        self._worker_failed_at = None
+        self._worker_failure = None
+        self._worker_proc = proc
+        return proc
+
+    async def _spawn_worker(self) -> asyncio.subprocess.Process:
         musetalk_dir: Path = self._musetalk_dir  # type: ignore[assignment]
         worker_script = self._resolve_worker_script(musetalk_dir)
 
@@ -167,78 +237,148 @@ class AvatarAnimator:
         # that always ended in a timeout. File writes never block on a reader.
         self._worker_stderr_path = musetalk_dir / "worker_stderr.log"
         stderr_file = open(self._worker_stderr_path, "ab")
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(worker_script),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=stderr_file,
-            cwd=str(musetalk_dir),
-            env=self._worker_env,
-        )
-        stderr_file.close()  # child has its own fd now; safe to close our handle
-
-        # Send init config — include float16 flag so worker can optimise for GPU
-        init_msg = (
-            json.dumps(
-                {
-                    "unet_model_path": str(musetalk_dir / "models" / "musetalkV15" / "unet.pth"),
-                    "unet_config": str(musetalk_dir / "models" / "musetalkV15" / "musetalk.json"),
-                    "whisper_dir": str(musetalk_dir / "models" / "whisper"),
-                    "vae_type": str(musetalk_dir / "models" / "sd-vae"),
-                    "use_float16": self.use_float16,
-                    # Optional GFPGAN pass over each composited frame. The
-                    # worker loads it once and degrades to plain output if the
-                    # weights or the package are missing, so an unset or
-                    # half-finished install costs nothing.
-                    "face_restore": settings.FACE_RESTORE,
-                    "face_restore_model": str(
-                        Path(settings.FACE_RESTORE_MODEL)
-                        if Path(settings.FACE_RESTORE_MODEL).is_absolute()
-                        else musetalk_dir / settings.FACE_RESTORE_MODEL
-                    ),
-                }
-            )
-            + "\n"
-        )
-        proc.stdin.write(init_msg.encode())
-        await proc.stdin.drain()
-
-        # Wait for READY — GPU loads much faster (~60s) vs CPU (~5-10 min first time).
-        # Bumped from 120s: cold-cache disk I/O for ~8.8GB of weights (UNet, VAE,
-        # Whisper, BiSeNet) right after a fresh worker spawn was measured timing
-        # out at 120s on this machine even on GPU.
-        model_load_timeout = 300 if self.device == "cuda" else 600
-        logger.info(f"Waiting for worker to finish loading models (timeout={model_load_timeout}s)…")
         try:
-            ready_line = await asyncio.wait_for(proc.stdout.readline(), timeout=model_load_timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise RuntimeError("MuseTalk worker timed out while loading models")
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(worker_script),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=stderr_file,
+                cwd=str(musetalk_dir),
+                env=self._worker_env,
+            )
+        finally:
+            stderr_file.close()  # child has its own fd now; safe to close our handle
 
-        if not ready_line.decode().strip().startswith("READY"):
-            proc.kill()
-            stderr_out = self._worker_stderr_path.read_text(errors="replace")[-4000:]
-            raise RuntimeError(f"Worker failed to start. stderr (tail):\n{stderr_out}")
+        try:
+            # Send init config — include float16 flag so worker can optimise for GPU
+            init_msg = (
+                json.dumps(
+                    {
+                        "unet_model_path": str(
+                            musetalk_dir / "models" / "musetalkV15" / "unet.pth"
+                        ),
+                        "unet_config": str(
+                            musetalk_dir / "models" / "musetalkV15" / "musetalk.json"
+                        ),
+                        "whisper_dir": str(musetalk_dir / "models" / "whisper"),
+                        "vae_type": str(musetalk_dir / "models" / "sd-vae"),
+                        "use_float16": self.use_float16,
+                        # Optional GFPGAN pass over each composited frame. The
+                        # worker loads it once and degrades to plain output if the
+                        # weights or the package are missing, so an unset or
+                        # half-finished install costs nothing.
+                        "face_restore": settings.FACE_RESTORE,
+                        "face_restore_model": str(
+                            Path(settings.FACE_RESTORE_MODEL)
+                            if Path(settings.FACE_RESTORE_MODEL).is_absolute()
+                            else musetalk_dir / settings.FACE_RESTORE_MODEL
+                        ),
+                    }
+                )
+                + "\n"
+            )
+            proc.stdin.write(init_msg.encode())
+            await proc.stdin.drain()
+
+            # Wait for READY — GPU loads much faster (~60s) vs CPU (~5-10 min first
+            # time). Bumped from 120s: cold-cache disk I/O for ~8.8GB of weights
+            # (UNet, VAE, Whisper, BiSeNet) right after a fresh worker spawn was
+            # measured timing out at 120s on this machine even on GPU.
+            model_load_timeout = 300 if self.device == "cuda" else 600
+            logger.info(
+                f"Waiting for worker to finish loading models (timeout={model_load_timeout}s)…"
+            )
+            try:
+                await asyncio.wait_for(self._await_ready(proc), timeout=model_load_timeout)
+            except asyncio.TimeoutError:
+                raise RuntimeError("MuseTalk worker timed out while loading models") from None
+        except BaseException:
+            # Includes cancellation at shutdown: never leave the child behind.
+            if proc.returncode is None:
+                proc.kill()
+            raise
 
         logger.info("MuseTalk worker ready — models loaded")
-        self._worker_proc = proc
         return proc
+
+    async def _await_ready(self, proc: asyncio.subprocess.Process) -> None:
+        """
+        Read the worker's output until its READY line.
+
+        Tolerates other lines first. The worker now keeps library output off
+        this channel entirely, but an older copy of the script does not, and
+        treating the first line as the verdict is what made every start fail.
+        """
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                stderr_out = ""
+                if self._worker_stderr_path is not None:
+                    try:
+                        stderr_out = self._worker_stderr_path.read_text(errors="replace")[-4000:]
+                    except OSError:
+                        pass
+                raise RuntimeError(
+                    f"MuseTalk worker exited while loading models. stderr (tail):\n{stderr_out}"
+                )
+            if line.decode(errors="replace").strip() == "READY":
+                return
+
+    async def _read_result(self, proc: asyncio.subprocess.Process, job_id: str) -> dict:
+        """
+        Read lines until the result for `job_id`.
+
+        Anything else is skipped: a result carrying a different id belongs to
+        a job whose caller was cancelled while waiting (see _worker_infer),
+        and a line that is not JSON is stray output.
+        """
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                raise EOFError("worker closed its output")
+            try:
+                result = json.loads(line.decode(errors="replace").strip())
+            except ValueError:
+                continue
+            if not isinstance(result, dict) or "status" not in result:
+                continue
+            if result.get("id") != job_id:
+                logger.info("Discarding result of an abandoned MuseTalk job")
+                continue
+            return result
 
     async def _worker_infer(
         self, image_path: str, audio_path: str, output_path: str, coord_cache: Optional[str]
     ) -> str:
-        """Send one job to the persistent worker and await its result."""
+        """
+        Send one job to the persistent worker and await its result.
+
+        Cancellation-safe. If the caller is cancelled while waiting — the
+        user spoke over the avatar — the lock is released but the worker is
+        still computing, and its result arrives later. Results are matched to
+        jobs by id, so the next job discards that late line instead of taking
+        it for its own answer. (Before, one interruption left every later job
+        reading the previous job's result: it "succeeded" with no output file,
+        for every user, until the server was restarted.) The worker is also
+        told to drop the abandoned job, so the next one does not wait for it.
+        """
         async with self._worker_lock:
             proc = await self._ensure_worker()
 
+            job_id = uuid.uuid4().hex
+            # Creating this file tells the worker to drop the job — see
+            # _check_cancelled in musetalk_worker.py.
+            cancel_file = Path(f"{Path(output_path).resolve()}.cancel")
             job = (
                 json.dumps(
                     {
+                        "id": job_id,
                         "image": str(Path(image_path).resolve()),
                         "audio": str(Path(audio_path).resolve()),
                         "output": str(Path(output_path).resolve()),
                         "coord_cache": coord_cache,
+                        "cancel_file": str(cancel_file),
                     }
                 )
                 + "\n"
@@ -258,24 +398,73 @@ class AvatarAnimator:
             # GPU: expect ~5-15s per sentence; CPU: up to 5 min
             infer_timeout = 60 if self.device == "cuda" else 300
             try:
-                result_line = await asyncio.wait_for(proc.stdout.readline(), timeout=infer_timeout)
+                result = await asyncio.wait_for(
+                    self._read_result(proc, job_id), timeout=infer_timeout
+                )
+            except asyncio.CancelledError:
+                # Our caller is gone. Tell the worker to stop, so the next
+                # job is not queued behind work nobody will watch. The file
+                # is left for the worker to see; it lives in the session's
+                # temp directory and goes when that does.
+                try:
+                    cancel_file.touch()
+                except OSError:
+                    pass
+                raise
             except asyncio.TimeoutError:
                 proc.kill()
                 self._worker_proc = None
-                raise RuntimeError(f"MuseTalk inference timed out after {infer_timeout}s")
-
-            # Empty read == worker exited mid-job (EOF on stdout). Reset so the
-            # next call respawns instead of erroring on a half-dead process.
-            if not result_line:
+                raise RuntimeError(f"MuseTalk inference timed out after {infer_timeout}s") from None
+            except EOFError:
+                # Worker exited mid-job. Reset so the next call respawns
+                # instead of erroring on a half-dead process.
                 proc.kill()
                 self._worker_proc = None
-                raise RuntimeError("MuseTalk worker exited before returning a result")
+                raise RuntimeError("MuseTalk worker exited before returning a result") from None
 
-            result = json.loads(result_line.decode().strip())
             if result["status"] != "ok":
                 raise RuntimeError(result.get("msg", "Unknown worker error"))
+            if not Path(output_path).is_file():
+                raise RuntimeError("MuseTalk worker reported success but wrote no video")
 
             return output_path
+
+    async def warm(self) -> None:
+        """
+        Start the worker ahead of the first turn. Never raises.
+
+        Model loading takes a minute or more; without this the first person
+        to speak after a deploy waits for it. Only on a GPU — on CPU the
+        engine is unusably slow either way and a 10-minute load at startup
+        helps nobody.
+        """
+        try:
+            if not self._initialised:
+                await self.initialize()
+            if self.engine != "musetalk" or self.device != "cuda":
+                return
+            async with self._worker_lock:
+                await self._ensure_worker()
+        except Exception as e:
+            logger.warning(f"MuseTalk warm-up failed: {e}")
+
+    async def shutdown(self) -> None:
+        """Stop the worker process. Called at application shutdown."""
+        start = self._worker_start
+        if start is not None and not start.done():
+            start.cancel()
+            try:
+                await start
+            except BaseException:
+                pass
+        proc = self._worker_proc
+        self._worker_proc = None
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -304,7 +493,7 @@ class AvatarAnimator:
             else:
                 return await self._animate_simple(avatar_image_path, audio_path, output_path)
         except Exception as e:
-            logger.error(f"Animation failed ({self.engine}): {e}. Falling back to simple.")
+            logger.error(f"Animation failed ({self.engine}): {e!r}. Falling back to simple.")
             return await self._animate_simple(avatar_image_path, audio_path, output_path)
 
     # ── MuseTalk ──────────────────────────────────────────────────────────────
@@ -473,6 +662,13 @@ class AvatarAnimator:
             "libx264",
             "-tune",
             "stillimage",
+            # Encoding speed is the whole cost of this engine; the picture is
+            # one still frame, so the slower presets buy nothing.
+            "-preset",
+            "veryfast",
+            # Index at the front, so the browser can start before the last byte.
+            "-movflags",
+            "+faststart",
             "-c:a",
             "aac",
             "-b:a",
