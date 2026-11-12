@@ -1,10 +1,10 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Clock, MessageCircle, Trash2, Play, RefreshCw, Search, Loader2,
-  Download, Pencil, Check, X, Sparkles,
+  Download, Pencil, Check, X, Sparkles, CloudOff,
 } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
@@ -59,10 +59,11 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
   const [busy, setBusy] = useState<string | null>(null)
   const [summarizingId, setSummarizingId] = useState<string | null>(null)
 
-  const { data: sessions, isLoading, refetch } = useQuery<SessionSummary[]>({
+  const { data: sessions, isLoading, isError, refetch } = useQuery<SessionSummary[]>({
     queryKey: ['sessions'],
     queryFn: api.getSessions,
     refetchOnWindowFocus: false,
+    refetchInterval: 30_000,
   })
 
   const { data: avatars } = useQuery<Avatar[]>({
@@ -196,12 +197,6 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
     }
   }
 
-  // Periodically refresh
-  useEffect(() => {
-    const t = setInterval(() => refetch(), 30000)
-    return () => clearInterval(t)
-  }, [refetch])
-
   return (
     <div className="max-w-4xl mx-auto px-6 py-10 animate-fade-in">
       <div className="mb-8 flex items-start justify-between gap-4 flex-wrap">
@@ -228,7 +223,22 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
 
       {isLoading ? (
         <div className="flex items-center justify-center py-16">
-          <Loader2 size={28} className="animate-spin text-primary-400" />
+          <Loader2 size={28} className="animate-spin text-primary-600" />
+        </div>
+      ) : isError && !sessions ? (
+        // Distinguish "the request failed" from "you have no history".
+        <div className="card flex flex-col items-center justify-center gap-4 py-16 text-center" role="alert">
+          <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-error-600/20 bg-error-50">
+            <CloudOff size={28} className="text-error-600" aria-hidden="true" />
+          </div>
+          <div>
+            <p className="font-medium text-gray-900">Couldn&apos;t load your conversations</p>
+            <p className="mt-1 text-sm text-gray-500">The server didn&apos;t respond. Check that it is running, then retry.</p>
+          </div>
+          <button onClick={() => refetch()} className="btn-secondary">
+            <RefreshCw size={14} aria-hidden="true" />
+            Retry
+          </button>
         </div>
       ) : filtered.length === 0 ? (
         <div className="card flex flex-col items-center justify-center py-16 gap-4 text-center">
@@ -236,7 +246,7 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
             <MessageCircle size={28} className="text-gray-500" />
           </div>
           <div>
-            <p className="text-gray-900 font-medium">No conversations yet</p>
+            <p className="text-gray-900 font-medium">{query ? 'No matches' : 'No conversations yet'}</p>
             <p className="text-gray-500 text-sm mt-1">
               {query ? 'Nothing matches that search.' : 'Start a chat with an avatar to see it here.'}
             </p>
@@ -253,9 +263,9 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
             const isBusy = busy === s.id
             const title = convo?.title || av?.name || 'Untitled conversation'
             return (
-              <div key={s.id} className="card rounded-2xl overflow-hidden border border-gray-200">
-                <div className="flex items-center gap-4 px-5 py-4">
-                  <div className="w-12 h-12 rounded-xl overflow-hidden bg-gray-100 flex-shrink-0 flex items-center justify-center">
+              <div key={s.id} className="card overflow-hidden p-0">
+                <div className="flex flex-wrap items-center gap-4 px-5 py-4">
+                  <div className="w-12 h-12 rounded-xl overflow-hidden bg-gray-100 shrink-0 flex items-center justify-center">
                     {av?.thumbnail_url || av?.image_url ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
@@ -302,11 +312,11 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                     ) : (
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-semibold text-gray-900 truncate">{title}</span>
-                        <span className={`badge text-xs ${
+                        <span className={
  s.status === 'active' ? 'badge-green' :
  s.status === 'paused' ? 'badge-amber' :
  'badge-gray'
- }`}>
+ }>
                           {s.status}
                         </span>
                       </div>
@@ -320,11 +330,11 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                       <span className="font-mono">{s.id.slice(0, 8)}</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     {convo && !isRenaming && (
                       <button
                         onClick={() => handleStartRename(convo.id, s.id, convo.title)}
-                        className="btn-icon"
+                        className="btn-icon h-8 w-8"
                         title="Rename conversation"
                         aria-label="Rename conversation"
                       >
@@ -334,7 +344,7 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                     {convo && !isRenaming && (
                       <button
                         onClick={() => handleSummarize(convo.id)}
-                        className="btn-icon"
+                        className="btn-icon h-8 w-8"
                         title={convo.summary ? 'Regenerate AI summary' : 'Generate AI summary'}
                         aria-label="Summarize conversation with AI"
                         disabled={summarizingId === convo.id}
@@ -344,7 +354,7 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                     )}
                     <button
                       onClick={() => handleExport(s.id)}
-                      className="btn-icon"
+                      className="btn-icon h-8 w-8"
                       title="Export as JSON"
                       aria-label="Export conversation"
                       disabled={isBusy}
@@ -353,7 +363,7 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                     </button>
                     <button
                       onClick={() => toggleExpand(s.id)}
-                      className="btn-icon"
+                      className="btn-icon h-8 w-8"
                       title="Preview messages"
                       aria-label="Toggle message preview"
                       aria-expanded={isExpanded}
@@ -363,8 +373,9 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                     {av && (
                       <button
                         onClick={() => onResume(s.avatar_id, s.id)}
-                        className="btn-primary text-xs px-3 py-1.5 rounded-lg"
+                        className="btn-primary px-3 py-1.5 text-xs"
                         title="Open in chat"
+                        aria-label={`Open conversation ${title} in chat`}
                       >
                         <Play size={12} />
                         Open
@@ -372,7 +383,7 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                     )}
                     <button
                       onClick={() => handleDelete(s.id)}
-                      className="btn-icon text-gray-500 hover:text-error-600"
+                      className="btn-icon h-8 w-8 hover:text-error-700"
                       title="Delete conversation"
                       aria-label="Delete conversation"
                       disabled={isBusy}
@@ -383,16 +394,16 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                 </div>
 
                 {convo?.summary && !isExpanded && (
-                  <div className="border-t border-gray-200 px-5 py-3 bg-primary-500/5 flex items-start gap-2">
-                    <Sparkles size={12} className="text-primary-400 mt-0.5 flex-shrink-0" />
+                  <div className="flex items-start gap-2 border-t border-gray-200 bg-gray-50 px-5 py-3">
+                    <Sparkles size={12} className="text-primary-600 mt-0.5 shrink-0" />
                     <p className="text-xs text-gray-700 leading-relaxed">{convo.summary}</p>
                   </div>
                 )}
                 {isExpanded && (
                   <div className="border-t border-gray-200 px-5 py-4 bg-white">
                     {convo?.summary && (
-                      <div className="mb-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-primary-500/10 border border-primary-500/20">
-                        <Sparkles size={12} className="text-primary-400 mt-0.5 flex-shrink-0" />
+                      <div className="mb-3 flex items-start gap-2 rounded-md bg-gray-50 px-3 py-2 ring-1 ring-inset ring-gray-200">
+                        <Sparkles size={12} className="text-primary-600 mt-0.5 shrink-0" />
                         <p className="text-xs text-gray-700 leading-relaxed">{convo.summary}</p>
                       </div>
                     )}
@@ -404,8 +415,8 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                       <div className="space-y-2 max-h-72 overflow-y-auto messages-scroll">
                         {msgs.map((m) => (
                           <div key={m.id} className="flex gap-2 text-sm">
-                            <span className={`font-mono text-xs px-1.5 py-0.5 rounded ${
- m.role === 'user' ? 'bg-primary-700/40 text-primary-200' : 'bg-primary-700/40 text-primary-200'
+                            <span className={`h-fit rounded-xs px-1.5 py-0.5 font-mono text-xs ${
+ m.role === 'user' ? 'bg-ink text-white' : 'bg-primary-50 text-primary-700'
  }`}>
                               {m.role === 'user' ? 'YOU' : 'AI'}
                             </span>

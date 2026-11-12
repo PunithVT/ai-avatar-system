@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-interface User {
+export interface User {
   id: string
   email: string
   username: string
@@ -21,7 +21,15 @@ interface AppState {
   user: User | null
   setAuth: (token: string, user: User) => void
   clearAuth: () => void
-  isAuthenticated: () => boolean
+
+  /**
+   * False until the persisted state has been read back from localStorage.
+   * The store starts empty on every load (see `skipHydration` below), so
+   * "no token" before this flips means "not known yet", not "signed out" —
+   * rendering the sign-in gate on that basis flashed it at every signed-in
+   * user on every reload.
+   */
+  hasHydrated: boolean
 
   // Hands-free: mic stays open and turns are detected by voice activity
   // instead of tapping record. Persisted because it is a standing preference
@@ -29,45 +37,24 @@ interface AppState {
   handsFree: boolean
   setHandsFree: (on: boolean) => void
 
-  // Session
-  activeSessionId: string | null
-  selectedAvatarId: string | null
-  setActiveSession: (sessionId: string | null) => void
-  setSelectedAvatar: (avatarId: string | null) => void
-
-  // WebSocket
+  // Whether the chat's WebSocket is open (nav status badge).
   wsConnected: boolean
   setWsConnected: (connected: boolean) => void
 }
 
 export const useStore = create<AppState>()(
   persist(
-    (set, get) => ({
-      // Auth
+    (set) => ({
       token: null,
       user: null,
       setAuth: (token, user) => set({ token, user }),
-      clearAuth: () =>
-        set({
-          token: null,
-          user: null,
-          activeSessionId: null,
-          selectedAvatarId: null,
-        }),
-      isAuthenticated: () => get().token !== null,
+      clearAuth: () => set({ token: null, user: null }),
 
-      // Theme
+      hasHydrated: false,
+
       handsFree: false,
       setHandsFree: (on) => set({ handsFree: on }),
 
-
-      // Session
-      activeSessionId: null,
-      selectedAvatarId: null,
-      setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
-      setSelectedAvatar: (avatarId) => set({ selectedAvatarId: avatarId }),
-
-      // WebSocket
       wsConnected: false,
       setWsConnected: (connected) => set({ wsConnected: connected }),
     }),
@@ -75,19 +62,16 @@ export const useStore = create<AppState>()(
       name: 'avatar-system-storage',
       // Don't auto-rehydrate from localStorage during client module init —
       // that happens synchronously, BEFORE React's first client render, so
-      // if a persisted value (e.g. theme) differs from the default used in
-      // the server-rendered HTML, the client's first render mismatches it
-      // and React throws "Hydration failed". Rehydrating manually after
-      // mount (see Providers component) means the first client render
-      // matches the server, and the persisted value applies in a normal
-      // post-hydration update instead.
+      // if a persisted value differs from the default used in the
+      // server-rendered HTML, the client's first render mismatches it and
+      // React throws "Hydration failed". Rehydrating manually after mount
+      // (see QueryProvider) means the first client render matches the
+      // server, and the persisted value applies in a normal update instead.
       skipHydration: true,
       partialize: (state) => ({
         token: state.token,
         user: state.user,
         handsFree: state.handsFree,
-        selectedAvatarId: state.selectedAvatarId,
-        activeSessionId: state.activeSessionId,
       }),
     }
   )

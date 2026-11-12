@@ -12,7 +12,8 @@ on:
     branches: [main, develop]
 
 env:
-  PYTHON_VERSION: '3.10'
+  # Kept in step with backend/Dockerfile and backend/ruff.toml.
+  PYTHON_VERSION: '3.11'
   # next@16 requires Node >=20.9.0 — Node 18 fails the build outright.
   NODE_VERSION: '22'
 
@@ -193,6 +194,32 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+  # ── Frontend tests ──────────────────────────────────────────────────────
+  # The voice-activity detector, turn state, chunk queue and reconnect rules
+  # are pure logic with real edge cases; they had no tests and no runner.
+  frontend-test:
+    name: Frontend Tests
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
   # ── Frontend build ──────────────────────────────────────────────────────
   frontend-build:
     name: Frontend Build
@@ -227,7 +254,7 @@ jobs:
   # Runs only after lint passes; skipped jobs are treated as success.
   docker-build:
     name: Docker Build
-    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-typecheck]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-typecheck, frontend-test]
     if: |
       always() &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true') &&
@@ -325,17 +352,15 @@ jobs:
       # while letting the PR land.
       #
       # It cannot be made blocking yet, but the reason is now narrow: torch
-      # (23 advisories), transformers (45), diffusers (5) and accelerate (1)
+      # (24 advisories), transformers (45), diffusers (5) and accelerate (1)
       # only have fixes in releases the MuseTalk lip-sync pipeline cannot run
       # against — it needs the torch 2.2 / transformers 4.37 generation. A
       # green audit is unreachable until that pipeline is ported.
       #
-      # Every application dependency with a reachable fix has been upgraded:
-      # fastapi/starlette/pydantic, Pillow, boto3/aioboto3 (lifting the
-      # urllib3 cap), python-multipart, python-dotenv, python-socketio,
-      # requests, sentry-sdk, and PyJWT in place of python-jose (which pinned
-      # pyasn1 and ecdsa shut). Only click (capped by gTTS) and pytest
-      # (dev-only) remain outside the ML stack.
+      # Everything else is clear. Every application dependency with a
+      # reachable fix has been upgraded — most recently Pillow 13 and filelock
+      # (which needed the move to Python 3.11), PyJWT, pyasn1, tornado,
+      # dnspython and pytest.
       #
       # Make this blocking once the ML stack can move, so new advisories in
       # application dependencies fail the build.

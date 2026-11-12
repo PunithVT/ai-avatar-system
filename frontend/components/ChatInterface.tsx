@@ -1,580 +1,439 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
-import {
-  Send, Mic, MicOff, Video, Loader2, Volume2, VolumeX,
-  Sparkles, Clock, Copy, RotateCcw, Wand2,
-  MessageCircle, Zap, Activity, Download, Globe,
-  Pencil, Trash2, Check, X, Keyboard, Plug, Square, Radio,
-} from 'lucide-react'
-import { useMutation } from '@tanstack/react-query'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { Activity, Download, MessageCircle, Zap } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
-import { api, buildSessionWsUrl } from '@/lib/api'
-import { VoiceActivityDetector } from '@/lib/vad'
+import { api } from '@/lib/api'
 import { useStore } from '@/store/useStore'
-import type { Avatar, ChatMessage, WsMessage } from '@/lib/types'
-
-const WS_AUTH_REJECT_CODE = 4401  // matches backend close code for auth/ownership failure
-const MAX_WS_RECONNECT_ATTEMPTS = 6
-
-const CHAT_LANGUAGES = [
-  { code: 'en', label: 'EN' }, { code: 'es', label: 'ES' }, { code: 'fr', label: 'FR' },
-  { code: 'de', label: 'DE' }, { code: 'zh', label: 'ZH' }, { code: 'ja', label: 'JA' },
-  { code: 'pt', label: 'PT' }, { code: 'hi', label: 'HI' }, { code: 'it', label: 'IT' },
-  { code: 'ko', label: 'KO' },
-]
-
-interface Message {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  timestamp: Date
-  emotion?: string
-  // `persisted` means this message came back from the server (so it has a
-  // real DB id and supports edit/delete). Optimistic locally-created
-  // messages don't get the action menu until they're re-fetched.
-  persisted?: boolean
-}
-
-interface VideoChunk {
-  url: string
-  text: string
-}
+import { useChatSocket } from '@/hooks/useChatSocket'
+import { useChatSession } from '@/hooks/useChatSession'
+import { useChunkPlayer } from '@/hooks/useChunkPlayer'
+import { usePushToTalk } from '@/hooks/usePushToTalk'
+import { useHandsFree } from '@/hooks/useHandsFree'
+import { ReplyGate, initialTurnState, turnReducer } from '@/lib/chat/turnState'
+import {
+  EMOTION_CONFIG, detectEmotion, fromServer, liveMessage, reconcilePersisted, type Message,
+} from '@/lib/chat/messages'
+import { AvatarStage } from '@/components/chat/AvatarStage'
+import { MessageList } from '@/components/chat/MessageList'
+import { Composer } from '@/components/chat/Composer'
+import { ShortcutsDialog } from '@/components/chat/ShortcutsDialog'
+import type { Avatar, WsMessage } from '@/lib/types'
 
 interface ChatInterfaceProps {
   avatarId: string
-  voiceId?: string
   /** When set, resume this existing session (from history) instead of creating
    *  a fresh one — the backend rehydrates the prior messages on connect. */
   resumeSessionId?: string
-  onSessionCreated?: (sessionId: string) => void
+  /**
+   * Leave this conversation and begin a fresh one. Offered when the server
+   * reports that the session no longer exists (deleted from another tab).
+   */
+  onStartNew?: () => void
 }
 
-function detectEmotion(text: string): string {
-  const lower = text.toLowerCase()
-  if (/\b(haha|lol|funny|laugh|joke|hilarious)\b/.test(lower)) return 'happy'
-  if (/\b(angry|mad|furious|annoyed|hate)\b/.test(lower)) return 'angry'
-  if (/\b(sad|cry|miss|lonely|depressed|unhappy)\b/.test(lower)) return 'sad'
-  if (/\b(wow|amazing|awesome|incredible|fantastic|great)\b/.test(lower)) return 'excited'
-  if (/\b(think|wonder|curious|how|why|what|interesting)\b/.test(lower)) return 'curious'
-  return 'neutral'
+/** Rows re-fetched before the known end when pairing live messages with ids. */
+const RECONCILE_OVERLAP = 40
+
+function isTextField(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  const tag = el?.tagName?.toLowerCase()
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || Boolean(el?.isContentEditable)
 }
 
-const EMOTION_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
-  happy:   { label: '😄 Happy',   color: 'text-warning-600', bg: 'bg-warning-50 border-warning-600/30' },
-  angry:   { label: '😠 Angry',   color: 'text-error-600',    bg: 'bg-error-50 border-error-600/30' },
-  sad:     { label: '😢 Sad',     color: 'text-primary-600',   bg: 'bg-primary-50 border-primary-600/30' },
-  excited: { label: '🤩 Excited', color: 'text-primary-600', bg: 'bg-primary-50 border-primary-600/30' },
-  curious: { label: '🤔 Curious', color: 'text-primary-600',   bg: 'bg-primary-50 border-primary-600/30' },
-  neutral: { label: '😊 Neutral', color: 'text-gray-700',   bg: 'bg-gray-500/20 border-gray-500/30' },
-}
-
-// Deterministic per-bar heights — a static varied pattern instead of
-// Math.random() (which is impure in render and jitters on every re-render).
-// The CSS `waveform` animation supplies the live motion when `active`.
-const _WAVE_HEIGHTS = [10, 18, 8, 22, 14, 20, 6, 16]
-
-function WaveformBars({ active }: { active: boolean }) {
-  return (
-    <div className="flex items-center gap-0.5 h-6">
-      {Array.from({ length: 8 }).map((_, i) => (
-        <div
-          key={i}
-          className="w-1 rounded-full"
-          style={{
-            height: active ? `${_WAVE_HEIGHTS[i]}px` : '4px',
-            background: '#444ce7', // primary-600 — rule 4: flat, not a ramp
-            transition: 'height 0.15s ease',
-            animation: active ? 'waveform 1.2s ease-in-out infinite' : 'none',
-            animationDelay: `${i * 0.1}s`,
-          }}
-        />
-      ))}
-    </div>
-  )
-}
-
-function TypingIndicator() {
-  return (
-    <div className="flex items-end gap-3 animate-slide-up">
-      <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0">
-        <Sparkles size={14} className="text-gray-900" />
-      </div>
-      <div className="card px-4 py-3 rounded-2xl rounded-bl-sm">
-        <div className="flex items-center gap-1">
-          {[0, 0.2, 0.4].map((delay) => (
-            <div
-              key={delay}
-              className="w-1.5 h-1.5 rounded-full bg-primary-400 animate-bounce"
-              style={{ animationDelay: `${delay}s` }}
-            />
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Idle avatar: shows the avatar image with a breathing + glow animation
-function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
-  if (!imageUrl) {
-    return (
-      <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
-        <div className="w-20 h-20 rounded-full 
- flex items-center justify-center border border-gray-200 animate-pulse-slow">
-          <Video size={36} className="text-primary-400" />
-        </div>
-        <p className="text-gray-500 text-sm">Avatar video will appear here</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="absolute inset-0 flex items-center justify-center bg-gray-25">
-      {/* Avatar image with breathing scale */}
-      <img
-        src={imageUrl}
-        alt="Avatar idle"
-        className="relative z-10 w-full h-full object-cover"
-        style={{ borderRadius: '0.75rem' }}
-      />
-      {/* "Idle" indicator dot */}
-      <div className="absolute bottom-3 left-3 z-30 flex items-center gap-1.5 rounded-full
- border border-white/15 bg-ink/70 px-2.5 py-1 backdrop-blur-sm">
-        <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-success-500" />
-        {/* Rule 3: an 11px uppercase micro-label is a JetBrains Mono eyebrow. */}
-        <span className="font-mono text-eyebrow uppercase text-gray-25">Idle</span>
-      </div>
-    </div>
-  )
-}
-
-export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCreated }: ChatInterfaceProps) {
-  const setWsConnected = useStore((s) => s.setWsConnected)
+/**
+ * The live conversation view. This component only wires the pieces together;
+ * each concern has one owner:
+ *
+ *   useChatSession  — create / resume / end the session
+ *   useChatSocket   — the WebSocket and its reconnects
+ *   useChunkPlayer  — everything the avatar plays
+ *   usePushToTalk / useHandsFree — the microphone
+ *   turnReducer     — spinner, typing dots, streaming text, latency
+ */
+export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInterfaceProps) {
   const handsFree = useStore((s) => s.handsFree)
   const setHandsFree = useStore((s) => s.setHandsFree)
 
   const [messages, setMessages] = useState<Message[]>([])
   const [inputText, setInputText] = useState('')
-  const [isRecording, setIsRecording] = useState(false)
-  const [sessionId, setSessionId] = useState<string | null>(null)
-  const [ws, setWs] = useState<WebSocket | null>(null)
-  const [isProcessing, setIsProcessing] = useState(false)
-  const [isMuted, setIsMuted] = useState(false)
-  const [statusMsg, setStatusMsg] = useState('Almost ready…')
-  const [isTyping, setIsTyping] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
-  const [recordingLevel, setRecordingLevel] = useState(0)
-  const [avatarImageUrl, setAvatarImageUrl] = useState<string | null>(null)
-  // Streaming token accumulator — shown as a live bubble while LLM is generating
-  const [streamingContent, setStreamingContent] = useState('')
   const [language, setLanguage] = useState('en')
-  const [latencyMs, setLatencyMs] = useState<number | null>(null)
-
-  const sendTimeRef = useRef<number>(0)
-  const reconnectAttemptsRef = useRef(0)
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const sessionIdRef = useRef<string | null>(null)
-  // Same-value ref alongside the `ws` state: the unmount cleanup runs with
-  // the FIRST render's closure (deps []), where `ws` is still null — reading
-  // through a ref is the only way it sees the live socket.
-  const wsRef = useRef<WebSocket | null>(null)
-  // True only when THIS mount created the session — so we end it on unmount.
-  // A resumed session (opened from history) is left intact when the user leaves.
-  const createdHereRef = useRef(false)
-
-  // Edit/delete state. We track by message id (the persisted DB id) so the
-  // hover menu can drive the corresponding API call.
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
-  const [editDraft, setEditDraft] = useState('')
-
-  // Help/keyboard-shortcuts modal
   const [showShortcuts, setShowShortcuts] = useState(false)
-
-  // True when the reconnect loop has hit MAX_WS_RECONNECT_ATTEMPTS or the
-  // backend rejected the handshake. Surfaces a "Reconnect" button in the UI.
-  const [reconnectStalled, setReconnectStalled] = useState(false)
-
-  // Video playback state
-  const [showVideo, setShowVideo] = useState(false)           // true while a chunk is playing
-  const [currentChunkProgress, setCurrentChunkProgress] = useState({ current: 0, total: 0 })
-
-  // Chunk queue — managed via refs to avoid stale closures in event handlers
-  const chunkQueueRef = useRef<VideoChunk[]>([])
-  const isPlayingRef = useRef(false)
+  const [sessionFailed, setSessionFailed] = useState(false)
+  const [turn, dispatch] = useReducer(turnReducer, initialTurnState)
 
   const videoRef = useRef<HTMLVideoElement>(null)
-  // Hidden video element used to preload the next chunk while the current one plays
-  const preloadVideoRef = useRef<HTMLVideoElement>(null)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  const audioContextRef = useRef<AudioContext | null>(null)
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  // Hands-free holds its own mic/graph for the lifetime of the mode, rather
-  // than acquiring per turn: re-prompting getUserMedia on every utterance
-  // would be slow and would re-trigger the browser's permission UI.
-  const handsFreeStreamRef = useRef<MediaStream | null>(null)
-  const handsFreeCtxRef = useRef<AudioContext | null>(null)
-  const handsFreeAnimRef = useRef<number | null>(null)
-  const handsFreeRecorderRef = useRef<MediaRecorder | null>(null)
-  const vadRef = useRef<VoiceActivityDetector | null>(null)
-  // Bumped on every stop. getUserMedia can sit on a permission prompt for
-  // seconds; if hands-free is switched off in that window the resolved stream
-  // would otherwise be assigned after teardown and left running, keeping the
-  // mic live with nothing holding a reference to stop it.
-  const handsFreeGenRef = useRef(0)
-  // Set when a turn is abandoned as noise, so onstop discards it instead of
-  // shipping a fragment to STT.
-  const discardNextRef = useRef(false)
-  const levelAnimRef = useRef<number | null>(null)
+  const preloadRef = useRef<HTMLVideoElement>(null)
+  const player = useChunkPlayer(videoRef, preloadRef)
 
-  // ── Fetch avatar image on mount ──────────────────────────────────────────
-  useEffect(() => {
-    api.getAvatars()
-      .then((avatars: Avatar[]) => {
-        const av = avatars.find((a: Avatar) => a.id === avatarId)
-        if (av) {
-          setAvatarImageUrl(av.thumbnail_url || av.image_url || null)
-        } else {
-          toast.error('Could not load avatar image')
-        }
-      })
-      .catch(() => toast.error('Could not load avatar image'))
-  }, [avatarId])
+  // Mic level, written by the capture hooks and painted by the meter without
+  // passing through React state.
+  const levelRef = useRef(0)
+  const sessionIdRef = useRef<string | null>(null)
+  const languageRef = useRef('en')
+  const sendTimeRef = useRef(0)
+  // Synchronous mirror of turn.streamingContent, so the text streamed so far
+  // can be committed from an event handler without waiting for a render.
+  const streamingRef = useRef('')
+  // Chunks are only accepted between a `video_chunk_start` and the turn being
+  // stopped. A chunk already in flight when Stop is pressed would otherwise
+  // start playing a reply the user just cancelled.
+  const acceptChunksRef = useRef(false)
+  const firstChunkSeenRef = useRef(false)
+  // A new turn has been sent and its reply has not completed. The server's
+  // `interrupted` for the PREVIOUS turn arrives in this window and must not
+  // clear the new turn's spinner.
+  const awaitingReplyRef = useRef(false)
+  // Shut from the moment the user ends a reply until the server shows it has
+  // caught up — see ReplyGate. Keeps the old reply's in-flight tokens out of
+  // the transcript and out of the next reply.
+  const replyGateRef = useRef<ReplyGate | null>(null)
+  if (replyGateRef.current === null) replyGateRef.current = new ReplyGate()
+  const replyGate = replyGateRef.current
+  // How many of the session's rows the server is known to hold, so the
+  // post-turn id lookup can ask for the tail instead of the whole history.
+  const serverRowsRef = useRef(0)
 
-  // ── Chunk queue player ───────────────────────────────────────────────────
-  const playNextChunk = useCallback(() => {
-    const next = chunkQueueRef.current.shift()
-    if (!next) {
-      isPlayingRef.current = false
-      setShowVideo(false)
-      return
-    }
-    isPlayingRef.current = true
-    setShowVideo(true)
-    if (videoRef.current) {
-      const video = videoRef.current
-      video.src = next.url
-      // Always START muted — browsers always allow muted autoplay, even
-      // outside a user gesture. Starting unmuted gets silently rejected by
-      // Chrome/Edge once the LLM+TTS+animation pipeline (several seconds) has
-      // eaten the brief post-gesture window that permits unmuted autoplay —
-      // which would needlessly skip this clip via the catch below. Unmuting an
-      // element that's ALREADY playing needs no fresh gesture, so we restore
-      // the user's mute choice right after play() resolves.
-      video.muted = true
-      video.play()
-        .then(() => { video.muted = isMuted })
-        // A rejected play() (decode error, bad clip) must not strand the
-        // queue — skip to the next chunk so playback can't hang on one bad clip.
-        .catch(() => {
-          if (chunkQueueRef.current.length > 0) playNextChunk()
-          else { isPlayingRef.current = false; setShowVideo(false) }
-        })
-    }
-    // Preload the next chunk in queue (if any)
-    const upcoming = chunkQueueRef.current[0]
-    if (upcoming && preloadVideoRef.current) {
-      preloadVideoRef.current.src = upcoming.url
-    }
-  }, [isMuted])
-
-  // Attach ended + error handlers to the video element. The error handler is
-  // critical: a 404 / expired presigned URL / undecodable chunk fires `error`
-  // (not `ended`), so without this the whole reply hangs on one bad chunk.
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    const onEnded = () => playNextChunk()
-    const onError = () => {
-      if (chunkQueueRef.current.length > 0) playNextChunk()
-      else { isPlayingRef.current = false; setShowVideo(false) }
-    }
-    video.addEventListener('ended', onEnded)
-    video.addEventListener('error', onError)
-    return () => {
-      video.removeEventListener('ended', onEnded)
-      video.removeEventListener('error', onError)
-    }
-  }, [playNextChunk])
-
-  // Sync muted state to video element
-  useEffect(() => {
-    if (videoRef.current) videoRef.current.muted = isMuted
-  }, [isMuted])
-
-  // Auto-scroll chat
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [])
-  useEffect(scrollToBottom, [messages, isTyping, scrollToBottom])
-
-  // ── WebSocket ────────────────────────────────────────────────────────────
-  // Load a session's persisted messages into the transcript (used both on a
-  // fresh session — usually empty — and when resuming one from history).
-  const loadHistory = useCallback(async (sid: string) => {
-    try {
-      const prev = await api.getMessages(sid)
-      if (Array.isArray(prev) && prev.length > 0) {
-        setMessages(prev
-          .filter((m: ChatMessage) => m.role === 'user' || m.role === 'assistant')
-          .map((m: ChatMessage) => ({
-            id: m.id,
-            role: m.role as 'user' | 'assistant',
-            content: m.content,
-            timestamp: new Date(m.created_at),
-            emotion: detectEmotion(m.content),
-            persisted: true,
-          }))
-        )
-      }
-    } catch { /* ignore — history is non-critical */ }
-  }, [])
-
-  // Attach to an EXISTING session (resume from history). The backend
-  // rehydrates the LLM context on connect; we restore the visible transcript.
-  const adoptSession = useCallback((sid: string) => {
-    setSessionId(sid)
-    sessionIdRef.current = sid
-    createdHereRef.current = false
-    connectWebSocket(sid)
-    onSessionCreated?.(sid)
-    loadHistory(sid)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadHistory])
-
-  const createSessionMutation = useMutation({
-    mutationFn: () => api.createSession(avatarId),
-    onSuccess: async (data) => {
-      setSessionId(data.id)
-      sessionIdRef.current = data.id
-      createdHereRef.current = true
-      connectWebSocket(data.id)
-      onSessionCreated?.(data.id)
-      await loadHistory(data.id)
-    },
-    onError: () => {
-      toast.error('Failed to start session')
-      setConnectionStatus('disconnected')
-    },
+  // ── Avatar still ─────────────────────────────────────────────────────────
+  const { data: avatars, isError: avatarsFailed } = useQuery<Avatar[]>({
+    queryKey: ['avatars'],
+    queryFn: api.getAvatars,
   })
+  const avatar = avatars?.find((a) => a.id === avatarId)
+  const avatarImageUrl = avatar?.thumbnail_url || avatar?.image_url || null
+  useEffect(() => {
+    if (avatarsFailed) toast.error('Could not load avatar image')
+  }, [avatarsFailed])
 
-  const connectWebSocket = useCallback((sid: string) => {
-    const websocket = new WebSocket(buildSessionWsUrl(sid))
-    const wasFreshConnect = reconnectAttemptsRef.current === 0
+  // ── Ending a turn ────────────────────────────────────────────────────────
 
-    websocket.onopen = () => {
-      reconnectAttemptsRef.current = 0
-      setReconnectStalled(false)
-      setConnectionStatus('connected')
-      setWsConnected(true)
-      if (wasFreshConnect) {
-        toast.success('Connected to avatar!', { icon: '✨' })
+  /**
+   * Keep whatever the avatar had said so far as a (truncated) message. The
+   * server keeps the partial reply in history after an interrupt, so the
+   * transcript should too.
+   */
+  const commitPartialReply = useCallback(() => {
+    const partial = streamingRef.current.trim()
+    streamingRef.current = ''
+    if (partial) setMessages((prev) => [...prev, liveMessage('assistant', partial)])
+  }, [])
+
+  /** Stop the reply in flight: playback, queue, spinner. Safe to call twice. */
+  const endTurnLocally = useCallback(() => {
+    acceptChunksRef.current = false
+    player.stop()
+    commitPartialReply()
+    dispatch({ type: 'reset' })
+  }, [player, commitPartialReply])
+
+  // ── Persisted ids for live messages ──────────────────────────────────────
+  const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scheduleReconcile = useCallback(() => {
+    if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current)
+    reconcileTimerRef.current = setTimeout(async () => {
+      const sid = sessionIdRef.current
+      if (!sid) return
+      try {
+        // Only the tail: the rows being looked for are the newest ones. The
+        // margin re-covers recent rows in case an earlier lookup ran before
+        // the server had stored them.
+        let skip = Math.max(0, serverRowsRef.current - RECONCILE_OVERLAP)
+        let server = await api.getMessages(sid, skip)
+        if (server.length === 0 && skip > 0) {
+          // Fewer rows than expected (messages were deleted): start over.
+          skip = 0
+          server = await api.getMessages(sid, 0)
+        }
+        if (sessionIdRef.current !== sid) return
+        serverRowsRef.current = skip + server.length
+        setMessages((prev) => reconcilePersisted(prev, server))
+      } catch {
+        /* non-critical: messages simply stay without edit/delete for now */
       }
-      if (voiceId) {
-        websocket.send(JSON.stringify({ type: 'set_voice', voice_id: voiceId }))
-      }
-    }
-    websocket.onmessage = (event) => {
-      handleWebSocketMessage(JSON.parse(event.data))
-    }
-    websocket.onerror = () => {
-      setConnectionStatus('disconnected')
-      setWsConnected(false)
-    }
-    websocket.onclose = (event) => {
-      setConnectionStatus('disconnected')
-      setWsConnected(false)
+    }, 800)
+  }, [])
+  useEffect(() => () => {
+    if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current)
+  }, [])
 
-      // 4401 = backend rejected the handshake (no token, bad token, or not the
-      // session owner). No point reconnecting — surface a clear error instead.
-      if (event.code === WS_AUTH_REJECT_CODE) {
-        toast.error('Not authorised to join this session — please sign in again.')
-        setReconnectStalled(true)
-        return
-      }
+  // ── Server events ────────────────────────────────────────────────────────
+  const handleMessage = (data: WsMessage) => {
+    // Text from a reply the user has already stopped or talked over.
+    if (!replyGate.admit(data)) return
 
-      const sidNow = sessionIdRef.current
-      if (!sidNow) return
-      if (reconnectAttemptsRef.current >= MAX_WS_RECONNECT_ATTEMPTS) {
-        toast.error('Lost connection to avatar.')
-        setReconnectStalled(true)
-        return
-      }
-      const delay = Math.min(1000 * 2 ** reconnectAttemptsRef.current, 30000)
-      reconnectAttemptsRef.current += 1
-      reconnectTimerRef.current = setTimeout(() => connectWebSocket(sidNow), delay)
-    }
-
-    wsRef.current = websocket
-    setWs(websocket)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voiceId, setWsConnected])
-
-  const handleWebSocketMessage = useCallback((data: WsMessage) => {
     switch (data.type) {
-      // Live token stream — accumulate into a streaming bubble
       case 'token':
-        setStreamingContent(prev => prev + data.token)
-        setIsTyping(false)
+        streamingRef.current += data.token
+        dispatch({ type: 'token', token: data.token })
         break
 
-      case 'transcription': {
-        const text = data.text
-        setMessages(prev => [...prev, {
-          id: Date.now().toString(),
-          role: 'user',
-          content: text,
-          timestamp: new Date(),
-          emotion: detectEmotion(text),
-        }])
-        setStreamingContent('')
-        setIsTyping(true)
+      case 'transcription':
+        streamingRef.current = ''
+        setMessages((prev) => [...prev, liveMessage('user', data.text)])
+        dispatch({ type: 'transcription' })
         break
-      }
 
-      case 'message': {
-        const content = data.content
-        setStreamingContent('')
-        setIsTyping(false)
-        setMessages(prev => [...prev, {
-          id: Date.now().toString(),
-          role: 'assistant',
-          content,
-          timestamp: new Date(),
-          emotion: detectEmotion(content),
-        }])
-        // Keep isProcessing=true — spinner stays until first video chunk arrives
+      case 'message':
+        streamingRef.current = ''
+        setMessages((prev) => [...prev, liveMessage('assistant', data.content)])
+        dispatch({ type: 'assistant-message' })
         break
-      }
 
       case 'video_chunk_start':
-        chunkQueueRef.current = []
-        setCurrentChunkProgress({ current: 0, total: data.total_chunks })
+        acceptChunksRef.current = true
         break
 
       case 'video_chunk': {
-        const chunk: VideoChunk = { url: data.video_url, text: data.text }
-        chunkQueueRef.current.push(chunk)
-        setCurrentChunkProgress(prev => ({ current: data.chunk_index + 1, total: prev.total }))
-        // First chunk arriving → record latency, clear spinner, start playback
-        if (!isPlayingRef.current) {
-          if (sendTimeRef.current) setLatencyMs(Date.now() - sendTimeRef.current)
-          setIsProcessing(false)
-          playNextChunk()
-        } else {
-          // Already playing — preload this incoming chunk
-          const upcoming = chunkQueueRef.current[0]
-          if (upcoming && preloadVideoRef.current && preloadVideoRef.current.src !== upcoming.url) {
-            preloadVideoRef.current.src = upcoming.url
-          }
+        if (!acceptChunksRef.current) break
+        const startedPlayback = player.enqueue(data.video_url)
+        if (startedPlayback) {
+          const first = !firstChunkSeenRef.current
+          firstChunkSeenRef.current = true
+          dispatch({
+            type: 'first-chunk',
+            latencyMs: first && sendTimeRef.current ? Date.now() - sendTimeRef.current : turn.latencyMs,
+          })
         }
         break
       }
 
       case 'video_chunk_end':
-        // If nothing ever played (all chunks failed), clear spinner
-        if (!isPlayingRef.current) setIsProcessing(false)
+        awaitingReplyRef.current = false
+        // Zero chunks (every one failed, or no avatar image) means nothing
+        // will ever start playing — this is what releases the spinner.
+        dispatch({ type: 'chunks-end', playing: player.isActive() })
+        scheduleReconcile()
         break
 
       case 'status':
-        // The backend sends an "Animating…" status before EVERY sentence
-        // chunk, not just the first. Once a chunk has already started playing,
-        // re-showing the full-screen spinner on every subsequent chunk just
-        // covers the video that's still going — the user sees the spinner
-        // "stuck" and never the avatar. Only block the view pre-first-chunk.
-        if (!isPlayingRef.current) {
-          setIsProcessing(true)
-          setStatusMsg(data.message || 'Processing…')
-        }
+        dispatch({ type: 'status', message: data.message, playing: player.isActive() })
         break
 
       case 'error':
+        awaitingReplyRef.current = false
         toast.error(data.message)
-        setIsProcessing(false)
-        setIsTyping(false)
+        commitPartialReply()
+        dispatch({ type: 'error' })
         break
 
       case 'tts_fallback':
-        // Emitted once per turn when Chatterbox fails and we fell back to
-        // gTTS — voice cloning is silently lost in that case, so warn the
-        // user so they know the avatar's voice isn't what they expect.
+        // Voice cloning was silently lost for this reply — say so, once.
         toast(data.message, { icon: '⚠️', duration: 5000 })
         break
 
       case 'interrupted':
-        // Backend cancelled the previous turn because the user spoke again
-        // (barge-in). Stop playback, clear the buffer, and let the new turn
-        // start cleanly. We don't show a toast — barge-in should be silent.
-        chunkQueueRef.current = []
-        isPlayingRef.current = false
-        setShowVideo(false)
-        if (videoRef.current) {
-          videoRef.current.pause()
-          videoRef.current.src = ''
+        // The server cancelled a turn. If we have already sent the next one,
+        // this is about the previous turn: stop its playback and keep its
+        // partial text, but leave the new turn's spinner alone.
+        if (awaitingReplyRef.current) {
+          player.stop()
+          commitPartialReply()
+        } else {
+          endTurnLocally()
         }
-        setIsProcessing(false)
-        setIsTyping(false)
-        setStreamingContent('')
         break
 
       case 'pong':
+      case 'ping':
+      case 'ready':
         break
     }
-  }, [playNextChunk])
+  }
 
-  const sendMessage = () => {
-    if (!inputText.trim() || !ws || !sessionId) return
-    if (ws.readyState !== WebSocket.OPEN) {
-      // send() on a CONNECTING socket throws; on CLOSED it silently drops.
+  const socket = useChatSocket({
+    onMessage: handleMessage,
+    // The server resets language to English on every connect, so a reconnect
+    // would silently switch a Spanish conversation's STT and TTS back.
+    onOpen: (send) => {
+      send({ type: 'set_language', language: languageRef.current })
+    },
+    // The server cancels the turn when the socket drops and nothing is
+    // resent, so a spinner left up here would never clear. Clips already
+    // delivered keep playing — they are plain URLs and still valid.
+    onDrop: () => {
+      awaitingReplyRef.current = false
+      replyGate.reset()
+      commitPartialReply()
+      dispatch({ type: 'reset' })
+    },
+  })
+
+  // ── Session ──────────────────────────────────────────────────────────────
+  const sessionId = useChatSession({
+    avatarId,
+    resumeSessionId,
+    onReady: (sid) => {
+      sessionIdRef.current = sid
+      socket.connect(sid)
+      // Restore the visible transcript (empty for a fresh session).
+      api.getMessages(sid)
+        .then((prev) => {
+          if (sessionIdRef.current !== sid) return
+          serverRowsRef.current = prev.length
+          setMessages((current) => (current.length > 0 ? reconcilePersisted(current, prev) : fromServer(prev)))
+        })
+        .catch(() => { /* history is non-critical */ })
+    },
+    onFailed: () => {
+      setSessionFailed(true)
+      toast.error('Failed to start session')
+    },
+    onTeardown: () => {
+      sessionIdRef.current = null
+      socket.disconnect()
+    },
+  })
+
+  // ── Sending ──────────────────────────────────────────────────────────────
+
+  /** Common to typed and spoken turns: clear the stage for the new reply. */
+  const beginTurn = () => {
+    // Stop, not just hide: hiding the element left the previous sentence's
+    // audio playing under the idle image.
+    acceptChunksRef.current = false
+    player.stop()
+    commitPartialReply()
+    replyGate.close()
+    firstChunkSeenRef.current = false
+    awaitingReplyRef.current = true
+    sendTimeRef.current = Date.now()
+  }
+
+  const sendText = () => {
+    const text = inputText.trim()
+    if (!text || !sessionId) return
+    // The trimmed text, for both: the server stores it stripped, and the
+    // bubble has to match what was stored or it can never be paired with its
+    // database row (which is what gives it Edit and Delete).
+    if (!socket.send({ type: 'text', text })) {
       toast.error('Not connected to the avatar yet — try again in a moment.')
       return
     }
-    const emotion = detectEmotion(inputText)
-    ws.send(JSON.stringify({ type: 'text', text: inputText }))
-    setMessages(prev => [...prev, {
-      id: Date.now().toString(),
-      role: 'user',
-      content: inputText,
-      timestamp: new Date(),
-      emotion,
-    }])
+    beginTurn()
+    setMessages((prev) => [...prev, liveMessage('user', text)])
     setInputText('')
-    setStreamingContent('')
-    setIsProcessing(true)
-    setIsTyping(true)
-    setLatencyMs(null)
-    sendTimeRef.current = Date.now()
-    chunkQueueRef.current = []
-    isPlayingRef.current = false
-    setShowVideo(false)
+    dispatch({ type: 'text-sent' })
   }
 
-  // Barge-in: tell the backend to cancel the in-flight turn and stop playback
-  // locally right away (don't wait for the round-trip `interrupted` event).
-  const stopGeneration = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'stop' }))
+  /**
+   * Ship a captured utterance. Shared by push-to-talk and hands-free so the
+   * two cannot drift on what "sending a turn" means.
+   */
+  const sendAudioBlob = (blob: Blob) => {
+    if (blob.size === 0) return
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      const base64 = typeof reader.result === 'string' ? reader.result.split(',')[1] : ''
+      if (!base64) return
+      if (!socket.send({ type: 'audio', audio: base64 })) {
+        // Previously dropped without a word, so the user waited on a reply
+        // that was never requested.
+        toast.error('Not connected — your recording was not sent.')
+        return
+      }
+      beginTurn()
+      dispatch({ type: 'audio-sent' })
     }
-    chunkQueueRef.current = []
-    isPlayingRef.current = false
-    setShowVideo(false)
-    if (videoRef.current) {
-      videoRef.current.pause()
-      videoRef.current.src = ''
-    }
-    setIsProcessing(false)
-    setIsTyping(false)
-    setStreamingContent('')
+    reader.readAsDataURL(blob)
   }
+
+  const stopGeneration = () => {
+    socket.send({ type: 'stop' })
+    awaitingReplyRef.current = false
+    endTurnLocally()
+    replyGate.close()
+  }
+
+  const changeLanguage = (code: string) => {
+    setLanguage(code)
+    languageRef.current = code
+    socket.send({ type: 'set_language', language: code })
+  }
+
+  // ── Microphone ───────────────────────────────────────────────────────────
+  const pushToTalk = usePushToTalk({ onBlob: sendAudioBlob, levelRef })
+  const handsFreeMic = useHandsFree({
+    enabled: handsFree,
+    onBlob: sendAudioBlob,
+    // Only called once the detector has confirmed real speech. Cutting the
+    // avatar off on the first loud frame meant a cough cancelled the reply.
+    onBargeIn: () => {
+      if (!player.isActive()) return
+      socket.send({ type: 'interrupt' })
+      awaitingReplyRef.current = false
+      endTurnLocally()
+      replyGate.close()
+    },
+    isOutputActive: player.isActive,
+    onFailed: () => setHandsFree(false),
+    levelRef,
+  })
+  const isRecording = pushToTalk.isRecording || handsFreeMic.isCapturing
+
+  // ── Transcript actions ───────────────────────────────────────────────────
+  const copyMessage = useCallback((content: string) => {
+    navigator.clipboard?.writeText(content).then(
+      () => toast.success('Copied!', { duration: 1500 }),
+      () => toast.error('Could not copy'),
+    )
+  }, [])
+
+  // Both edit and delete update optimistically and, on failure, undo ONLY
+  // their own change. Restoring a snapshot of the whole list would discard
+  // every message that arrived while the request was in flight.
+  const saveEditMessage = useCallback(async (id: string, next: string) => {
+    let previous: string | null = null
+    setMessages((prev) => prev.map((m) => {
+      if (m.id !== id) return m
+      previous = m.content
+      return { ...m, content: next, emotion: detectEmotion(next) }
+    }))
+    try {
+      await api.editMessage(id, next)
+      toast.success('Message updated', { duration: 1500 })
+    } catch {
+      const restore = previous
+      if (restore !== null) {
+        setMessages((prev) => prev.map((m) => (
+          m.id === id ? { ...m, content: restore, emotion: detectEmotion(restore) } : m
+        )))
+      }
+      toast.error('Could not update message')
+    }
+  }, [])
+
+  const deleteMessage = useCallback(async (id: string) => {
+    if (!window.confirm('Delete this message?')) return
+    let removed: { message: Message; index: number } | null = null
+    setMessages((prev) => {
+      const index = prev.findIndex((m) => m.id === id)
+      if (index === -1) return prev
+      removed = { message: prev[index], index }
+      return prev.filter((m) => m.id !== id)
+    })
+    try {
+      await api.deleteMessage(id)
+      toast.success('Message deleted', { duration: 1500 })
+    } catch {
+      const undo = removed as { message: Message; index: number } | null
+      if (undo) {
+        setMessages((prev) => {
+          const next = [...prev]
+          next.splice(Math.min(undo.index, next.length), 0, undo.message)
+          return next
+        })
+      }
+      toast.error('Could not delete message')
+    }
+  }, [])
 
   const exportConversation = () => {
     if (messages.length === 0) return
-    const lines = messages.map(m =>
-      `[${new Date(m.timestamp).toLocaleTimeString()}] ${m.role === 'user' ? 'You' : 'Avatar'}: ${m.content}`
+    const lines = messages.map((m) =>
+      `[${m.timestamp.toLocaleTimeString()}] ${m.role === 'user' ? 'You' : 'Avatar'}: ${m.content}`,
     )
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
+    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/plain' }))
     const a = document.createElement('a')
     a.href = url
     a.download = `conversation-${new Date().toISOString().slice(0, 10)}.txt`
@@ -583,511 +442,100 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
     toast.success('Conversation exported')
   }
 
-  const changeLanguage = (lang: string) => {
-    setLanguage(lang)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'set_language', language: lang }))
-    }
-  }
-
-  /**
-   * Ship a captured utterance to the backend. Shared by push-to-talk and
-   * hands-free so the two cannot drift on what "sending a turn" means.
-   */
-  const sendAudioBlob = (audioBlob: Blob) => {
-    const reader = new FileReader()
-    reader.onloadend = () => {
-      const base64Audio = (reader.result as string).split(',')[1]
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        setLatencyMs(null)
-        sendTimeRef.current = Date.now()
-        wsRef.current.send(JSON.stringify({ type: 'audio', audio: base64Audio }))
-        setIsProcessing(true)
-        chunkQueueRef.current = []
-        isPlayingRef.current = false
-        setShowVideo(false)
-      }
-    }
-    reader.readAsDataURL(audioBlob)
-  }
-
-  // Echo cancellation is what makes hands-free viable at all: without it the
-  // open mic hears the avatar's own reply through the speakers, the detector
-  // treats it as speech, and the session talks to itself in a loop. Useful
-  // for push-to-talk too, where it keeps barge-in from capturing the reply.
-  const MIC_CONSTRAINTS: MediaStreamConstraints = {
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  }
-
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
-      const audioCtx = new AudioContext()
-      const analyser = audioCtx.createAnalyser()
-      analyser.fftSize = 256
-      audioCtx.createMediaStreamSource(stream).connect(analyser)
-      audioContextRef.current = audioCtx
-      analyserRef.current = analyser
-
-      const updateLevel = () => {
-        const data = new Uint8Array(analyser.frequencyBinCount)
-        analyser.getByteFrequencyData(data)
-        setRecordingLevel(Math.min(100, (data.reduce((a, b) => a + b, 0) / data.length) * 2))
-        levelAnimRef.current = requestAnimationFrame(updateLevel)
-      }
-      updateLevel()
-
-      const mediaRecorder = new MediaRecorder(stream)
-      const audioChunks: Blob[] = []
-      mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data)
-      mediaRecorder.onstop = async () => {
-        cancelAnimationFrame(levelAnimRef.current!)
-        setRecordingLevel(0)
-        audioCtx.close()
-        sendAudioBlob(new Blob(audioChunks, { type: 'audio/webm' }))
-        stream.getTracks().forEach(t => t.stop())
-      }
-      mediaRecorder.start()
-      mediaRecorderRef.current = mediaRecorder
-      setIsRecording(true)
-    } catch {
-      toast.error('Failed to access microphone')
-    }
-  }
-
-  // ── hands-free ──────────────────────────────────────────────────────────
-
-  const stopHandsFree = useCallback(() => {
-    handsFreeGenRef.current += 1
-    if (handsFreeAnimRef.current !== null) {
-      cancelAnimationFrame(handsFreeAnimRef.current)
-      handsFreeAnimRef.current = null
-    }
-    // Discard rather than send: switching the mode off mid-utterance means
-    // the user is leaving, not finishing a thought.
-    if (handsFreeRecorderRef.current?.state === 'recording') {
-      discardNextRef.current = true
-      handsFreeRecorderRef.current.stop()
-    }
-    handsFreeRecorderRef.current = null
-    handsFreeStreamRef.current?.getTracks().forEach(t => t.stop())
-    handsFreeStreamRef.current = null
-    if (handsFreeCtxRef.current && handsFreeCtxRef.current.state !== 'closed') {
-      handsFreeCtxRef.current.close().catch(() => {})
-    }
-    handsFreeCtxRef.current = null
-    vadRef.current = null
-    setIsRecording(false)
-    setRecordingLevel(0)
-  }, [])
-
-  const startHandsFree = useCallback(async () => {
-    const gen = handsFreeGenRef.current
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
-      if (gen !== handsFreeGenRef.current) {
-        // Switched off while the permission prompt was up — release the mic
-        // we were just granted and leave.
-        stream.getTracks().forEach(t => t.stop())
-        return
-      }
-      const audioCtx = new AudioContext()
-      const analyser = audioCtx.createAnalyser()
-      analyser.fftSize = 256
-      audioCtx.createMediaStreamSource(stream).connect(analyser)
-
-      handsFreeStreamRef.current = stream
-      handsFreeCtxRef.current = audioCtx
-      vadRef.current = new VoiceActivityDetector()
-
-      const data = new Uint8Array(analyser.frequencyBinCount)
-
-      const beginTurn = () => {
-        // Barge-in: speaking over the avatar cuts it off. The backend already
-        // understands "interrupt"; hands-free is just another way to trigger it.
-        if (isPlayingRef.current || chunkQueueRef.current.length > 0) {
-          wsRef.current?.send(JSON.stringify({ type: 'interrupt' }))
-          chunkQueueRef.current = []
-          isPlayingRef.current = false
-          setShowVideo(false)
-        }
-        const chunks: Blob[] = []
-        const rec = new MediaRecorder(stream)
-        rec.ondataavailable = (e) => chunks.push(e.data)
-        rec.onstop = () => {
-          const discard = discardNextRef.current
-          discardNextRef.current = false
-          if (!discard) sendAudioBlob(new Blob(chunks, { type: 'audio/webm' }))
-        }
-        rec.start()
-        handsFreeRecorderRef.current = rec
-        setIsRecording(true)
-      }
-
-      const endTurn = (discard: boolean) => {
-        discardNextRef.current = discard
-        if (handsFreeRecorderRef.current?.state === 'recording') {
-          handsFreeRecorderRef.current.stop()
-        }
-        handsFreeRecorderRef.current = null
-        setIsRecording(false)
-      }
-
-      const tick = () => {
-        const vad = vadRef.current
-        if (!vad || gen !== handsFreeGenRef.current) return
-        analyser.getByteFrequencyData(data)
-        const level = Math.min(100, (data.reduce((a, b) => a + b, 0) / data.length) * 2)
-        setRecordingLevel(vad.isSpeaking ? level : 0)
-
-        switch (vad.push(level, performance.now())) {
-          case 'speech-start':
-            beginTurn()
-            break
-          case 'speech-end':
-            endTurn(false)
-            break
-          case 'speech-abort':
-            endTurn(true)
-            break
-        }
-        handsFreeAnimRef.current = requestAnimationFrame(tick)
-      }
-      tick()
-    } catch {
-      if (gen === handsFreeGenRef.current) {
-        toast.error('Failed to access microphone')
-        setHandsFree(false)
-      }
-    }
-  // sendAudioBlob and MIC_CONSTRAINTS are stable for the component's life;
-  // including them would re-acquire the mic on every render.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setHandsFree])
-
-  useEffect(() => {
-    if (handsFree) startHandsFree()
-    else stopHandsFree()
-    return stopHandsFree
-  }, [handsFree, startHandsFree, stopHandsFree])
-
-  const stopRecording = () => {
-    mediaRecorderRef.current?.stop()
-    setIsRecording(false)
-  }
-
-  const resetVideo = () => {
-    chunkQueueRef.current = []
-    isPlayingRef.current = false
-    setShowVideo(false)
-    if (videoRef.current) videoRef.current.src = ''
-  }
-
-  const copyMessage = (content: string) => {
-    navigator.clipboard.writeText(content)
-    toast.success('Copied!', { duration: 1500 })
-  }
-
-  const startEditMessage = (m: Message) => {
-    setEditingMessageId(m.id)
-    setEditDraft(m.content)
-  }
-
-  const cancelEditMessage = () => {
-    setEditingMessageId(null)
-    setEditDraft('')
-  }
-
-  const saveEditMessage = async (id: string) => {
-    const next = editDraft.trim()
-    if (!next) {
-      toast.error('Message cannot be empty')
-      return
-    }
-    // Optimistic update — revert if the backend rejects
-    const previous = messages
-    setMessages(prev => prev.map(m => m.id === id ? { ...m, content: next, emotion: detectEmotion(next) } : m))
-    setEditingMessageId(null)
-    setEditDraft('')
-    try {
-      await api.editMessage(id, next)
-      toast.success('Message updated', { duration: 1500 })
-    } catch {
-      setMessages(previous)
-      toast.error('Could not update message')
-    }
-  }
-
-  const deleteMessage = async (id: string) => {
-    if (!window.confirm('Delete this message?')) return
-    const previous = messages
-    setMessages(prev => prev.filter(m => m.id !== id))
-    try {
-      await api.deleteMessage(id)
-      toast.success('Message deleted', { duration: 1500 })
-    } catch {
-      setMessages(previous)
-      toast.error('Could not delete message')
-    }
-  }
-
-  /** Force an immediate reconnect, cancelling any pending backoff timer. */
-  const manualReconnect = useCallback(() => {
-    const sid = sessionIdRef.current
-    if (!sid) return
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current)
-      reconnectTimerRef.current = null
-    }
-    reconnectAttemptsRef.current = 0
-    setReconnectStalled(false)
-    setConnectionStatus('connecting')
-    connectWebSocket(sid)
-  }, [connectWebSocket])
-
-  // Global keyboard shortcuts — only active while the chat view is mounted.
+  // ── Keyboard shortcuts (only while the chat view is mounted) ─────────────
+  const { muted, setMuted } = player
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // ? opens the shortcut cheat-sheet (matches GitHub / Linear convention)
+      // Never steal keys from someone typing: Ctrl+E is end-of-line in a
+      // macOS text field, and "?" is just a question mark.
+      if (isTextField(e.target)) return
       if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        // Don't intercept when typing into an input/textarea
-        const t = e.target as HTMLElement | null
-        const tag = t?.tagName?.toLowerCase()
-        if (tag === 'input' || tag === 'textarea' || t?.isContentEditable) return
         e.preventDefault()
-        setShowShortcuts(s => !s)
-        return
-      }
-      // Esc dismisses the modal
-      if (e.key === 'Escape' && showShortcuts) {
-        setShowShortcuts(false)
-      }
-      // Cmd/Ctrl+E toggles mute
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'e') {
+        setShowShortcuts((open) => !open)
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'e') {
         e.preventDefault()
-        setIsMuted(m => !m)
+        setMuted(!muted)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [showShortcuts])
+  }, [muted, setMuted])
 
-  useEffect(() => {
-    // Resume an existing conversation if asked (history "Open"), otherwise
-    // create a fresh session.
-    if (resumeSessionId) {
-      adoptSession(resumeSessionId)
-    } else {
-      createSessionMutation.mutate()
-    }
-    return () => {
-      // Cancel any pending reconnect
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
-      // Read the session id BEFORE nulling the ref (which stops the
-      // reconnect loop). Don't use the `sessionId`/`ws` state here: this
-      // cleanup closes over the first render where both were still null,
-      // which used to leak the open socket and never end created sessions.
-      const sid = sessionIdRef.current
-      sessionIdRef.current = null
-      wsRef.current?.close()
-      wsRef.current = null
-      setWsConnected(false)
+  const closeShortcuts = useCallback(() => setShowShortcuts(false), [])
 
-      // Release media resources so navigating away mid-playback/recording
-      // doesn't leak: a still-playing <video>, an open AudioContext, and a
-      // running rAF loop all survive unmount otherwise.
-      //
-      // Reading videoRef.current HERE is deliberate. The lint rule wants the
-      // element captured in the effect body instead, but this effect runs
-      // once on mount with an empty dep array — at that point the <video> has
-      // not rendered yet and the ref still holds null, so capturing early
-      // would release nothing. On unmount we want whatever element is live.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      const video = videoRef.current
-      if (video) { video.pause(); video.removeAttribute('src'); video.load() }
-      if (levelAnimRef.current !== null) cancelAnimationFrame(levelAnimRef.current)
-      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-        audioContextRef.current.close().catch(() => {})
-      }
+  // ── Render ───────────────────────────────────────────────────────────────
+  const isBusy = turn.isProcessing || player.isPlaying
+  const lastMessage = messages[messages.length - 1]
+  const lastEmotion = EMOTION_CONFIG[lastMessage?.emotion || 'neutral'] ?? EMOTION_CONFIG.neutral
+  const connectionStatus = sessionFailed ? 'disconnected' : socket.status
 
-      // Only end sessions WE created — leaving a resumed conversation should
-      // not mark the user's existing session as ended.
-      if (sid && createdHereRef.current) api.endSession(sid).catch(() => {})
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const isSpeaking = showVideo && !isProcessing
+  // What a screen reader hears. One polite region carrying the current state
+  // — announcing every streamed token would be unusable, so the reply is
+  // read once, when it is complete.
+  const announcement = connectionStatus !== 'connected'
+    ? `Connection ${connectionStatus}`
+    : turn.isProcessing
+      ? turn.statusMsg
+      : lastMessage?.role === 'assistant'
+        ? `Avatar: ${lastMessage.content}`
+        : ''
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 h-[calc(100vh-10rem)]">
-      {/* ── Video Panel ─────────────────────────────────────────────────── */}
-      <div className="lg:col-span-3 flex flex-col gap-4">
-        <div className="card flex-1 relative overflow-hidden rounded-2xl group">
-          {/* Neon border when speaking */}
-          {isSpeaking && (
-            <div className="absolute inset-0 rounded-2xl neon-border pointer-events-none z-10 animate-glow" />
-          )}
+    <div className="grid grid-cols-1 gap-6 lg:h-[calc(100dvh-14rem)] lg:min-h-[32rem] lg:grid-cols-5">
+      <div className="sr-only" role="status" aria-live="polite">{announcement}</div>
 
-          {/* Main display area */}
-          <div className="aspect-video w-full bg-gray-25 rounded-xl overflow-hidden relative">
+      {/* ── Avatar ── */}
+      <div className="flex flex-col gap-4 lg:col-span-3">
+        <AvatarStage
+          videoRef={videoRef}
+          preloadRef={preloadRef}
+          avatarImageUrl={avatarImageUrl}
+          showVideo={player.isPlaying}
+          isProcessing={turn.isProcessing}
+          statusMsg={turn.statusMsg}
+          connectionStatus={connectionStatus}
+          stalled={socket.stalled}
+          onReconnect={socket.reconnect}
+          onStartNew={onStartNew}
+          audioBlocked={player.audioBlocked}
+          onEnableAudio={() => setMuted(false)}
+          language={language}
+          onLanguageChange={changeLanguage}
+          muted={muted}
+          onToggleMute={() => setMuted(!muted)}
+          onShowShortcuts={() => setShowShortcuts(true)}
+        />
 
-            {/* ── Idle avatar (always mounted, hidden when video plays) ── */}
-            <div
-              className="absolute inset-0 transition-opacity duration-500"
-              style={{ opacity: showVideo ? 0 : 1, zIndex: showVideo ? 0 : 5 }}
-            >
-              <IdleAvatar imageUrl={avatarImageUrl} />
-            </div>
-
-            {/* ── Video element (mounted always; shown only when playing) ── */}
-            <video
-              ref={videoRef}
-              className="absolute inset-0 w-full h-full object-cover transition-opacity duration-500"
-              style={{ opacity: showVideo ? 1 : 0, zIndex: showVideo ? 5 : 0 }}
-              autoPlay
-              playsInline
-              muted={isMuted}
-            />
-            {/* Hidden preload video — buffers the next chunk while current plays */}
-            <video ref={preloadVideoRef} className="hidden" preload="auto" muted />
-
-            {/* ── Processing overlay ── */}
-            {isProcessing && (
-              <div className="absolute inset-0 bg-gray-25 backdrop-blur-sm flex flex-col
- items-center justify-center gap-4 z-20">
-                <div className="relative">
-                  <div className="w-16 h-16 rounded-full border-2 border-primary-500/30 animate-spin-slow" />
-                  <div className="absolute inset-2 rounded-full border-2 border-t-primary-400
- border-r-transparent border-b-transparent border-l-transparent animate-spin" />
-                  <Wand2 className="absolute inset-0 m-auto text-primary-400" size={20} />
-                </div>
-                <p className="text-sm text-gray-700 font-medium animate-pulse">{statusMsg}</p>
-              </div>
-            )}
-
-            {/* ── Chunk progress badge (shows while more chunks are coming) ── */}
-            {isSpeaking && currentChunkProgress.total > 1 && (
-              <div className="absolute right-3 top-3 z-30 flex items-center gap-1.5 rounded-full
- border border-white/15 bg-ink/70 px-2.5 py-1.5 backdrop-blur-sm">
-                <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-primary-400" />
-                <span className="font-mono text-eyebrow text-gray-25 tabular-nums">
-                  {currentChunkProgress.current}/{currentChunkProgress.total}
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Controls bar */}
-          <div className="flex items-center justify-between mt-4 px-1">
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className={`status-dot ${
- connectionStatus === 'connected' ? 'online'
- : connectionStatus === 'connecting' ? 'processing'
- : 'offline'
- }`} />
-                <span className="text-gray-500 capitalize">{connectionStatus}</span>
-              </div>
-              {reconnectStalled && (
-                <button
-                  onClick={manualReconnect}
-                  className="flex items-center gap-1 text-xs text-primary-300 hover:text-gray-900
- px-2 py-1 rounded-md border border-primary-500/40 hover:bg-primary-500/20
- transition-colors"
-                  title="Reconnect"
-                  aria-label="Reconnect to avatar"
-                >
-                  <Plug size={11} />
-                  Reconnect
-                </button>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2">
-              {/* Language picker */}
-              <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gray-100 border border-gray-200">
-                <Globe size={11} className="text-gray-500" />
-                <select
-                  value={language}
-                  onChange={(e) => changeLanguage(e.target.value)}
-                  className="bg-transparent text-xs text-gray-700 focus:outline-none cursor-pointer"
-                  title="TTS language"
-                >
-                  {CHAT_LANGUAGES.map(l => (
-                    <option key={l.code} value={l.code}>{l.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              {(showVideo || isProcessing) && (
-                <button onClick={resetVideo} className="btn-icon" title="Reset video" aria-label="Reset video">
-                  <RotateCcw size={15} />
-                </button>
-              )}
-              <button
-                onClick={() => setIsMuted(m => !m)}
-                className={`btn-icon ${isMuted ? 'text-error-600 border-error-600/30' : ''}`}
-                title={isMuted ? 'Unmute (⌘E)' : 'Mute (⌘E)'}
-                aria-label={isMuted ? 'Unmute avatar' : 'Mute avatar'}
-                aria-pressed={isMuted}
-              >
-                {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
-              </button>
-              <button
-                onClick={() => setShowShortcuts(true)}
-                className="btn-icon"
-                title="Keyboard shortcuts (?)"
-                aria-label="Show keyboard shortcuts"
-              >
-                <Keyboard size={15} />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Emotion bar */}
-        {messages.length > 0 && (
-          <div className="card px-4 py-3 flex items-center gap-3 rounded-xl animate-slide-up">
-            <Activity size={14} className="text-primary-400 flex-shrink-0" />
-            <span className="text-xs text-gray-500 flex-shrink-0">Emotion detected:</span>
-            <div className="flex flex-wrap gap-2">
-              {messages.slice(-1).map(m => {
-                const e = m.emotion || 'neutral'
-                const cfg = EMOTION_CONFIG[e]
-                return (
-                  <span key={m.id} className={`badge border ${cfg.bg} ${cfg.color} text-xs`}>
-                    {cfg.label}
-                  </span>
-                )
-              })}
-            </div>
+        {lastMessage && (
+          <div className="card flex animate-slide-up items-center gap-3 px-4 py-3">
+            <Activity size={14} className="shrink-0 text-gray-400" aria-hidden="true" />
+            <span className="shrink-0 text-xs text-gray-500">Emotion detected:</span>
+            <span className={lastEmotion.className}>{lastEmotion.label}</span>
           </div>
         )}
       </div>
 
-      {/* ── Chat Panel ──────────────────────────────────────────────────── */}
-      <div className="lg:col-span-2 flex flex-col card rounded-2xl overflow-hidden p-0">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+      {/* ── Conversation ── */}
+      <div className="card flex h-[70dvh] flex-col overflow-hidden rounded-2xl p-0 lg:col-span-2 lg:h-auto">
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
           <div className="flex items-center gap-2">
-            <MessageCircle size={16} className="text-primary-400" />
-            <span className="font-semibold text-gray-900">Conversation</span>
+            <MessageCircle size={16} className="text-gray-400" aria-hidden="true" />
+            <h2 className="text-base text-gray-900">Conversation</h2>
           </div>
-          <div className="flex items-center gap-2">
-            {latencyMs !== null && (
-              <div className="flex items-center gap-1 text-xs text-primary-400">
-                <Zap size={11} />
-                <span>{(latencyMs / 1000).toFixed(1)}s</span>
+          <div className="flex items-center gap-3">
+            {turn.latencyMs !== null && (
+              <div className="flex items-center gap-1 text-xs text-gray-500" title="Time from sending to the first video">
+                <Zap size={11} aria-hidden="true" />
+                <span className="tabular-nums">{(turn.latencyMs / 1000).toFixed(1)}s</span>
               </div>
             )}
-            <div className="flex items-center gap-1.5 text-xs text-gray-500">
-              <Zap size={12} className="text-primary-400" />
-              <span>{messages.length} messages</span>
-            </div>
+            <span className="text-xs text-gray-500">
+              {messages.length} message{messages.length === 1 ? '' : 's'}
+            </span>
             {messages.length > 0 && (
               <button
                 onClick={exportConversation}
-                className="btn-icon"
+                className="btn-icon h-8 w-8"
                 title="Export conversation"
                 aria-label="Export conversation as text"
               >
@@ -1097,330 +545,31 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 messages-scroll">
-          {messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full gap-4 py-12 text-center">
-              <div className="w-16 h-16 rounded-2xl 
- flex items-center justify-center border border-gray-200">
-                <Sparkles size={28} className="text-primary-400" />
-              </div>
-              <div>
-                <p className="text-gray-900 font-medium mb-1">Start the conversation</p>
-                <p className="text-gray-500 text-sm">Type a message or press the mic button</p>
-              </div>
-            </div>
-          ) : (
-            messages.map((message, idx) => {
-              const isUser = message.role === 'user'
-              const emotion = message.emotion || 'neutral'
-              const emotionCfg = EMOTION_CONFIG[emotion]
-              return (
-                <div
-                  key={message.id}
-                  className={`flex gap-2.5 animate-slide-up ${isUser ? 'flex-row-reverse' : 'flex-row'}`}
-                  style={{ animationDelay: `${idx * 0.05}s` }}
-                >
-                  <div className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold
- ${isUser
- ? ' '
- : ' '
- }`}
-                  >
-                    {isUser ? 'U' : 'AI'}
-                  </div>
-                  <div className={`max-w-[85%] group ${isUser ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
-                    {editingMessageId === message.id ? (
-                      // Inline editor — Enter saves, Esc cancels, Shift+Enter newline
-                      <div className="w-full flex flex-col gap-1.5">
-                        <textarea
-                          autoFocus
-                          value={editDraft}
-                          onChange={(e) => setEditDraft(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault()
-                              saveEditMessage(message.id)
-                            }
-                            if (e.key === 'Escape') {
-                              e.preventDefault()
-                              cancelEditMessage()
-                            }
-                          }}
-                          maxLength={8000}
-                          rows={3}
-                          className="w-full px-3 py-2 rounded-2xl bg-gray-100 border border-primary-500/40
- text-gray-900 text-sm placeholder:text-gray-500 focus:outline-none
- focus:ring-2 focus:ring-primary-500/50 resize-none"
-                          aria-label="Edit message"
-                        />
-                        <div className="flex items-center gap-1.5 justify-end">
-                          <button
-                            onClick={cancelEditMessage}
-                            className="text-xs text-gray-500 hover:text-gray-900 px-2 py-1 rounded-md hover:bg-white"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => saveEditMessage(message.id)}
-                            className="text-xs text-gray-900 bg-primary-600 hover:bg-primary-500 px-2.5 py-1 rounded-md
- flex items-center gap-1"
-                          >
-                            <Check size={11} />
-                            Save
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed
- ${isUser
- ? ' text-gray-900 rounded-tr-sm'
- : 'bg-gray-100 border border-gray-200 text-gray-800 rounded-tl-sm'
- }`}
-                      >
-                        {message.content}
-                        {/* Hover action menu — only on persisted messages (have a real DB id) */}
-                        <div className={`absolute -top-2 ${isUser ? '-left-2' : '-right-2'} flex items-center gap-1
- opacity-0 group-hover:opacity-100 transition-opacity`}>
-                          <button
-                            onClick={() => copyMessage(message.content)}
-                            className="w-6 h-6 rounded-full bg-gray-200 border border-gray-200
- flex items-center justify-center hover:bg-gray-300"
-                            title="Copy"
-                            aria-label="Copy message"
-                          >
-                            <Copy size={10} className="text-gray-500" />
-                          </button>
-                          {message.persisted && (
-                            <>
-                              <button
-                                onClick={() => startEditMessage(message)}
-                                className="w-6 h-6 rounded-full bg-gray-200 border border-gray-200
- flex items-center justify-center hover:bg-gray-300"
-                                title="Edit"
-                                aria-label="Edit message"
-                              >
-                                <Pencil size={10} className="text-gray-500" />
-                              </button>
-                              <button
-                                onClick={() => deleteMessage(message.id)}
-                                className="w-6 h-6 rounded-full bg-gray-200 border border-gray-200
- flex items-center justify-center hover:bg-error-50"
-                                title="Delete"
-                                aria-label="Delete message"
-                              >
-                                <Trash2 size={10} className="text-gray-500" />
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                    <div className={`flex items-center gap-1.5 px-1 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
-                      <Clock size={10} className="text-gray-500" />
-                      <span className="text-xs text-gray-500">
-                        {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                      {emotion !== 'neutral' && (
-                        <span className={`text-xs ${emotionCfg.color}`}>
-                          {emotionCfg.label.split(' ')[0]}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )
-            })
-          )}
-          {/* Live streaming bubble — shows tokens as they arrive */}
-          {streamingContent && (
-            <div className="flex gap-2.5 animate-slide-up">
-              <div className="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold">
-                AI
-              </div>
-              <div className="max-w-[85%] flex flex-col gap-1 items-start">
-                <div className="relative px-4 py-2.5 rounded-2xl rounded-tl-sm text-sm leading-relaxed
- bg-gray-100 border border-primary-500/30 text-gray-800">
-                  {streamingContent}
-                  <span className="inline-block w-1.5 h-4 bg-primary-400 ml-0.5 align-middle animate-pulse rounded-sm" />
-                </div>
-              </div>
-            </div>
-          )}
-          {isTyping && <TypingIndicator />}
-          <div ref={messagesEndRef} />
-        </div>
+        <MessageList
+          messages={messages}
+          streamingContent={turn.streamingContent}
+          isTyping={turn.isTyping}
+          onCopy={copyMessage}
+          onSaveEdit={saveEditMessage}
+          onDelete={deleteMessage}
+        />
 
-        {isRecording && (
-          <div className="px-4 pb-2">
-            <div className="h-1 rounded-full bg-gray-100 overflow-hidden">
-              <div className="voice-level h-full" style={{ width: `${recordingLevel}%` }} />
-            </div>
-          </div>
-        )}
-
-        <div className="border-t border-gray-200 px-4 py-3">
-          {isRecording && (
-            <div className="flex items-center gap-2 mb-3 px-2">
-              <span className="text-xs text-error-600 font-medium animate-pulse">REC</span>
-              <WaveformBars active={isRecording} />
-              <span className="text-xs text-gray-500 ml-auto">
-                {handsFree ? 'Listening — pause when you\'re done' : 'Tap stop when done'}
-              </span>
-            </div>
-          )}
-          {handsFree && !isRecording && (
-            <div className="flex items-center gap-2 mb-3 px-2">
-              <span className="text-xs text-primary-400 font-medium">HANDS-FREE</span>
-              <span className="text-xs text-gray-500 ml-auto">
-                {isProcessing ? 'Thinking — speak to interrupt' : 'Just start talking'}
-              </span>
-            </div>
-          )}
-
-          <div className="flex gap-2 items-end">
-            <button
-              onClick={isRecording ? stopRecording : startRecording}
-              disabled={isProcessing || handsFree}
-              aria-label={isRecording ? 'Stop recording' : 'Start voice recording'}
-              aria-pressed={isRecording}
-              title={handsFree ? 'Hands-free is listening — turns are detected automatically' : undefined}
-              className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
- transition-all duration-200 active:scale-95
- ${isRecording
- ? 'bg-error-600 hover:bg-error-500 text-gray-900 shadow-[0_0_20px_rgba(239,68,68,0.5)]'
- : 'bg-gray-100 hover:bg-gray-200 border border-gray-200 hover:border-primary-500/40 text-gray-500 hover:text-gray-900'
- }
- ${isProcessing || handsFree ? 'opacity-40 cursor-not-allowed' : ''}`}
-            >
-              {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
-              {isRecording && (
-                <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-error-500 animate-ping" />
-              )}
-            </button>
-
-            <button
-              onClick={() => setHandsFree(!handsFree)}
-              aria-label={handsFree ? 'Turn off hands-free listening' : 'Turn on hands-free listening'}
-              aria-pressed={handsFree}
-              title={handsFree ? 'Hands-free on — just talk' : 'Hands-free: listen continuously'}
-              className={`relative flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
- transition-all duration-200 active:scale-95
- ${handsFree
- ? 'bg-primary-600 hover:bg-primary-500 text-gray-900 shadow-[0_0_20px_rgba(99,102,241,0.45)]'
- : 'bg-gray-100 hover:bg-gray-200 border border-gray-200 hover:border-primary-500/40 text-gray-500 hover:text-gray-900'
- }`}
-            >
-              <Radio size={18} />
-              {handsFree && !isRecording && (
-                <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-primary-400 animate-pulse" />
-              )}
-            </button>
-
-            <div className="flex-1 relative">
-              <textarea
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
-                }}
-                placeholder={isRecording ? 'Recording…' : 'Message your avatar… (Enter to send)'}
-                aria-label="Message your avatar"
-                disabled={isProcessing || isRecording}
-                rows={1}
-                className="w-full px-4 py-2.5 rounded-xl bg-gray-100 border border-gray-200 text-gray-900 text-sm
- placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500/50
- focus:border-primary-500/40 resize-none transition-all duration-200 disabled:opacity-50
- [field-sizing:content] max-h-32 overflow-y-auto"
-              />
-            </div>
-
-            {(isProcessing || isSpeaking) ? (
-              <button
-                onClick={stopGeneration}
-                aria-label="Stop generating"
-                title="Stop"
-                className="flex-shrink-0 w-10 h-10 rounded-xl bg-error-600 hover:bg-error-500
- flex items-center justify-center text-gray-900 shadow-[0_0_18px_rgba(239,68,68,0.4)]
- transition-all duration-200 active:scale-95"
-              >
-                <Square size={16} fill="currentColor" />
-              </button>
-            ) : (
-              <button
-                onClick={sendMessage}
-                disabled={!inputText.trim() || isRecording}
-                aria-label="Send message"
-                className="flex-shrink-0 w-10 h-10 rounded-xl 
- flex items-center justify-center text-gray-900 hover:shadow-sm
- disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-95"
-              >
-                <Send size={18} />
-              </button>
-            )}
-          </div>
-
-          <p className="text-xs text-gray-500 text-center mt-2">
-            Shift+Enter for new line · Mic for voice · <kbd className="px-1 py-0.5 rounded bg-gray-100 text-gray-500">?</kbd> for shortcuts
-          </p>
-        </div>
+        <Composer
+          value={inputText}
+          onChange={setInputText}
+          onSend={sendText}
+          onStop={stopGeneration}
+          isBusy={isBusy}
+          isProcessing={turn.isProcessing}
+          isRecording={isRecording}
+          onToggleRecording={pushToTalk.isRecording ? pushToTalk.stop : pushToTalk.start}
+          handsFree={handsFree}
+          onToggleHandsFree={() => setHandsFree(!handsFree)}
+          levelRef={levelRef}
+        />
       </div>
 
-      {/* ── Keyboard shortcuts modal ─────────────────────────────────────── */}
-      {showShortcuts && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-gray-25 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="kbd-title"
-          onClick={() => setShowShortcuts(false)}
-        >
-          <div
-            className="w-full max-w-md mx-4 card rounded-2xl p-6 animate-scale-in"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Keyboard size={18} className="text-primary-400" />
-                <h2 id="kbd-title" className="text-lg font-bold text-gray-900">Keyboard shortcuts</h2>
-              </div>
-              <button
-                onClick={() => setShowShortcuts(false)}
-                className="btn-icon"
-                aria-label="Close shortcuts"
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <div className="divider mb-4" />
-            <ul className="space-y-2.5 text-sm">
-              {[
-                { keys: ['Enter'], desc: 'Send message' },
-                { keys: ['Shift', 'Enter'], desc: 'New line in message' },
-                { keys: ['Esc'], desc: 'Cancel editing a message' },
-                { keys: ['⌘', 'E'], desc: 'Mute / unmute avatar' },
-                { keys: ['?'], desc: 'Toggle this shortcuts panel' },
-              ].map(({ keys, desc }) => (
-                <li key={desc} className="flex items-center justify-between gap-3">
-                  <span className="text-gray-700">{desc}</span>
-                  <span className="flex items-center gap-1">
-                    {keys.map((k, i) => (
-                      <kbd
-                        key={i}
-                        className="px-2 py-0.5 rounded-md bg-gray-100 border border-gray-200 text-xs text-gray-700 font-mono"
-                      >
-                        {k}
-                      </kbd>
-                    ))}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <p className="text-xs text-gray-500 mt-4">
-              On Windows/Linux, use <kbd className="px-1 py-0.5 rounded bg-gray-100">Ctrl</kbd> in place of <kbd className="px-1 py-0.5 rounded bg-gray-100">⌘</kbd>.
-            </p>
-          </div>
-        </div>
-      )}
+      {showShortcuts && <ShortcutsDialog onClose={closeShortcuts} />}
     </div>
   )
 }

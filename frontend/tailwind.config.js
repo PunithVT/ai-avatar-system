@@ -14,9 +14,11 @@
 // so rule 4 is enforced by the config rather than by remembering it.
 module.exports = {
   content: [
-    './pages/**/*.{js,ts,jsx,tsx,mdx}',
     './components/**/*.{js,ts,jsx,tsx,mdx}',
     './app/**/*.{js,ts,jsx,tsx,mdx}',
+    './hooks/**/*.{js,ts,jsx,tsx}',
+    // lib/chat/messages.ts holds the emotion badge class names.
+    './lib/**/*.{js,ts,jsx,tsx}',
     './store/**/*.{js,ts,jsx,tsx}',
   ],
   theme: {
@@ -104,6 +106,13 @@ module.exports = {
         'fade-up': 'fadeUp .4s cubic-bezier(.16,1,.3,1) both',
         'fade-in': 'fadeIn .3s ease both',
         'pulse-soft': 'pulseSoft 2s cubic-bezier(.4,0,.6,1) infinite',
+        // Entrance for list rows and inline panels — the same eased rise as
+        // fade-up, under the name the components use.
+        'slide-up': 'fadeUp .3s cubic-bezier(.16,1,.3,1) both',
+        // Dialogs and selection ticks.
+        'scale-in': 'scaleIn .2s cubic-bezier(.16,1,.3,1) both',
+        'pulse-slow': 'pulseSoft 3s cubic-bezier(.4,0,.6,1) infinite',
+        'spin-slow': 'spin 3s linear infinite',
       },
       keyframes: {
         // Short and eased rather than bouncy. The system is restrained; motion
@@ -113,6 +122,10 @@ module.exports = {
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
         fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+        scaleIn: {
+          '0%': { opacity: '0', transform: 'scale(.96)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
+        },
         pulseSoft: { '0%,100%': { opacity: '1' }, '50%': { opacity: '.5' } },
       },
     },

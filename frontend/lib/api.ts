@@ -1,4 +1,6 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios'
+import { useStore } from '@/store/useStore'
+import type { ChatMessage } from '@/lib/types'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -6,6 +8,11 @@ const STORAGE_KEY = 'avatar-system-storage'
 
 function readToken(): string | null {
   if (typeof window === 'undefined') return null
+  // The store is the source of truth once it has loaded. localStorage is
+  // only consulted before that: child effects run before the provider's
+  // rehydrate, so a request fired on mount can precede it.
+  const state = useStore.getState()
+  if (state.hasHydrated) return state.token
   try {
     const stored = localStorage.getItem(STORAGE_KEY)
     if (!stored) return null
@@ -52,11 +59,16 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
-    if (error.response?.status === 401) {
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem(STORAGE_KEY)
-        window.dispatchEvent(new CustomEvent('auth:logout'))
-      }
+    // A 401 on a request that carried our token means the token is no longer
+    // good (expired after 24 h, or a guest account that was reaped). Clear it
+    // from the STORE: that is what the UI renders from, so the sign-in gate
+    // appears. Removing only the localStorage entry, as this used to, left
+    // the stale token in memory — the app kept showing empty lists and
+    // "Failed…" toasts, and the next store write persisted the token back.
+    //
+    // A 401 without a token is just a failed login and changes nothing.
+    if (error.response?.status === 401 && error.config?.headers?.Authorization) {
+      useStore.getState().clearAuth()
     }
     return Promise.reject(error)
   }
@@ -101,12 +113,34 @@ export const api = {
     }
   },
 
-  getProfile: async () => {
-    const response = await apiClient.get('/api/v1/users/me')
+  /**
+   * `token` is passed explicitly right after login, before it is in the
+   * store. Without it this call relied on the auth cookie alone, and where
+   * the cookie is not sent (API on another site, third-party cookies
+   * blocked) it 401'd — reported to the user as "Invalid credentials" for
+   * credentials that had just been accepted.
+   */
+  getProfile: async (token?: string) => {
+    const response = await apiClient.get(
+      '/api/v1/users/me',
+      token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
+    )
     return response.data
   },
 
-  updateProfile: async (data: { email?: string; username?: string; full_name?: string; password?: string }) => {
+  /**
+   * `current_password` is required by the server whenever a registered user
+   * changes their password (403 "Current password is incorrect" otherwise).
+   * Guests are exempt: setting an email and password is how a guest account
+   * becomes a real one, and the response then carries `is_guest: false`.
+   */
+  updateProfile: async (data: {
+    email?: string
+    username?: string
+    full_name?: string
+    password?: string
+    current_password?: string
+  }) => {
     const response = await apiClient.put('/api/v1/users/me', data)
     return response.data
   },
@@ -163,11 +197,6 @@ export const api = {
     return response.data
   },
 
-  getSession: async (sessionId: string) => {
-    const response = await apiClient.get(`/api/v1/sessions/${sessionId}`)
-    return response.data
-  },
-
   endSession: async (sessionId: string) => {
     const response = await apiClient.post(`/api/v1/sessions/${sessionId}/end`)
     return response.data
@@ -186,17 +215,29 @@ export const api = {
   },
 
   // Messages
-  sendMessage: async (sessionId: string, content: string) => {
-    const response = await apiClient.post('/api/v1/messages/send', {
-      session_id: sessionId,
-      content,
-    })
-    return response.data
-  },
-
-  getMessages: async (sessionId: string) => {
-    const response = await apiClient.get(`/api/v1/messages/session/${sessionId}`)
-    return response.data
+  /**
+   * A session's messages from row `skip` to the end, oldest first.
+   *
+   * The endpoint pages (500 rows at most, 100 by default) and returns the
+   * OLDEST rows first, so a plain request stops being useful exactly when a
+   * conversation gets long: past the first page the newest messages are
+   * never in the response. That silently truncated restored conversations
+   * and meant new messages in a long session never received their database
+   * ids. This follows pages until a short one.
+   */
+  getMessages: async (sessionId: string, skip = 0): Promise<ChatMessage[]> => {
+    const PAGE = 500
+    const MAX_PAGES = 40 // 20,000 rows; a bound, not an expectation
+    const all: ChatMessage[] = []
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const response = await apiClient.get(`/api/v1/messages/session/${sessionId}`, {
+        params: { skip: skip + all.length, limit: PAGE },
+      })
+      const rows: ChatMessage[] = Array.isArray(response.data) ? response.data : []
+      all.push(...rows)
+      if (rows.length < PAGE) break
+    }
+    return all
   },
 
   editMessage: async (messageId: string, content: string) => {
@@ -231,11 +272,8 @@ export const api = {
     return response.data
   },
 
-  // Returns a fully-qualified URL for the preview WAV. Auth-protected, so the
-  // caller must fetch it with credentials (the <audio> tag can't send headers,
-  // so we read it via fetch and turn the blob into an object URL).
-  getVoicePreviewUrl: (voiceId: string) => `${API_URL}/api/v1/voices/${encodeURIComponent(voiceId)}/preview`,
-
+  // The preview is auth-protected and an <audio> tag cannot send headers, so
+  // it is fetched as a blob and played from an object URL.
   fetchVoicePreviewBlob: async (voiceId: string) => {
     const response = await apiClient.get(`/api/v1/voices/${voiceId}/preview`, {
       responseType: 'blob',
@@ -249,11 +287,6 @@ export const api = {
     return response.data
   },
 
-  getSessionConversations: async (sessionId: string) => {
-    const response = await apiClient.get(`/api/v1/conversations/session/${sessionId}`)
-    return response.data
-  },
-
   renameConversation: async (conversationId: string, title: string) => {
     const response = await apiClient.patch(`/api/v1/conversations/${conversationId}/rename`, { title })
     return response.data
@@ -261,29 +294,6 @@ export const api = {
 
   summarizeConversation: async (conversationId: string) => {
     const response = await apiClient.post(`/api/v1/conversations/${conversationId}/summarize`)
-    return response.data
-  },
-
-  deleteConversation: async (conversationId: string) => {
-    const response = await apiClient.delete(`/api/v1/conversations/${conversationId}`)
-    return response.data
-  },
-
-  synthesizeVoicePreview: async (voiceId: string, text?: string, language?: string) => {
-    const form = new FormData()
-    if (text) form.append('text', text)
-    if (language) form.append('language', language)
-    const response = await apiClient.post(
-      `/api/v1/voices/${voiceId}/synthesize`,
-      form,
-      { responseType: 'blob', headers: { 'Content-Type': 'multipart/form-data' } },
-    )
-    return response.data as Blob
-  },
-
-  // Health
-  getHealth: async () => {
-    const response = await apiClient.get('/health')
     return response.data
   },
 }

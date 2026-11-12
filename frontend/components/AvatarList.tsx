@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Trash2, Check, User, Loader2, RefreshCw, Play, Settings2, Save, X, Mic2, MicOff } from 'lucide-react'
+import { Trash2, Check, User, Loader2, RefreshCw, Play, Settings2, Save, X, Mic2, MicOff, CloudOff } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
 import Image from 'next/image'
@@ -22,7 +22,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string 
 
 function AvatarCardSkeleton() {
   return (
-    <div className="card rounded-xl overflow-hidden animate-pulse">
+    <div className="card overflow-hidden p-0">
       <div className="aspect-square skeleton" />
       <div className="p-3 space-y-2">
         <div className="h-4 skeleton rounded w-3/4" />
@@ -39,10 +39,13 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
   const [draftName, setDraftName] = useState('')
   const [isSaving, setIsSaving] = useState(false)
 
-  const { data: avatars, isLoading, refetch } = useQuery({
+  const { data: avatars, isLoading, isError, refetch } = useQuery<Avatar[]>({
     queryKey: ['avatars'],
     queryFn: api.getAvatars,
-    refetchInterval: 5000,
+    // Poll only while something is still being processed. Polling every
+    // five seconds forever kept hitting the API from an idle tab.
+    refetchInterval: (query) =>
+      query.state.data?.some((a) => a.status === 'processing' || a.status === 'pending') ? 5000 : false,
   })
 
   const deleteMutation = useMutation({
@@ -100,7 +103,7 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
             {avatars?.length ?? 0} avatar{(avatars?.length ?? 0) !== 1 ? 's' : ''}
           </p>
         </div>
-        <button onClick={() => refetch()} className="btn-icon" title="Refresh">
+        <button onClick={() => refetch()} className="btn-icon" title="Refresh" aria-label="Refresh avatars">
           <RefreshCw size={15} />
         </button>
       </div>
@@ -110,6 +113,22 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
       {isLoading ? (
         <div className="grid grid-cols-2 gap-4">
           {Array.from({ length: 4 }).map((_, i) => <AvatarCardSkeleton key={i} />)}
+        </div>
+      ) : isError && !avatars ? (
+        // A failed request is not an empty library. Showing "No avatars yet"
+        // here told people their uploads were gone when the API was down.
+        <div className="flex flex-col items-center justify-center gap-4 py-16 text-center" role="alert">
+          <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-error-600/20 bg-error-50">
+            <CloudOff size={28} className="text-error-600" aria-hidden="true" />
+          </div>
+          <div>
+            <p className="font-medium text-gray-900">Couldn&apos;t load your avatars</p>
+            <p className="mt-1 text-sm text-gray-500">The server didn&apos;t respond. Check that it is running, then retry.</p>
+          </div>
+          <button onClick={() => refetch()} className="btn-secondary">
+            <RefreshCw size={14} aria-hidden="true" />
+            Retry
+          </button>
         </div>
       ) : !avatars || avatars.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
@@ -124,21 +143,30 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
       ) : (
         <div className="space-y-3 overflow-y-auto max-h-[28rem] messages-scroll">
           <div className="grid grid-cols-2 gap-4">
-            {avatars.map((avatar: Avatar, idx: number) => {
+            {avatars.map((avatar: Avatar) => {
               const isSelected = selectedAvatar === avatar.id
               const status = STATUS_CONFIG[avatar.status] ?? STATUS_CONFIG.pending
 
               return (
                 <div
                   key={avatar.id}
-                  onClick={() => onSelectAvatar(avatar.id)}
-                  className={`relative rounded-xl overflow-hidden cursor-pointer transition-all duration-300 group
+                  className={`group relative overflow-hidden rounded-xl border bg-white transition-shadow duration-200
  ${isSelected
- ? 'ring-2 ring-primary-500 ring-offset-2 ring-offset-white shadow-xs scale-[1.02]'
- : 'hover:scale-[1.02] hover:shadow-xs hover:ring-1 hover:ring-primary-500/40'
+ ? 'border-primary-600 shadow-ring'
+ : 'border-gray-200 shadow-xs hover:shadow-sm'
  }`}
-                  style={{ animationDelay: `${idx * 0.05}s` }}
                 >
+                  {/* Selection is a real button covering the card, so it is
+                      reachable and operable from the keyboard. The actions
+                      below sit above it (z-20) as siblings — a button cannot
+                      legally contain other buttons. */}
+                  <button
+                    type="button"
+                    onClick={() => onSelectAvatar(avatar.id)}
+                    aria-pressed={isSelected}
+                    aria-label={`Select avatar ${avatar.name}`}
+                    className="absolute inset-0 z-10 rounded-xl focus-visible:ring-inset"
+                  />
                   {/* Image */}
                   <div className="aspect-square relative bg-gray-100 overflow-hidden">
                     {(avatar.thumbnail_url || avatar.image_url) ? (
@@ -146,7 +174,8 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                         src={(avatar.thumbnail_url || avatar.image_url) as string}
                         alt={avatar.name}
                         fill
-                        className="object-cover transition-transform duration-500 group-hover:scale-110"
+                        sizes="(min-width: 1024px) 280px, 45vw"
+                        className="object-cover"
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
@@ -154,18 +183,16 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                       </div>
                     )}
 
-                    <div className="absolute inset-0 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
-
                     {isSelected && (
-                      <div className="absolute top-2 right-2 w-6 h-6 rounded-full bg-primary-500 flex items-center justify-center shadow-xs animate-scale-in">
-                        <Check size={14} className="text-gray-900" />
+                      <div className="absolute right-2 top-2 flex h-6 w-6 animate-scale-in items-center justify-center rounded-full bg-primary-600 shadow-xs">
+                        <Check size={14} className="text-white" aria-hidden="true" />
                       </div>
                     )}
 
                     {!isSelected && (
                       <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                        <div className="w-10 h-10 rounded-full bg-primary-600/80 backdrop-blur-sm flex items-center justify-center">
-                          <Play size={16} className="text-gray-900 ml-0.5" />
+                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-ink/70 backdrop-blur-sm">
+                          <Play size={16} className="ml-0.5 text-white" aria-hidden="true" />
                         </div>
                       </div>
                     )}
@@ -178,14 +205,15 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                           deleteMutation.mutate(avatar.id)
                         }
                       }}
-                      className="absolute top-2 left-2 w-6 h-6 rounded-full bg-error-50 backdrop-blur-sm flex items-center justify-center
- opacity-0 group-hover:opacity-100 transition-opacity duration-200 hover:bg-error-500"
+                      className="absolute left-2 top-2 z-20 flex h-7 w-7 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-600 opacity-0 shadow-xs
+ transition-opacity duration-200 hover:bg-error-50 hover:text-error-700 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
                       title="Delete avatar"
+                      aria-label={`Delete avatar ${avatar.name}`}
                     >
-                      {deleteMutation.isPending ? (
-                        <Loader2 size={11} className="text-gray-900 animate-spin" />
+                      {deleteMutation.isPending && deleteMutation.variables === avatar.id ? (
+                        <Loader2 size={12} className="animate-spin" />
                       ) : (
-                        <Trash2 size={11} className="text-gray-900" />
+                        <Trash2 size={12} />
                       )}
                     </button>
 
@@ -196,28 +224,30 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                           e.stopPropagation()
                           editingId === avatar.id ? setEditingId(null) : openEditor(avatar)
                         }}
-                        className={`absolute bottom-2 right-2 w-6 h-6 rounded-full backdrop-blur-sm flex items-center justify-center
- transition-all duration-200
+                        className={`absolute bottom-2 right-2 z-20 flex h-7 w-7 items-center justify-center rounded-full border shadow-xs
+ transition-opacity duration-200 focus-visible:opacity-100 [@media(hover:none)]:opacity-100
  ${editingId === avatar.id
- ? 'bg-primary-600 opacity-100'
- : 'bg-white opacity-0 group-hover:opacity-100 hover:bg-primary-600/60'
+ ? 'border-primary-600 bg-primary-600 text-white opacity-100'
+ : 'border-gray-200 bg-white text-gray-600 opacity-0 hover:bg-gray-50 group-hover:opacity-100'
  }`}
                         title="Edit personality"
+                        aria-label={`Edit personality of ${avatar.name}`}
+                        aria-expanded={editingId === avatar.id}
                       >
-                        <Settings2 size={11} className="text-gray-900" />
+                        <Settings2 size={12} />
                       </button>
                     )}
                   </div>
 
                   {/* Info */}
-                  <div className="bg-white px-3 py-2.5 border-t border-gray-200">
+                  <div className="border-t border-gray-200 bg-white px-3 py-2.5">
                     <p className="font-semibold text-sm text-gray-900 truncate">{avatar.name}</p>
                     <div className="flex items-center gap-1.5 mt-1">
                       <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} />
                       <span className={`text-xs ${status.color}`}>{status.label}</span>
                       <div className="ml-auto flex items-center gap-1.5">
                         {avatar.avatar_metadata?.system_prompt && (
-                          <span title="Custom personality" aria-label="Has custom personality" className="text-[10px] text-primary-400">🧠</span>
+                          <span title="Custom personality" aria-label="Has custom personality" className="text-[10px]">🧠</span>
                         )}
                         {avatar.voice_id ? (
                           <button
@@ -227,15 +257,15 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
                                 unsetVoiceMutation.mutate(avatar.id)
                               }
                             }}
-                            className="text-[10px] text-primary-300 hover:text-error-600 transition-colors flex items-center gap-0.5"
+                            className="relative z-20 flex items-center gap-0.5 rounded-sm p-1 text-primary-700 transition-colors hover:text-error-700"
                             title="Voice attached — click to unassign"
                             aria-label="Unassign voice from this avatar"
                           >
-                            <Mic2 size={9} />
+                            <Mic2 size={11} />
                           </button>
                         ) : (
                           <span title="No custom voice" aria-label="No custom voice" className="text-[10px] text-gray-500 flex items-center gap-0.5">
-                            <MicOff size={9} />
+                            <MicOff size={11} />
                           </span>
                         )}
                       </div>
@@ -251,44 +281,42 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
             const av = avatars.find((a: Avatar) => a.id === editingId)
             if (!av) return null
             return (
-              <div className="card rounded-xl p-4 border border-primary-500/30 animate-slide-up">
+              <div className="card-tint animate-slide-up rounded-xl p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
-                    <Settings2 size={14} className="text-primary-400" />
+                    <Settings2 size={14} className="text-primary-600" />
                     <span className="text-sm font-semibold text-gray-900">
-                      Personality — <span className="text-primary-400">{av.name}</span>
+                      Personality — <span className="text-primary-700">{av.name}</span>
                     </span>
                   </div>
-                  <button onClick={() => setEditingId(null)} className="btn-icon">
+                  <button onClick={() => setEditingId(null)} className="btn-icon h-8 w-8" aria-label="Close personality editor">
                     <X size={13} />
                   </button>
                 </div>
 
                 <div className="space-y-1.5 mb-3">
-                  <label className="text-xs font-medium text-gray-500">Display name</label>
+                  <label htmlFor="avatar-display-name" className="text-xs font-medium text-gray-600">Display name</label>
                   <input
+                    id="avatar-display-name"
                     type="text"
                     value={draftName}
                     onChange={(e) => setDraftName(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-gray-100 border border-gray-200 text-gray-900 text-sm
- placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500/50
- focus:border-primary-500/40 transition-all duration-200"
+                    className="input-field"
                     placeholder="Avatar name"
                   />
                 </div>
 
-                <p className="text-xs text-gray-500 mb-2">
+                <label htmlFor="avatar-system-prompt" className="mb-2 block text-xs text-gray-600">
                   System prompt sent to the LLM at the start of every conversation with this avatar.
-                </p>
+                </label>
 
                 <textarea
+                  id="avatar-system-prompt"
                   value={draftPrompt}
                   onChange={(e) => setDraftPrompt(e.target.value)}
                   placeholder="You are a friendly assistant named Alex. Respond conversationally and keep answers concise…"
                   rows={4}
-                  className="w-full px-3 py-2.5 rounded-xl bg-gray-100 border border-gray-200 text-gray-900 text-sm
- placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500/50
- focus:border-primary-500/40 resize-none transition-all duration-200"
+                  className="input-field resize-none"
                 />
 
                 <div className="flex items-center justify-between mt-3">
@@ -317,9 +345,9 @@ export function AvatarList({ selectedAvatar, onSelectAvatar }: AvatarListProps) 
       )}
 
       {selectedAvatar && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-primary-500/10 border border-primary-500/20 animate-slide-up">
-          <Check size={14} className="text-primary-400 flex-shrink-0" />
-          <p className="text-sm text-primary-300">Avatar selected — go to Chat to start talking!</p>
+        <div className="flex animate-slide-up items-center gap-2 rounded-md bg-primary-50 px-3 py-2 ring-1 ring-inset ring-primary-600/[.12]">
+          <Check size={14} className="shrink-0 text-primary-700" aria-hidden="true" />
+          <p className="text-sm text-primary-700">Avatar selected — go to Chat to start talking!</p>
         </div>
       )}
     </div>

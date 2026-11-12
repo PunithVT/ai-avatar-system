@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import dynamic from 'next/dynamic'
 import { AvatarUpload } from '@/components/AvatarUpload'
 import { AvatarList } from '@/components/AvatarList'
@@ -9,6 +10,7 @@ import { AuthModal } from '@/components/AuthModal'
 import { api } from '@/lib/api'
 import { toast } from 'react-hot-toast'
 import { useStore } from '@/store/useStore'
+import type { Avatar } from '@/lib/types'
 
 // Heavy panels (chat WebSocket pipeline, voice cloning recorder, history
 // list with TanStack queries, settings form) load on-demand instead of
@@ -61,65 +63,92 @@ const FEATURES = [
     icon: Brain,
     title: 'LLM-Powered Intelligence',
     description: 'Claude & GPT-4 drive natural conversations with context-aware, cached prompts.',
-    color: ' ',
-    glow: 'rgba(168,85,247,0.3)',
   },
   {
     icon: AudioWaveform,
     title: 'Voice Cloning',
     description: 'Chatterbox Multilingual clones any voice from a 10-second sample in 23 languages.',
-    color: ' ',
-    glow: 'rgba(59,130,246,0.3)',
   },
   {
     icon: Activity,
     title: 'Lip-Sync Animation',
     description: 'MuseTalk V1.5 produces photorealistic lip-sync video aligned to the spoken audio.',
-    color: ' ',
-    glow: 'rgba(16,185,129,0.3)',
   },
   {
     icon: Zap,
     title: 'Streaming Pipeline',
-    description: 'WebSocket streams tokens, audio, and video chunk-by-chunk for low first-byte latency.',
-    color: ' ',
-    glow: 'rgba(245,158,11,0.3)',
+    description: 'Replies stream in token by token, with lip-synced video delivered one sentence at a time.',
   },
   {
     icon: Globe,
     title: 'Multi-Language',
     description: 'Whisper STT + Chatterbox TTS support 23 languages end-to-end.',
-    color: ' ',
-    glow: 'rgba(99,102,241,0.3)',
   },
   {
     icon: Shield,
     title: 'Privacy-First',
     description: 'Self-host everything — your photos, voices, and conversations stay on your infra.',
-    color: ' ',
-    glow: 'rgba(244,63,94,0.3)',
   },
 ]
 
 const STATS = [
   { value: '23', label: 'Languages' },
-  { value: '<200ms', label: 'First-byte latency' },
-  { value: '2', label: 'LLM backends' },
+  { value: '3', label: 'LLM backends' },
+  { value: '3', label: 'Avatar engines' },
   { value: '100%', label: 'Self-hostable' },
 ]
 
 type View = 'home' | 'avatars' | 'chat' | 'voice' | 'history' | 'settings'
 
 export default function Home() {
-  const { isAuthenticated, user, clearAuth } = useStore()
+  const token = useStore((s) => s.token)
+  const user = useStore((s) => s.user)
+  const clearAuth = useStore((s) => s.clearAuth)
+  const hasHydrated = useStore((s) => s.hasHydrated)
+  const queryClient = useQueryClient()
   const [selectedAvatar, setSelectedAvatar] = useState<string | null>(null)
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
-  // Session id to RESUME (set only when opening from history). Distinct from
-  // activeSessionId (reported back after a session starts) so it can key the
-  // ChatInterface without remounting mid-conversation when a fresh session id
-  // arrives.
+  // Session id to RESUME (set only when opening from history). It keys the
+  // ChatInterface, so a fresh conversation and a resumed one never share a
+  // mounted instance.
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null)
+  // Bumped to force a brand-new conversation even when the key would
+  // otherwise be unchanged (a fresh session whose row has since been deleted).
+  const [chatGeneration, setChatGeneration] = useState(0)
   const [view, setView] = useState<View>('home')
+
+  // Everything on screen belongs to one signed-in identity. When that
+  // identity ends or changes — sign-out, an expired token, a different
+  // account — drop it all: leave the chat (which closes its socket and
+  // releases the mic), forget the selected avatar, and empty the query cache.
+  // Previously only the token was cleared, so the next person to sign in on
+  // the same browser landed in the previous user's open conversation, still
+  // connected over the previous user's socket.
+  const identity = token ? (user?.id ?? 'unknown') : null
+  const previousIdentity = useRef(identity)
+  useEffect(() => {
+    const previous = previousIdentity.current
+    previousIdentity.current = identity
+    if (previous !== null && previous !== identity) {
+      setView('home')
+      setSelectedAvatar(null)
+      setResumeSessionId(null)
+      queryClient.clear()
+    }
+  }, [identity, queryClient])
+
+  // Shared with the avatar list's query (same key), so this costs nothing
+  // extra; it tells the voice studio which voice the selected avatar has.
+  const { data: avatars } = useQuery<Avatar[]>({
+    queryKey: ['avatars'],
+    queryFn: api.getAvatars,
+    enabled: Boolean(token),
+  })
+  const selectedAvatarVoice = avatars?.find((a) => a.id === selectedAvatar)?.voice_id ?? null
+
+  const signOut = () => {
+    api.logout()
+    clearAuth()
+  }
 
   const handleVoiceSelect = async (voiceId: string) => {
     if (!selectedAvatar) {
@@ -127,8 +156,17 @@ export default function Home() {
       return
     }
     try {
-      await api.setAvatarVoice(selectedAvatar, voiceId)
-      toast.success('Voice assigned to avatar', { icon: '🎙️' })
+      // Presets exist only in this UI — the backend has no voice with that
+      // id, so sending one always failed with "Failed to assign voice".
+      // Choosing a preset means "no cloned voice": unassign instead.
+      if (voiceId.startsWith('default')) {
+        await api.unsetAvatarVoice(selectedAvatar)
+        toast.success('Avatar will use the default voice', { icon: '🎙️' })
+      } else {
+        await api.setAvatarVoice(selectedAvatar, voiceId)
+        toast.success('Voice assigned to avatar', { icon: '🎙️' })
+      }
+      queryClient.invalidateQueries({ queryKey: ['avatars'] })
     } catch {
       toast.error('Failed to assign voice')
     }
@@ -164,45 +202,51 @@ export default function Home() {
   return (
     <div className="min-h-screen">
       {/* ── Auth gate ── */}
-      {!isAuthenticated() && <AuthModal />}
+      {/* Wait for the persisted session to load: before that, "no token" is
+          not yet known to mean signed out. */}
+      {hasHydrated && !token && <AuthModal />}
 
       {/* ── Navigation ── */}
       <nav className="fixed top-0 left-0 right-0 z-50 h-16">
         <div className="h-full mx-auto max-w-7xl px-6 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center shadow-xs">
-              <Sparkles size={16} className="text-gray-900" />
+            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-ink">
+              <Sparkles size={16} className="text-white" aria-hidden="true" />
             </div>
             <span className="font-bold text-lg text-gray-900">AvatarAI</span>
           </div>
 
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-white backdrop-blur-xl border border-gray-200 overflow-x-auto">
+          <div className="flex items-center gap-1 overflow-x-auto rounded-lg border border-gray-200 bg-white p-1 shadow-xs">
             {navItems.map(({ id, icon: Icon, label, disabled }) => (
               <button
                 key={id}
                 onClick={() => !disabled && setView(id)}
                 disabled={disabled || undefined}
                 aria-current={view === id ? 'page' : undefined}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 flex-shrink-0
+                aria-label={label}
+                className={`flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-150
  ${view === id
- ? ' text-gray-900 shadow-xs'
- : 'text-gray-500 hover:text-gray-900 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed'
+ ? 'bg-gray-100 text-gray-900'
+ : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent'
  }`}
               >
-                <Icon size={14} />
+                <Icon size={14} aria-hidden="true" />
                 <span className="hidden sm:inline">{label}</span>
               </button>
             ))}
           </div>
 
           <div className="flex items-center gap-3">
-            <ConnectionStatus />
+            {/* The badge reports the chat socket, so it only means something
+                while the chat is open — elsewhere it read "Disconnected" in
+                red on a perfectly healthy app. */}
+            {view === 'chat' && <ConnectionStatus />}
             {user && (
               <div className="flex items-center gap-2">
                 <span className="text-xs text-gray-500 hidden sm:block">{user.username}</span>
                 <button
-                  onClick={() => { api.logout(); clearAuth() }}
-                  className="text-xs text-gray-500 hover:text-error-600 transition-colors px-2 py-1 rounded-lg hover:bg-error-50"
+                  onClick={signOut}
+                  className="rounded-md px-2 py-1 text-xs text-gray-500 transition-colors hover:bg-error-50 hover:text-error-700"
                   title="Sign out"
                 >
                   Sign out
@@ -212,7 +256,7 @@ export default function Home() {
           </div>
         </div>
         {/* nav card blur border */}
-        <div className="absolute inset-0 -z-10 bg-white backdrop-blur-xl border-b border-gray-200" />
+        <div className="absolute inset-0 -z-10 border-b border-gray-200 bg-white/90 backdrop-blur-sm" />
       </nav>
 
       <main className="pt-16">
@@ -223,16 +267,15 @@ export default function Home() {
             <section className="relative flex flex-col items-center justify-center min-h-[calc(100vh-4rem)] px-6 text-center overflow-hidden">
               {/* Aurora background */}
               <div className="absolute inset-0 overflow-hidden pointer-events-none">
-                <div className="absolute -top-40 -left-40 w-96 h-96 bg-primary-600/20 rounded-full blur-3xl animate-float" />
-                <div className="absolute -top-20 -right-40 w-80 h-80 bg-primary-600/15 rounded-full blur-3xl animate-float" style={{ animationDelay: '2s' }} />
-                <div className="absolute bottom-20 left-1/4 w-72 h-72 bg-primary-800/20 rounded-full blur-3xl animate-float" style={{ animationDelay: '4s' }} />
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full opacity-5" />
+                <div className="absolute -top-40 -left-40 w-96 h-96 bg-primary-600/20 rounded-full blur-3xl" />
+                <div className="absolute -top-20 -right-40 w-80 h-80 bg-primary-600/15 rounded-full blur-3xl" />
+                <div className="absolute bottom-20 left-1/4 w-72 h-72 bg-primary-800/20 rounded-full blur-3xl" />
               </div>
 
               {/* Badge */}
-              <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-primary-500/10 border border-primary-500/30 mb-8 animate-slide-up">
-                <Sparkles size={14} className="text-primary-400" />
-                <span className="text-sm text-primary-300 font-medium">Next-Gen AI Avatar Platform</span>
+              <div className="badge-brand mb-8 animate-slide-up px-4 py-1.5 text-sm">
+                <Sparkles size={14} aria-hidden="true" />
+                Open-source AI avatar platform
               </div>
 
               {/* Headline */}
@@ -292,14 +335,10 @@ export default function Home() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {FEATURES.map(({ icon: Icon, title, description, color, glow }) => (
-                  <div
-                    key={title}
-                    className="feature-card group"
-                    style={{ '--glow': glow } as CSSProperties}
-                  >
-                    <div className={`w-12 h-12 rounded-xl ${color} flex items-center justify-center mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300`}>
-                      <Icon size={22} className="text-gray-900" />
+                {FEATURES.map(({ icon: Icon, title, description }) => (
+                  <div key={title} className="feature-card">
+                    <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg border border-gray-200 bg-gray-50">
+                      <Icon size={22} className="text-gray-900" aria-hidden="true" />
                     </div>
                     <h3 className="font-bold text-lg text-gray-900 mb-2">{title}</h3>
                     <p className="text-gray-500 text-sm leading-relaxed">{description}</p>
@@ -346,7 +385,11 @@ export default function Home() {
               <h1 className="text-3xl font-black text-gray-900 mb-2">Voice Studio</h1>
               <p className="text-gray-500">Clone voices and manage your voice library.</p>
             </div>
-            <VoicePanel onVoiceSelect={handleVoiceSelect} />
+            <VoicePanel
+              key={selectedAvatar ?? 'no-avatar'}
+              onVoiceSelect={handleVoiceSelect}
+              assignedVoiceId={selectedAvatarVoice}
+            />
           </div>
         )}
 
@@ -358,10 +401,13 @@ export default function Home() {
               <p className="text-gray-500">Talk to your AI avatar in real time.</p>
             </div>
             <ChatInterface
-              key={`${selectedAvatar}:${resumeSessionId ?? 'new'}`}
+              key={`${selectedAvatar}:${resumeSessionId ?? 'new'}:${chatGeneration}`}
               avatarId={selectedAvatar}
               resumeSessionId={resumeSessionId ?? undefined}
-              onSessionCreated={setActiveSessionId}
+              onStartNew={() => {
+                setResumeSessionId(null)
+                setChatGeneration((n) => n + 1)
+              }}
             />
           </div>
         )}
