@@ -9,6 +9,7 @@ import tempfile
 import time
 import uuid
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -28,6 +29,7 @@ from app.services.llm import (
 from app.services.storage import storage_service
 from app.services.stt import stt_service
 from app.services.tts import tts_service
+from app.services.webrtc import AvatarStream, ClipDropped, webrtc_enabled
 from app.telemetry import span
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,35 @@ TRIM_CONTEXT_TO = 40
 # teardown). Distinct from 1000 so the client knows NOT to reconnect — two
 # tabs reconnecting in response to each other would never stop.
 WS_CLOSE_SUPERSEDED = 4409
+
+# WebRTC signalling bounds. A browser's audio+video offer with every candidate
+# inlined is 3-6 KB; 64 KB is far past any real one and still small enough to
+# parse without thought.
+MAX_SDP_CHARS = 64 * 1024
+# Each offer builds a peer connection — sockets, a DTLS certificate, an ICE
+# gather. A client needs one, and one more if its first attempt failed; this
+# leaves room for that and stops a loop of offers from being a cheap way to
+# make the server do expensive work.
+MAX_WEBRTC_OFFERS_PER_CONNECTION = 4
+# ICE gathering waits on the configured STUN/TURN servers. An unreachable one
+# must end in a refusal the client can act on, not an offer left hanging.
+WEBRTC_NEGOTIATE_TIMEOUT_SECS = 10
+
+
+@dataclass(eq=False)
+class _StreamClip:
+    """
+    A sentence that was put on the WebRTC stream instead of being uploaded.
+
+    Kept — file and all — until the stream reports it played, because a clip
+    that is queued is not yet a clip that was heard: if the peer connection
+    dies first, this is what gets uploaded and sent the ordinary way.
+    """
+
+    chunk_index: int
+    sentence: str
+    path: Path
+
 
 # Soft TTL for an idle (disconnected/abandoned) session in seconds.
 STALE_SESSION_TTL_SECS = 60 * 60 * 2  # 2 hours
@@ -276,6 +307,21 @@ class ConnectionManager:
         # Per session: a callable that records the in-flight turn's reply so
         # far. See _commit_pending_reply.
         self._pending_commits: Dict[str, object] = {}
+        # Per session: the WebRTC stream its browser negotiated, if any
+        # (MEDIA_TRANSPORT=webrtc). Absent means the session is on clips.
+        self._streams: Dict[str, AvatarStream] = {}
+        # Sessions that have been TOLD their stream is live. A clip goes onto
+        # the stream only for these — the client must have heard
+        # media_transport=webrtc before it sees a video_chunk with no URL.
+        self._webrtc_live: set[str] = set()
+        # Per session: the task re-sending, by URL, the clips a stream that
+        # went down had not finished playing. The turn pipeline waits on it
+        # before sending a later sentence, so the order survives the switch.
+        self._resends: Dict[str, asyncio.Task] = {}
+        # Sessions whose CURRENT turn has had a clip delivered by URL. The
+        # rest of that turn stays on URLs even if a stream comes up — see
+        # _animate_from_queue.
+        self._url_turns: set[str] = set()
 
     def _spawn_bg(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -349,6 +395,9 @@ class ConnectionManager:
             task = self._active_turns.pop(session_id, None)
             if task and not task.done():
                 task.cancel()
+            # The peer connection was negotiated over the old socket and
+            # belongs to that browser tab; the new one makes its own offer.
+            self._retire_stream(session_id)
             # Closed in the background, with a deadline, AFTER the new socket
             # is registered below. Awaiting the close here made the new
             # connection wait on the old peer's close handshake — and the
@@ -630,6 +679,14 @@ class ConnectionManager:
         ws = self.active_connections.pop(session_id, None)
         self.session_data.pop(session_id, None)
         self._send_locks.pop(session_id, None)
+        self._webrtc_live.discard(session_id)
+        self._url_turns.discard(session_id)
+        # Nobody is left to re-send anything to.
+        self._cancel_resend(session_id)
+        stream = self._streams.pop(session_id, None)
+        if stream is not None:
+            self._discard_stream_clips(stream)
+            await stream.close()
 
         # Actually close the socket. Disconnect is also reached when the
         # stale-session reaper or a REST "end session" tears a session down —
@@ -683,9 +740,22 @@ class ConnectionManager:
         so the user doesn't keep hearing the previous response while talking.
         """
         self._commit_pending_reply(session_id)
+        # On the WebRTC transport the speech still to come is queued HERE, not
+        # in the browser, so this is what actually silences the avatar — and
+        # it can be mid-sentence long after the turn's task has finished,
+        # which is why it does not depend on there being a task to cancel.
+        # Before the message below, so the picture is already back to idle
+        # when the client hears about it.
+        cut_off = self._flush_stream(session_id)
+        # Likewise speech that was on a stream which has since gone down and
+        # is on its way back as clips: interrupted like the rest, not played
+        # over the user a moment later.
+        cut_off = self._cancel_resend(session_id) or cut_off
         task = self._active_turns.pop(session_id, None)
-        if task and not task.done():
+        cancelled = bool(task and not task.done())
+        if cancelled:
             task.cancel()
+        if cancelled or cut_off:
             # Tell the client to stop playing the queued video chunks too —
             # otherwise they'd keep arriving from the buffer.
             await self.send_message(
@@ -697,6 +767,376 @@ class ConnectionManager:
             )
             return True
         return False
+
+    # ── WebRTC transport ──────────────────────────────────────────────────────
+
+    def _live_stream(self, session_id: str) -> Optional[AvatarStream]:
+        """The session's stream, if a clip can be put on it right now."""
+        if session_id not in self._webrtc_live:
+            return None
+        stream = self._streams.get(session_id)
+        return stream if stream is not None and stream.connected else None
+
+    def _flush_stream(self, session_id: str) -> bool:
+        """Drop the session's queued speech. True if any was cut off."""
+        stream = self._streams.get(session_id)
+        if stream is None:
+            return False
+        try:
+            return bool(stream.flush())
+        except Exception as e:
+            logger.warning(f"WebRTC flush failed [{session_id}]: {e}")
+            return False
+
+    @staticmethod
+    def _release_clip(clip: Optional[_StreamClip]) -> None:
+        """The stream is done with a clip (played, or flushed): drop its file."""
+        if clip is not None:
+            clip.path.unlink(missing_ok=True)
+
+    def _discard_stream_clips(self, stream: AvatarStream) -> None:
+        """
+        Stop `stream` taking clips and delete the ones it had not played,
+        for the exits where there is nobody to re-send them to.
+        """
+        try:
+            for clip in stream.retire():
+                self._release_clip(clip)
+        except Exception as e:
+            logger.warning(f"WebRTC retire failed: {e}")
+
+    def _retire_stream(self, session_id: str) -> None:
+        """Silence and discard the session's stream without telling anyone."""
+        self._webrtc_live.discard(session_id)
+        self._url_turns.discard(session_id)
+        self._cancel_resend(session_id)
+        stream = self._streams.pop(session_id, None)
+        if stream is None:
+            return
+        try:
+            stream.flush()
+        except Exception:
+            pass
+        self._discard_stream_clips(stream)
+        self._spawn_bg(stream.close())
+
+    def _cancel_resend(self, session_id: str) -> bool:
+        """
+        Abandon any re-send in progress for the session. True if there was
+        one — speech the user was still owed has been dropped.
+        """
+        task = self._resends.pop(session_id, None)
+        if task is None or task.done():
+            return False
+        # Cancels the whole chain: each re-send awaits the one before it.
+        # The clips' files go in each task's done-callback.
+        task.cancel()
+        return True
+
+    def _schedule_resend(
+        self, session_id: str, clips: list[_StreamClip], after: asyncio.Event
+    ) -> None:
+        """
+        Deliver `clips` — taken back from a stream that went down — as
+        ordinary URL clips, in order, once `after` is set.
+
+        Registered synchronously, so the turn pipeline (which waits on
+        self._resends before sending anything by URL) cannot slip a later
+        sentence in ahead of them.
+        """
+        previous = self._resends.get(session_id)
+        data = self.session_data.get(session_id)
+        task = self._spawn_bg(self._resend_clips(session_id, data, clips, after, previous))
+        self._resends[session_id] = task
+        # These went by URL, so the turn they belong to is a clips turn from
+        # here on (decision recorded in _animate_from_queue).
+        self._url_turns.add(session_id)
+
+        def _done(t: asyncio.Task) -> None:
+            # In a callback rather than the coroutine's own `finally`: a task
+            # cancelled before its first step never runs any of its body.
+            for clip in clips:
+                clip.path.unlink(missing_ok=True)
+            if self._resends.get(session_id) is t:
+                self._resends.pop(session_id, None)
+
+        task.add_done_callback(_done)
+
+    async def _resend_clips(
+        self,
+        session_id: str,
+        data: Optional[dict],
+        clips: list[_StreamClip],
+        after: asyncio.Event,
+        previous: Optional[asyncio.Task],
+    ) -> None:
+        if previous is not None and not previous.done():
+            # An earlier stream's leftovers come first.
+            await asyncio.gather(previous, return_exceptions=True)
+        await after.wait()
+        for clip in clips:
+            # Same connection as the one the clips were made for: a reconnect
+            # installs a new dict, and its client never saw these announced.
+            if data is None or self.session_data.get(session_id) is not data:
+                return
+            try:
+                video_url = await self._upload_clip(session_id, clip.chunk_index, clip.path)
+            except Exception as e:
+                # One clip lost, not the ones after it.
+                logger.error(
+                    f"Could not re-send chunk {clip.chunk_index} as a clip [{session_id}]: {e}"
+                )
+                continue
+            # The same chunk_index it was announced under on the stream, and
+            # `resend` so the client plays it without counting or showing a
+            # sentence it already has. Whole, even if the stream was part-way
+            # through it: a repeated sentence beats a missing one.
+            await self.send_message(
+                session_id,
+                {
+                    "type": "video_chunk",
+                    "chunk_index": clip.chunk_index,
+                    "total_chunks": -1,
+                    "video_url": video_url,
+                    "text": clip.sentence,
+                    "resend": True,
+                },
+            )
+            clip.path.unlink(missing_ok=True)
+
+    async def _upload_clip(self, session_id: str, chunk_index: int, path: Path) -> str:
+        """Store a clip and return a URL the client can fetch it from."""
+        ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+        video_key = f"videos/{session_id}/{ts}_c{chunk_index}.mp4"
+        with span("storage.upload", **{"chunk": chunk_index}):
+            video_bytes = await asyncio.to_thread(path.read_bytes)
+            await storage_service.upload_file(video_bytes, video_key, content_type="video/mp4")
+            # S3 objects are private — hand the client a URL it can actually
+            # fetch (presigned on S3, /uploads/ locally).
+            return await storage_service.serving_url(video_key)
+
+    async def _url_clip_may_follow(self, session_id: str) -> None:
+        """
+        Hold a clip that is about to be sent by URL until it is its turn.
+
+        The browser plays a URL clip the moment it arrives and cannot delay a
+        live stream, so order across the two has to be kept here: after the
+        stream has finished whatever it still has queued (a single clip can
+        fail to go onto a stream that stays up), and after any clips being
+        re-sent from a stream that went down. Without either this returns
+        without yielding, which is every turn on the default transport.
+        """
+        stream = self._streams.get(session_id)
+        if stream is not None and session_id in self._webrtc_live:
+            # Bounded by what is queued. A stream that does not drain in that
+            # time is not playing: treat it as finished, so what it still
+            # holds is registered for re-sending BEFORE this sentence goes
+            # out. Sending regardless let this sentence overtake the ones
+            # stuck on the stream once they were recovered.
+            if await stream.wait_drained() is False:
+                await self._stream_down(session_id, stream)
+        while True:
+            pending = self._resends.get(session_id)
+            if pending is None or pending.done():
+                return
+            # wait(), not await: if THIS turn is cancelled the re-send must
+            # not be cancelled with it by accident — whoever cancels the turn
+            # decides that separately.
+            await asyncio.wait({pending})
+
+    async def _stream_down(self, session_id: str, stream: AvatarStream) -> None:
+        """
+        The session's stream is finished (failed, closed by the client, or
+        about to be replaced): discard it, put the client back on clips, and
+        re-send by URL whatever it had not finished playing.
+        """
+        if self._streams.get(session_id) is not stream:
+            return
+        self._streams.pop(session_id, None)
+        was_live = session_id in self._webrtc_live
+        self._webrtc_live.discard(session_id)
+        was_speaking = stream.speaking  # retire() resets it
+
+        # Everything up to here and the two statements below run without an
+        # await. That matters twice over. The stream must refuse clips from
+        # this instant: it used to stay open across the sends further down,
+        # and a clip that finished decoding meanwhile was queued onto it,
+        # announced as streamed, and then thrown away by the close. And the
+        # re-send must be registered before the pipeline can run again, or a
+        # later sentence could overtake the ones being recovered.
+        unplayed = stream.retire()
+        announced = asyncio.Event()
+        if unplayed:
+            self._schedule_resend(session_id, unplayed, announced)
+
+        async def _announce_and_close() -> None:
+            try:
+                if was_live:
+                    # Say the stream's speech is over, or the client's speaking
+                    # indicator and echo threshold stay latched on.
+                    if was_speaking:
+                        await self.send_message(session_id, {"type": "speaking", "active": False})
+                    await self.send_message(
+                        session_id, {"type": "media_transport", "transport": "clips"}
+                    )
+            finally:
+                # The recovered clips go out after the client knows it is on
+                # clips, not before.
+                announced.set()
+            await stream.close()
+
+        # As its own task, shielded from the caller. A turn can be the one
+        # that discovers its stream is dead, and that turn can be cancelled
+        # (the user presses stop) while these sends are in flight. Run
+        # inline, the cancellation skipped everything after the await it
+        # landed on: the peer connection was never closed and the client was
+        # never told it was back on clips.
+        await asyncio.shield(self._spawn_bg(_announce_and_close()))
+
+    async def _on_stream_state(self, session_id: str, stream: AvatarStream, state: str) -> None:
+        if self._streams.get(session_id) is not stream:
+            return
+        if state == "connected":
+            await self.send_message(session_id, {"type": "media_transport", "transport": "webrtc"})
+            # Only now, after the announcement is on the wire, may the
+            # pipeline choose the stream for a clip.
+            if self._streams.get(session_id) is stream and stream.connected:
+                self._webrtc_live.add(session_id)
+        elif state in ("failed", "closed", "disconnected"):
+            # "disconnected" can recover in a browser, but aiortc 1.16 never
+            # reports it (its connectionState goes straight to "failed"), so
+            # it is listed for a version that does — and treated like a
+            # failure, with no grace period: a clip put on a stream nobody is
+            # receiving is a sentence the user never hears, whereas one sent
+            # the old way is at worst a stutter. The client may offer again.
+            #
+            # aiortc itself only notices a dead UDP path when ICE consent
+            # expires, about 30 s on. The prompt signal is the client's:
+            # it sends webrtc_close as soon as its own side fails or stays
+            # disconnected for a few seconds.
+            await self._stream_down(session_id, stream)
+
+    async def _on_stream_speaking(
+        self, session_id: str, stream: AvatarStream, active: bool
+    ) -> None:
+        if self._streams.get(session_id) is stream:
+            await self.send_message(session_id, {"type": "speaking", "active": active})
+
+    async def _refuse_webrtc(self, session_id: str, message: str) -> None:
+        await self.send_message(session_id, {"type": "webrtc_error", "message": message})
+
+    async def handle_webrtc_offer(self, session_id: str, sdp) -> None:
+        """
+        Start (or replace) the session's WebRTC stream from a browser offer.
+
+        Every way this can go wrong ends in a `webrtc_error` and the session
+        carrying on with clips — never in an exception reaching the receive
+        loop, which would drop the whole connection over an optional upgrade.
+        """
+        data = self.session_data.get(session_id)
+        if data is None:
+            return
+        if not webrtc_enabled():
+            await self._refuse_webrtc(session_id, "WebRTC delivery is not enabled on this server.")
+            return
+        if not isinstance(sdp, str) or not sdp.strip() or len(sdp) > MAX_SDP_CHARS:
+            await self._refuse_webrtc(session_id, "Invalid WebRTC offer.")
+            return
+        image = data.get("avatar_image_local")
+        refusal = None
+        if data.get("_webrtc_offers", 0) >= MAX_WEBRTC_OFFERS_PER_CONNECTION:
+            refusal = "Too many WebRTC offers on this connection."
+        elif not image:
+            # The stream's resting picture is the avatar; without one there
+            # is nothing to show between sentences.
+            refusal = "This avatar's image is unavailable."
+        if refusal is not None:
+            # Decided BEFORE the sequence number moves. The number is what a
+            # negotiation still in flight checks to see whether it has been
+            # superseded; a refused offer used to bump it, so the last offer
+            # that was within the limit lost its answer to one that was not.
+            # A stream that is already LIVE is a different matter: the
+            # browser discarded its end of that when it made this offer, so
+            # leaving it up would keep putting sentences on a connection
+            # nobody is receiving.
+            previous = self._streams.get(session_id)
+            if previous is not None and session_id in self._webrtc_live:
+                await self._stream_down(session_id, previous)
+            await self._refuse_webrtc(session_id, refusal)
+            return
+        seq = data["_webrtc_offers"] = data.get("_webrtc_offers", 0) + 1
+
+        # A new offer replaces the previous peer connection, now, whether or
+        # not the new one succeeds: the browser has already discarded its end.
+        previous = self._streams.get(session_id)
+        if previous is not None:
+            await self._stream_down(session_id, previous)
+
+        # In the background: answering waits on ICE gathering (network round
+        # trips to the STUN/TURN servers), and the receive loop must stay
+        # free to see a message or a stop in the meantime.
+        self._spawn_bg(self._negotiate_webrtc(session_id, data, seq, sdp, image))
+
+    async def _negotiate_webrtc(
+        self, session_id: str, data: dict, seq: int, sdp: str, image: str
+    ) -> None:
+        def current() -> bool:
+            # Same connection (a reconnect installs a new dict) and no newer
+            # offer has arrived since this one.
+            return self.session_data.get(session_id) is data and data.get("_webrtc_offers") == seq
+
+        stream: Optional[AvatarStream] = None
+        try:
+            stream = await AvatarStream.create(image)
+            if not current():
+                await stream.close()
+                return
+            stream.on_state = lambda state, s=stream: self._on_stream_state(session_id, s, state)
+            stream.on_speaking = lambda active, s=stream: self._on_stream_speaking(
+                session_id, s, active
+            )
+            stream.on_clip_released = self._release_clip
+            # Registered before negotiating so that a disconnect or a newer
+            # offer arriving meanwhile finds it and closes it.
+            self._streams[session_id] = stream
+            answer = await asyncio.wait_for(
+                stream.handle_offer(sdp), timeout=WEBRTC_NEGOTIATE_TIMEOUT_SECS
+            )
+            if not current() or self._streams.get(session_id) is not stream:
+                # Superseded while it was gathering. Normally whatever
+                # superseded it has already unregistered it; make sure, so a
+                # closed stream is never left as the session's stream.
+                if self._streams.get(session_id) is stream:
+                    self._streams.pop(session_id, None)
+                    self._webrtc_live.discard(session_id)
+                await stream.close()
+                return
+            await self.send_message(session_id, {"type": "webrtc_answer", "sdp": answer})
+        except Exception as e:
+            logger.warning(f"WebRTC negotiation failed [{session_id}]: {type(e).__name__}: {e}")
+            if stream is not None:
+                if self._streams.get(session_id) is stream:
+                    self._streams.pop(session_id, None)
+                await stream.close()
+            if current():
+                # Not the exception text: it can carry SDP and addresses.
+                await self._refuse_webrtc(session_id, "Could not start the WebRTC stream.")
+
+    async def handle_webrtc_close(self, session_id: str) -> None:
+        """The client closed its peer connection; release ours."""
+        stream = self._streams.get(session_id)
+        if stream is not None:
+            await self._stream_down(session_id, stream)
+
+    async def close_all_streams(self) -> None:
+        """Close every peer connection (server shutdown)."""
+        self._webrtc_live.clear()
+        for session_id in list(self._resends):
+            self._cancel_resend(session_id)
+        streams, self._streams = list(self._streams.values()), {}
+        for stream in streams:
+            self._discard_stream_clips(stream)
+        await asyncio.gather(*(s.close() for s in streams), return_exceptions=True)
 
     async def send_message(self, session_id: str, message: dict):
         ws = self.active_connections.get(session_id)
@@ -1177,6 +1617,8 @@ class ConnectionManager:
         # (including between the two stages) leaves nothing behind.
         created: set[Path] = set()
         sent_chunks = 0
+        # A new turn starts with the choice of transport open again.
+        self._url_turns.discard(session_id)
 
         async def synthesize_stage() -> None:
             try:
@@ -1226,6 +1668,7 @@ class ConnectionManager:
                 sentence, tmp_audio, synth = item
                 tmp_video = session_dir / f"{tmp_audio.stem.split('_')[0]}_video.mp4"
                 created.add(tmp_video)
+                on_stream = False
                 try:
                     if session_id not in self.active_connections:
                         continue
@@ -1260,27 +1703,79 @@ class ConnectionManager:
                             output_path=str(tmp_video),
                         )
 
-                    ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-                    video_key = f"videos/{session_id}/{ts}_c{sent_chunks}.mp4"
-                    with span("storage.upload", **{"chunk": sent_chunks}):
-                        video_bytes = await asyncio.to_thread(tmp_video.read_bytes)
-                        await storage_service.upload_file(
-                            video_bytes, video_key, content_type="video/mp4"
-                        )
-                        # S3 objects are private — hand the client a URL it can
-                        # actually fetch (presigned on S3, /uploads/ locally).
-                        video_url = await storage_service.serving_url(video_key)
-
-                    await self.send_message(
-                        session_id,
-                        {
-                            "type": "video_chunk",
-                            "chunk_index": sent_chunks,
-                            "total_chunks": -1,
-                            "video_url": video_url,
-                            "text": sentence,
-                        },
+                    # Decided per clip, at the moment it is ready — but only
+                    # in one direction within a turn. A stream that drops
+                    # costs nothing but the upload it would have skipped, so
+                    # stream -> clips can happen at any sentence. The reverse
+                    # cannot: once one clip of this turn has gone by URL
+                    # (sent here, or re-sent from a stream that went down)
+                    # the rest of the turn does too, and a stream that comes
+                    # up meanwhile is used from the NEXT turn. URL clips wait
+                    # in the browser's own queue while a stream plays the
+                    # instant it is fed, so a streamed sentence after a URL
+                    # one would play underneath the clips still queued ahead
+                    # of it — silenced, and never heard.
+                    duration_ms: Optional[int] = None
+                    stream = (
+                        None if session_id in self._url_turns else self._live_stream(session_id)
                     )
+                    if stream is not None:
+                        clip = _StreamClip(sent_chunks, sentence, tmp_video)
+                        try:
+                            with span("webrtc.enqueue", **{"chunk": sent_chunks}):
+                                duration_ms = await stream.enqueue_clip(str(tmp_video), clip)
+                        except ClipDropped:
+                            # Flushed while it was being prepared: the user
+                            # interrupted. Not to be played by either route.
+                            continue
+                        except Exception as e:
+                            # Nothing of the clip reached the stream (it is
+                            # queued whole or not at all), so sending it the
+                            # old way cannot double it up.
+                            logger.warning(
+                                f"WebRTC enqueue failed, sending chunk {sent_chunks} "
+                                f"as a clip [{session_id}]: {e}"
+                            )
+                            if not stream.connected:
+                                # Not this clip's fault: the stream is
+                                # finished. Take it down now rather than when
+                                # its state callback gets to run, so the
+                                # clips it still held are already on their
+                                # way back by the time this one is sent
+                                # behind them. (No-op if that has happened.)
+                                await self._stream_down(session_id, stream)
+
+                    if duration_ms is not None:
+                        # The stream holds the file now, until it has played
+                        # the clip or given it back (see _StreamClip). No
+                        # await between enqueue_clip returning and here.
+                        created.discard(tmp_video)
+                        on_stream = True
+                        await self.send_message(
+                            session_id,
+                            {
+                                "type": "video_chunk",
+                                "chunk_index": sent_chunks,
+                                "total_chunks": -1,
+                                "transport": "webrtc",
+                                "text": sentence,
+                                "duration_ms": duration_ms,
+                            },
+                        )
+                    else:
+                        self._url_turns.add(session_id)
+                        video_url = await self._upload_clip(session_id, sent_chunks, tmp_video)
+                        await self._url_clip_may_follow(session_id)
+                        await self.send_message(
+                            session_id,
+                            {
+                                "type": "video_chunk",
+                                "chunk_index": sent_chunks,
+                                "total_chunks": -1,
+                                "video_url": video_url,
+                                "text": sentence,
+                            },
+                        )
                     sent_chunks += 1
                     logger.info(f"Chunk {sent_chunks} ready [{session_id}]")
 
@@ -1288,7 +1783,7 @@ class ConnectionManager:
                     logger.error(f"Chunk {sent_chunks} failed [{session_id}]: {e}")
 
                 finally:
-                    for f in (tmp_audio, tmp_video):
+                    for f in (tmp_audio,) if on_stream else (tmp_audio, tmp_video):
                         f.unlink(missing_ok=True)
                         created.discard(f)
 

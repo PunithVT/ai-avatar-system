@@ -29,6 +29,10 @@ async def test_health_endpoint(client: AsyncClient):
     assert data["status"] in ("healthy", "degraded")
     assert "services" in data
     assert "timestamp" in data
+    # Configured vs. possible, side by side: webrtc configured on an image
+    # without aiortc is otherwise invisible.
+    assert data["media_transport"] in ("clips", "webrtc")
+    assert isinstance(data["webrtc_available"], bool)
 
 
 @pytest.mark.asyncio

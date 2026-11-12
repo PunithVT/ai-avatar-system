@@ -177,6 +177,51 @@ class Settings(BaseSettings):
     # exists to supplement.
     MEMORY_SUMMARY_MAX_CHARS: int = 1500
 
+    # How the avatar's picture and voice reach the browser.
+    #   clips  — default. One MP4 per sentence over HTTP; the browser plays
+    #            them back to back. Works anywhere HTTP works, but every
+    #            sentence boundary restarts the decoder (a visible stutter).
+    #   webrtc — one continuous audio+video stream per session; clips are
+    #            decoded here and fed into it, so the picture never tears
+    #            down and an interruption takes effect immediately.
+    #
+    # webrtc has a deployment cost, which is why it is opt-in: media travels
+    # over UDP straight between the browser and THIS process, not through the
+    # HTTP proxy. The backend must be reachable from browsers on UDP, and a
+    # container on a default Docker bridge network is not. There are two
+    # ways to make it so:
+    #   - run the backend with host networking (network_mode: host), or
+    #   - put a TURN relay in WEBRTC_ICE_SERVERS and let media go through it.
+    # Publishing a UDP port range is NOT one of them: each peer connection
+    # binds whatever ephemeral port the kernel hands it, and neither aiortc
+    # nor this app has a setting that confines that to a range.
+    # Users behind strict/symmetric NATs need the TURN relay either way.
+    #
+    # A session that cannot connect stays on clips. One whose stream fails
+    # later goes back to clips, and the sentences the stream had not finished
+    # playing are re-sent as clips — what is lost is at most what was "played"
+    # into a connection that had already died but not yet been noticed (the
+    # browser reports that within a few seconds; see rtcSession.ts).
+    #
+    # It also costs CPU and memory per connected session, speaking or not:
+    #   - encoding: the stream never stops. Up to about a third of a core
+    #     while the avatar speaks (512x512 at 25 fps). An idle stream drops
+    #     its video to 5 fps after a second, which brings that to roughly a
+    #     fifth of a core — mostly the audio track — for as long as the tab
+    #     stays open.
+    #   - memory: decoded frames are ~10 MB per queued second. Typically
+    #     50-100 MB while speaking, ~235 MB worst case (see MAX_QUEUE_SECONDS
+    #     and MAX_CLIP_SECONDS in services/webrtc.py), nothing when idle.
+    # Size the host for the number of simultaneous sessions accordingly.
+    MEDIA_TRANSPORT: str = "clips"  # clips | webrtc
+    # STUN/TURN servers, as a JSON list in the browser's RTCIceServer shape.
+    # Used by the server's peer connection AND sent to the browser, so list
+    # only what a client may see. STUN (the default) lets each side discover
+    # its public address; it relays nothing. A TURN entry carries credentials:
+    #   [{"urls": ["turn:turn.example.com:3478"], "username": "u", "credential": "p"}]
+    # A malformed value is logged and treated as "no servers", not fatal.
+    WEBRTC_ICE_SERVERS: str = '[{"urls": ["stun:stun.l.google.com:19302"]}]'
+
     # Guest accounts. "Continue as Guest" mints a real (anonymous) user row
     # so the ordinary per-user ownership checks scope a guest's data to just
     # that guest. They are disposable: the daily cleanup task deletes guest
