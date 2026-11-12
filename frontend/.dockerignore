@@ -1,0 +1,21 @@
+# Keep the host's build output and dependencies out of the image. Without this
+# file `COPY . .` overwrote the image's own `npm ci` result with whatever
+# node_modules happened to be on the build machine (wrong platform, wrong
+# versions), and shipped local env files into the layer.
+node_modules
+.next
+out
+coverage
+npm-debug.log*
+.env
+.env.*
+!.env.local.example
+.git
+.gitignore
+Dockerfile
+.dockerignore
+tsconfig.tsbuildinfo
+tests
+vitest.config.mts
+DESIGN_SYSTEM.html
+voice_profiles

@@ -181,3 +181,65 @@ def test_absolute_weights_path_is_left_alone(monkeypatch, tmp_path):
         else Path("/elsewhere") / settings.FACE_RESTORE_MODEL
     )
     assert resolved == abs_path
+
+
+# ── video assembly ───────────────────────────────────────────────────────
+def test_encode_video_muxes_frames_and_audio_in_one_pass(worker, tmp_path):
+    """
+    Real ffmpeg, no GPU: frames in, a playable MP4 with both streams out.
+
+    The frame size is deliberately odd — libx264/yuv420p rejects odd
+    dimensions outright, and a face crop can be any size. The audio path has a
+    space in it: the old os.system() string split it into two arguments.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    import numpy as np
+    import soundfile as sf
+
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg not installed")
+
+    audio = tmp_path / "my audio.wav"
+    t = np.linspace(0, 1.0, 16000, endpoint=False)
+    sf.write(str(audio), (0.2 * np.sin(2 * np.pi * 440 * t)).astype("float32"), 16000)
+
+    frames = [np.full((255, 257, 3), i * 9, dtype=np.uint8) for i in range(25)]
+    out = tmp_path / "out dir" / "clip.mp4"
+    out.parent.mkdir()
+
+    worker._encode_video(frames, str(audio), str(out), fps=25)
+
+    probe = json.loads(
+        subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-count_frames", "-of", "json", str(out)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    streams = {s["codec_type"]: s for s in probe["streams"]}
+    assert set(streams) == {"video", "audio"}
+    assert streams["video"]["codec_name"] == "h264"
+    assert streams["video"]["pix_fmt"] == "yuv420p"
+    assert int(streams["video"]["nb_read_frames"]) == 25
+    assert int(streams["video"]["width"]) % 2 == 0 and int(streams["video"]["height"]) % 2 == 0
+    assert streams["audio"]["codec_name"] == "aac"
+
+
+def test_encode_video_reports_failure_instead_of_claiming_success(worker, tmp_path):
+    """os.system() ignored the exit code: a failed mux still answered "ok"."""
+    import shutil
+
+    import numpy as np
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+
+    frames = [np.zeros((64, 64, 3), dtype=np.uint8)]
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        worker._encode_video(frames, str(tmp_path / "missing.wav"), str(tmp_path / "o.mp4"))
+    with pytest.raises(RuntimeError, match="No frames"):
+        worker._encode_video([], str(tmp_path / "missing.wav"), str(tmp_path / "o.mp4"))

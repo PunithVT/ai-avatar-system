@@ -111,6 +111,35 @@ def generate_video_task(self, session_id: str, text: str, avatar_image_path: str
         raise self.retry(exc=e, countdown=30 * (self.request.retries + 1))
 
 
+def _sweep_local_videos(now: float) -> int:
+    """
+    Delete generated clips older than MEDIA_RETENTION_HOURS from local
+    storage, and prune session directories left empty. Returns files removed.
+    """
+    if not settings.USE_LOCAL_STORAGE or settings.MEDIA_RETENTION_HOURS <= 0:
+        return 0
+    videos = Path(settings.LOCAL_STORAGE_PATH) / "videos"
+    if not videos.is_dir():
+        return 0
+    max_age = settings.MEDIA_RETENTION_HOURS * 3600
+    removed = 0
+    for session_dir in videos.iterdir():
+        if not session_dir.is_dir():
+            continue
+        for clip in session_dir.iterdir():
+            try:
+                if clip.is_file() and now - clip.stat().st_mtime > max_age:
+                    clip.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+        try:
+            session_dir.rmdir()  # only succeeds when empty
+        except OSError:
+            pass
+    return removed
+
+
 @celery_app.task(name="cleanup_old_files")
 def cleanup_old_files_task():
     """Reap temp media older than 24h that a dropped/abandoned session left behind.
@@ -160,6 +189,10 @@ def cleanup_old_files_task():
                     file_path.unlink(missing_ok=True)
                     total_cleaned += 1
 
+        # Generated clips in local storage. These are not temp files — they
+        # are what the browser plays — but nothing ever removed them.
+        total_cleaned += _sweep_local_videos(now)
+
         logger.info(
             f"Cleanup completed: {total_cleaned} file(s), {dirs_removed} session dir(s) removed"
         )
@@ -168,6 +201,42 @@ def cleanup_old_files_task():
     except Exception as e:
         logger.error(f"Cleanup task failed: {e}")
         raise
+
+
+def _purge_voice_profiles(user_ids: set) -> int:
+    """
+    Delete the voice recordings — a person's voice — owned by `user_ids`, and
+    drop them from the index. Returns the number removed.
+
+    The index is a JSON file the API process also rewrites, under a lock this
+    process cannot share. The window is small (this runs once a day, and the
+    write is temp-file-then-rename so the file is never half-written), but it
+    exists: a clone finishing in the same instant could be lost from the
+    index. The recordings are deleted FIRST, so the failure mode of that race
+    is a stale index entry pointing at nothing — never a recording left behind
+    for an account that no longer exists.
+    """
+    import json
+
+    index_path = Path("voice_profiles") / "index.json"
+    if not user_ids or not index_path.exists():
+        return 0
+    try:
+        entries = json.loads(index_path.read_text())
+    except Exception:
+        return 0
+    doomed = [e for e in entries if e.get("user_id") in user_ids]
+    if not doomed:
+        return 0
+    for entry in doomed:
+        wav = entry.get("wav_path")
+        if wav:
+            Path(wav).unlink(missing_ok=True)
+    keep = [e for e in entries if e.get("user_id") not in user_ids]
+    tmp = index_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(keep, indent=2, default=str))
+    tmp.replace(index_path)
+    return len(doomed)
 
 
 @celery_app.task(name="cleanup_guest_accounts")
@@ -191,8 +260,8 @@ def cleanup_guest_accounts_task():
     from sqlalchemy import delete, func, select
 
     from app.database import AsyncSessionLocal
+    from app.models import Avatar, User
     from app.models import Session as SessionModel
-    from app.models import User
 
     if not settings.GUEST_ACCOUNTS_ENABLED:
         logger.info("Guest accounts disabled — retention sweep skipped")
@@ -221,16 +290,59 @@ def cleanup_guest_accounts_task():
             ids = (await db.execute(stale)).scalars().all()
             if not ids:
                 return 0
+
+            # Storage objects do not cascade with the rows. Collect what these
+            # guests own BEFORE the delete, then remove it after the commit —
+            # otherwise every guest's avatar image and generated clips stayed
+            # on disk (and stayed fetchable) forever.
+            avatar_keys = (
+                (await db.execute(select(Avatar.s3_key).where(Avatar.user_id.in_(ids))))
+                .scalars()
+                .all()
+            )
+            session_ids = (
+                (await db.execute(select(SessionModel.id).where(SessionModel.user_id.in_(ids))))
+                .scalars()
+                .all()
+            )
+
             await db.execute(delete(User).where(User.id.in_(ids)))
             await db.commit()
+
+            from app.services.storage import storage_service
+
+            for key in avatar_keys:
+                if not key:
+                    continue
+                try:
+                    # avatars/<id>/image.jpg → avatars/<id>/
+                    await storage_service.delete_prefix(key.rsplit("/", 1)[0] + "/")
+                except Exception as e:
+                    logger.warning(f"Could not delete avatar files {key}: {e}")
+            for sid in session_ids:
+                try:
+                    await storage_service.delete_prefix(f"videos/{sid}/")
+                except Exception as e:
+                    logger.warning(f"Could not delete media for session {sid}: {e}")
+            try:
+                _purge_voice_profiles(set(ids))
+            except Exception as e:
+                logger.warning(f"Could not delete voice recordings for reaped guests: {e}")
             return len(ids)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        deleted = loop.run_until_complete(_sweep())
-    finally:
-        loop.close()
+    async def _run() -> int:
+        try:
+            return await _sweep()
+        finally:
+            # The engine is module-level but each task runs its own event
+            # loop. Connections left in the pool would be bound to a loop
+            # that is about to close, and the next task in this worker
+            # process would be handed one of them.
+            from app.database import engine
+
+            await engine.dispose()
+
+    deleted = asyncio.run(_run())
 
     logger.info(f"Guest retention sweep removed {deleted} account(s)")
     return {"deleted_guests": deleted}

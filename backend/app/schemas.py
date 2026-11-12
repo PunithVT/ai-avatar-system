@@ -58,6 +58,9 @@ class UserUpdate(BaseModel):
     password: Optional[str] = Field(
         default=None, min_length=_PASSWORD_MIN, max_length=_PASSWORD_MAX
     )
+    # Required to change the password of an account that already has one.
+    # (A guest has no password to confirm.)
+    current_password: Optional[str] = Field(default=None, max_length=_PASSWORD_MAX)
 
     _norm_email = field_validator("email", mode="before")(_normalize_email)
 

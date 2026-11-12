@@ -74,22 +74,42 @@ _ALLOWED_LANGUAGES = {
 _NAME_MAX_LEN = 100
 
 
+def _read_index_unlocked() -> list[dict]:
+    if VOICE_INDEX.exists():
+        try:
+            return json.loads(VOICE_INDEX.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _write_index_unlocked(data: list[dict]) -> None:
+    # Write to a temp file then rename (atomic on POSIX)
+    tmp = VOICE_INDEX.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, default=str))
+    tmp.replace(VOICE_INDEX)
+
+
 async def _load_index() -> list[dict]:
     async with _index_lock:
-        if VOICE_INDEX.exists():
-            try:
-                return json.loads(VOICE_INDEX.read_text())
-            except Exception:
-                return []
-        return []
+        return await asyncio.to_thread(_read_index_unlocked)
 
 
-async def _save_index(data: list[dict]) -> None:
+async def _update_index(change) -> list[dict]:
+    """
+    Read, change and write the index as ONE step under the lock.
+
+    `change` takes the current list and returns the new one. Loading and
+    saving used to take the lock separately, so two requests could both read
+    the same list and the second write silently discarded the first one's
+    change — a just-cloned voice vanished from the index (its recording still
+    on disk), or a deleted one came back.
+    """
     async with _index_lock:
-        # Write to a temp file then rename (atomic on POSIX)
-        tmp = VOICE_INDEX.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2, default=str))
-        tmp.replace(VOICE_INDEX)
+        current = await asyncio.to_thread(_read_index_unlocked)
+        updated = change(current)
+        await asyncio.to_thread(_write_index_unlocked, updated)
+        return updated
 
 
 def _owned(entry: dict, uid: str) -> bool:
@@ -99,7 +119,7 @@ def _owned(entry: dict, uid: str) -> bool:
     Entries written before profiles carried a `user_id` have no owner and are
     deliberately unreachable rather than being granted to some default
     account — an unowned profile must not become readable by whoever asks
-    first. Such entries are pruned by the voice-profile cleanup task.
+    first.
     """
     owner = entry.get("user_id")
     return owner is not None and owner == uid
@@ -140,9 +160,14 @@ async def clone_voice(
 
         # Try reading with soundfile (handles WAV, FLAC, OGG)
         try:
-            buf = io.BytesIO(audio_bytes)
-            data, samplerate = sf.read(buf)
-            sf.write(str(wav_path), data, samplerate)
+            # Decoding and re-encoding up to a minute of audio is real CPU
+            # time; keep it off the event loop that is streaming every live
+            # conversation.
+            def _to_wav() -> None:
+                data, samplerate = sf.read(io.BytesIO(audio_bytes))
+                sf.write(str(wav_path), data, samplerate)
+
+            await asyncio.to_thread(_to_wav)
         except Exception as sf_err:
             logger.debug(f"soundfile could not read audio, falling back to ffmpeg: {sf_err}")
             # Fallback: save raw bytes and let ffmpeg handle conversion
@@ -223,9 +248,7 @@ async def clone_voice(
         "user_id": uid,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    index = await _load_index()
-    index.append(entry)
-    await _save_index(index)
+    await _update_index(lambda index: [*index, entry])
 
     logger.info(f"Voice profile created: {name!r} ({voice_id}, {duration}s, user={uid})")
     return JSONResponse(
@@ -366,7 +389,7 @@ async def delete_voice(
     Path(entry["wav_path"]).unlink(missing_ok=True)
 
     # Remove from index
-    await _save_index([e for e in index if e["id"] != voice_id])
+    await _update_index(lambda current: [e for e in current if e["id"] != voice_id])
 
     # Clear voice_id from any avatars that reference this profile
     cleared = 0

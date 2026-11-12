@@ -6,7 +6,9 @@ import os
 import re
 import stat
 import tempfile
+import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -19,6 +21,7 @@ from app.services.llm import (
     LLMAuthError,
     LLMError,
     LLMRateLimited,
+    LLMRefused,
     LLMUnavailable,
     llm_service,
 )
@@ -129,6 +132,22 @@ MAX_TEXT_INPUT_LEN = 4000
 # System prompt is stored separately so it survives trimming.
 MAX_CONTEXT_MESSAGES = 60
 
+# When the window overflows, cut back to this many rather than to the cap.
+#
+# Trimming to the cap itself meant the very next turn overflowed again: after
+# the first overflow EVERY turn evicted two messages and ran a summarisation
+# call for them, awaited before the reply even started. The comment on
+# _roll_memory promised "once every 30 turns"; it was once per turn from turn
+# 31 onward. Cutting back further restores the amortisation — one
+# summarisation per (MAX - TRIM) / 2 turns.
+TRIM_CONTEXT_TO = 40
+
+# Close code sent to a socket that has been replaced by a newer connection to
+# the same session (another tab, or a reconnect that raced the old socket's
+# teardown). Distinct from 1000 so the client knows NOT to reconnect — two
+# tabs reconnecting in response to each other would never stop.
+WS_CLOSE_SUPERSEDED = 4409
+
 # Soft TTL for an idle (disconnected/abandoned) session in seconds.
 STALE_SESSION_TTL_SECS = 60 * 60 * 2  # 2 hours
 
@@ -151,6 +170,8 @@ def _llm_error_message(exc: LLMError) -> str:
         return "The AI provider rejected our credentials. This needs an admin."
     if isinstance(exc, LLMUnavailable):
         return "Couldn't reach the AI provider. Check your connection and try again."
+    if isinstance(exc, LLMRefused):
+        return "I can't help with that request. Try asking something else."
     return "The AI provider returned an error. Try again."
 
 
@@ -177,6 +198,55 @@ def _compose_system_prompt(base: Optional[str], summary: Optional[str]) -> Optio
     return f"{base}\n\n{memory_block}"
 
 
+def _llm_view(messages: List[dict]) -> List[dict]:
+    """
+    The history as it is safe to send to a provider.
+
+    The stored history is whatever actually happened, which is not always a
+    clean user/assistant alternation:
+
+      * a turn that failed or was interrupted before the model said anything
+        leaves two user messages in a row;
+      * trimming, or rehydrating the last N rows after a reconnect, can leave
+        an assistant message first.
+
+    Providers differ in how strictly they reject those shapes, and a rejection
+    is permanent for the session — every later turn carries the same history.
+    So leading assistant messages are dropped and consecutive messages from
+    the same role are merged. The stored history is left untouched.
+    """
+    view: List[dict] = []
+    for m in messages:
+        role, content = m.get("role"), m.get("content") or ""
+        if role not in ("user", "assistant") or not content:
+            continue
+        if not view and role != "user":
+            continue
+        if view and view[-1]["role"] == role:
+            view[-1] = {"role": role, "content": f"{view[-1]['content']}\n\n{content}"}
+        else:
+            view.append({"role": role, "content": content})
+    return view
+
+
+def _trim_window(messages: List[dict]) -> List[dict]:
+    """
+    Cut an overflowing history back to TRIM_CONTEXT_TO, in place, and return
+    what was removed (oldest first) so it can be summarised.
+
+    The cut lands on a user message so the kept window never opens with an
+    orphaned assistant reply. Returns [] when nothing needs trimming.
+    """
+    if len(messages) <= MAX_CONTEXT_MESSAGES:
+        return []
+    cut = len(messages) - TRIM_CONTEXT_TO
+    while cut < len(messages) - 1 and messages[cut].get("role") != "user":
+        cut += 1
+    dropped = messages[:cut]
+    del messages[:cut]
+    return dropped
+
+
 class ConnectionManager:
     """Manage WebSocket connections and the real-time avatar pipeline."""
 
@@ -196,6 +266,60 @@ class ConnectionManager:
         # receive loop may also send (pong/error) — without this, two
         # coroutines could interleave mid-frame and corrupt the connection.
         self._send_locks: Dict[str, asyncio.Lock] = {}
+        # Start times of recent turns per USER (not per session — one user can
+        # open many sessions), for the turn rate limit.
+        self._turn_times: Dict[str, deque] = {}
+        # Fire-and-forget work (memory summarisation, persisting an interrupted
+        # reply). Held here because asyncio keeps only weak references to
+        # tasks: an unreferenced one can be garbage-collected mid-flight.
+        self._background: set[asyncio.Task] = set()
+        # Per session: a callable that records the in-flight turn's reply so
+        # far. See _commit_pending_reply.
+        self._pending_commits: Dict[str, object] = {}
+
+    def _spawn_bg(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return task
+
+    def _allow_turn(self, session_id: str) -> bool:
+        """
+        Sliding-window limit on turns started per user per minute.
+
+        The HTTP rate limiter is middleware and never sees WebSocket frames,
+        so nothing bounded this path: each text frame opens an LLM stream and
+        each audio frame runs speech-to-text, and a guest account (free, and
+        minted without credentials) could loop them. Interrupting the previous
+        turn does not help — the provider call has already been made.
+        """
+        limit = settings.WS_TURNS_PER_MINUTE
+        if limit <= 0:
+            return True
+        data = self.session_data.get(session_id) or {}
+        key = data.get("user_id") or f"session:{session_id}"
+        now = time.monotonic()
+        window = self._turn_times.setdefault(key, deque())
+        while window and now - window[0] > 60:
+            window.popleft()
+        if len(window) >= limit:
+            return False
+        window.append(now)
+        # Opportunistic cleanup so the map cannot grow without bound.
+        if len(self._turn_times) > 10_000:
+            for k in [k for k, w in self._turn_times.items() if not w or now - w[-1] > 60]:
+                self._turn_times.pop(k, None)
+        return True
+
+    async def _reject_rate_limited(self, session_id: str) -> None:
+        await self.send_message(
+            session_id,
+            {
+                "type": "error",
+                "code": "rate_limited",
+                "message": "You're sending messages too quickly. Wait a moment and try again.",
+            },
+        )
 
     # ── connection lifecycle ──────────────────────────────────────────────────
 
@@ -213,6 +337,26 @@ class ConnectionManager:
 
     async def connect(self, session_id: str, websocket: WebSocket, user_id: Optional[str] = None):
         await websocket.accept()
+
+        # A second connection to the same session replaces the first. The old
+        # socket used to be silently overwritten and left open: its turn kept
+        # streaming into the new connection, and when it eventually errored
+        # its handler tore down the session by id — closing the NEW socket a
+        # few seconds after a successful reconnect.
+        previous = self.active_connections.get(session_id)
+        if previous is not None and previous is not websocket:
+            self._commit_pending_reply(session_id)
+            task = self._active_turns.pop(session_id, None)
+            if task and not task.done():
+                task.cancel()
+            # Closed in the background, with a deadline, AFTER the new socket
+            # is registered below. Awaiting the close here made the new
+            # connection wait on the old peer's close handshake — and the
+            # usual reason for a reconnect is that the old peer is gone, so
+            # that wait ran to the full handshake timeout.
+            self._spawn_bg(self._close_quietly(previous, WS_CLOSE_SUPERSEDED))
+            logger.info(f"WebSocket for {session_id} superseded by a newer connection")
+
         self.active_connections[session_id] = websocket
         self._send_locks[session_id] = asyncio.Lock()
         self.session_data[session_id] = {
@@ -238,9 +382,10 @@ class ConnectionManager:
         Fold the turns just evicted from the context window into the running
         summary, and persist it.
 
-        Runs only when the window actually overflows — for a 60-message window
-        that is once every 30 turns, not once per turn, which is what keeps
-        this from adding a second LLM call to every reply.
+        Runs only when the window overflows and is cut back to
+        TRIM_CONTEXT_TO — once every (MAX_CONTEXT_MESSAGES - TRIM_CONTEXT_TO)
+        / 2 turns, in the background (see _schedule_memory_roll), so it adds
+        neither a call to every reply nor a wait to the one that triggers it.
 
         Never raises. Losing the summary costs continuity; letting it raise
         would cost the turn, and the turn is the thing the user asked for.
@@ -415,9 +560,11 @@ class ConnectionManager:
                         logger.info(f"Loaded system prompt for avatar {avatar.id}")
 
                     if avatar.voice_id:
-                        wav = await self._get_voice_wav_path(avatar.voice_id)
-                        if wav:
-                            self.session_data[session_id]["voice_wav"] = wav
+                        # Same ownership rule as an explicit set_voice. The
+                        # avatar's voice_id is a free-form string its owner
+                        # can set, so without this check a leaked voice UUID
+                        # was enough to speak in another user's cloned voice.
+                        if await self.set_voice_by_id(session_id, avatar.voice_id):
                             logger.info(
                                 f"Auto-loaded voice {avatar.voice_id} for session {session_id}"
                             )
@@ -425,20 +572,6 @@ class ConnectionManager:
 
         except Exception as e:
             logger.error(f"Failed to load session data for {session_id}: {e}")
-
-    async def _get_voice_wav_path(self, voice_id: str) -> Optional[str]:
-        """Return the WAV filesystem path for a voice profile, or None if not found."""
-        voice_index = Path("voice_profiles") / "index.json"
-        if not voice_index.exists():
-            return None
-        try:
-            raw = await asyncio.to_thread(voice_index.read_text)
-            for entry in json.loads(raw):
-                if entry["id"] == voice_id:
-                    return entry.get("wav_path")
-        except Exception as e:
-            logger.warning(f"Could not read voice index: {e}")
-        return None
 
     async def _get_voice_entry(self, voice_id: str) -> Optional[dict]:
         """Return the full voice-index entry (including `user_id`) for ownership checks."""
@@ -471,12 +604,25 @@ class ConnectionManager:
         # S3 fallback: download and cache locally for the animator
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         data = await storage_service.download_file(avatar.s3_key)
-        cache_path.write_bytes(data)
+        await asyncio.to_thread(_write_private_bytes, cache_path, data)
         return str(cache_path)
 
-    async def disconnect(self, session_id: str):
+    async def disconnect(self, session_id: str, websocket: Optional[WebSocket] = None):
+        """
+        Tear down a session's connection state.
+
+        Pass `websocket` when the caller is acting on behalf of ONE specific
+        socket (its receive loop ended, or a send on it failed). If that
+        socket has since been replaced by a newer connection this is a no-op:
+        the session now belongs to the newer socket and must not be torn down
+        because the old one finally noticed it was dead.
+        """
+        if websocket is not None and self.active_connections.get(session_id) is not websocket:
+            return
+
         # Cancel any in-flight LLM/TTS/animation task for this session so it
         # doesn't keep churning after the client is gone (wasted tokens + GPU).
+        self._commit_pending_reply(session_id)
         task = self._active_turns.pop(session_id, None)
         if task and not task.done():
             task.cancel()
@@ -508,6 +654,27 @@ class ConnectionManager:
                 logger.warning(f"Could not clean session tmp dir for {session_id}: {e}")
         logger.info(f"WebSocket disconnected: {session_id}")
 
+    @staticmethod
+    async def _close_quietly(ws: WebSocket, code: int) -> None:
+        try:
+            await asyncio.wait_for(ws.close(code=code), timeout=2)
+        except Exception:
+            pass  # already gone, or never going to answer
+
+    def _commit_pending_reply(self, session_id: str) -> None:
+        """
+        Record what the in-flight turn has said so far, NOW.
+
+        Must run before a new turn appends its user message. Cancellation is
+        delivered on a later loop iteration, so leaving this to the cancelled
+        task's own handler stored the interrupted reply AFTER the next
+        question: the history read user, user, assistant and the next request
+        to the model ended on an assistant message.
+        """
+        commit = self._pending_commits.pop(session_id, None)
+        if commit is not None:
+            commit()
+
     async def interrupt_active_turn(self, session_id: str) -> bool:
         """
         Cancel any in-flight turn for this session ("barge-in"). Returns
@@ -515,6 +682,7 @@ class ConnectionManager:
         arrives mid-response — modern voice-AI UX expects sub-100 ms cutoff
         so the user doesn't keep hearing the previous response while talking.
         """
+        self._commit_pending_reply(session_id)
         task = self._active_turns.pop(session_id, None)
         if task and not task.done():
             task.cancel()
@@ -543,7 +711,7 @@ class ConnectionManager:
                 await ws.send_json(message)
         except Exception as e:
             logger.error(f"Send failed [{session_id}]: {e}")
-            await self.disconnect(session_id)
+            await self.disconnect(session_id, ws)
 
     # ── DB persistence helpers ────────────────────────────────────────────────
 
@@ -650,6 +818,16 @@ class ConnectionManager:
         the full chat turn inside a tracked task so the WS loop stays free to
         receive the next message (enabling barge-in even mid-transcription).
         """
+        # Checked on the encoded string, before decoding: the limit exists so
+        # an oversized frame is never expanded into memory in the first place.
+        if len(audio_data) > settings.WS_MAX_AUDIO_BYTES * 4 // 3 + 4:
+            await self.send_message(
+                session_id, {"type": "error", "message": "Audio payload too large"}
+            )
+            return
+        if not self._allow_turn(session_id):
+            await self._reject_rate_limited(session_id)
+            return
         await self.interrupt_active_turn(session_id)
         self._spawn_turn(session_id, self._handle_audio_inner(session_id, audio_data))
 
@@ -666,13 +844,6 @@ class ConnectionManager:
             except Exception:
                 await self.send_message(
                     session_id, {"type": "error", "message": "Invalid audio data"}
-                )
-                return
-
-            # 50 MB hard cap so a malicious client cannot OOM the server
-            if len(raw) > 50 * 1024 * 1024:
-                await self.send_message(
-                    session_id, {"type": "error", "message": "Audio payload too large"}
                 )
                 return
 
@@ -733,27 +904,65 @@ class ConnectionManager:
             )
             return
 
+        if not self._allow_turn(session_id):
+            await self._reject_rate_limited(session_id)
+            return
         await self.interrupt_active_turn(session_id)
         self._spawn_turn(session_id, self._handle_text_input_inner(session_id, text))
 
     async def _handle_text_input_inner(self, session_id: str, text: str):
         started_at = datetime.now(timezone.utc)
+        # Filled in by the producer as tokens arrive, so that if this turn is
+        # cancelled we still know what the model had said so far.
+        progress: dict = {"text": "", "committed": False}
+        messages: list[dict] = []
+
+        def commit_reply(reply: str) -> None:
+            """
+            Record the assistant's reply in the history and the database.
+
+            Called the moment the model finishes — NOT after the last clip
+            has been delivered. It used to wait for the whole turn, which
+            left a window after the client had everything: a follow-up sent
+            straight away cancelled this turn mid-save, so the reply was
+            stored after the next question, or twice, or not at all.
+
+            Synchronous on purpose (the write itself is handed off): there is
+            no await in here for a cancellation to land on.
+            """
+            reply = (reply or "").strip()
+            if not reply or progress["committed"]:
+                return
+            progress["committed"] = True
+            messages.append({"role": "assistant", "content": reply})
+            latency = (datetime.now(timezone.utc) - started_at).total_seconds()
+            self._spawn_bg(self._persist_message(session_id, "assistant", reply, latency=latency))
+
+        def commit_so_far() -> None:
+            commit_reply(progress.get("text") or "")
+
+        self._pending_commits[session_id] = commit_so_far
 
         try:
             data = self.session_data.get(session_id, {})
             data["last_activity"] = started_at
-            messages: list[dict] = data.get("messages", [])
+            # The session's own list, mutated in place: whatever happens to
+            # this turn, the history reflects it. (It used to be reassigned
+            # only on success, so a failed turn's trim was undone and the same
+            # messages were summarised again on the next one.)
+            messages = data.setdefault("messages", [])
             messages.append({"role": "user", "content": text})
 
             # Cap the conversation window. The system prompt is passed
             # separately to the LLM so we don't need to keep it in `messages`.
-            if len(messages) > MAX_CONTEXT_MESSAGES:
-                # Roll what is about to be lost into the running summary before
-                # discarding it. Without this the model simply forgets the
-                # opening of a long conversation, with nothing to indicate it
-                # ever happened.
-                await self._roll_memory(session_id, messages[:-MAX_CONTEXT_MESSAGES])
-                messages = messages[-MAX_CONTEXT_MESSAGES:]
+            dropped = _trim_window(messages)
+            if dropped:
+                # Roll what was lost into the running summary — in the
+                # background. Awaiting it here put a whole extra LLM round
+                # trip in front of the reply; the summary is context for
+                # LATER turns and loses nothing by arriving a moment after
+                # this one starts.
+                self._schedule_memory_roll(session_id, dropped)
 
             system_prompt = _compose_system_prompt(
                 data.get("system_prompt"), data.get("memory_summary")
@@ -777,7 +986,14 @@ class ConnectionManager:
             # so a trace shows exactly where a slow turn spent its time.
             with span("chat.turn", **{"input_chars": len(text)}):
                 results = await asyncio.gather(
-                    self._llm_producer(session_id, messages, system_prompt, sentence_queue),
+                    self._llm_producer(
+                        session_id,
+                        _llm_view(messages),
+                        system_prompt,
+                        sentence_queue,
+                        progress,
+                        commit_reply,
+                    ),
                     self._animate_from_queue(session_id, sentence_queue),
                     return_exceptions=True,
                 )
@@ -787,19 +1003,45 @@ class ConnectionManager:
                 if isinstance(r, Exception):
                     raise r
 
-            response_text = results[0] if isinstance(results[0], str) else ""
-            if response_text:
-                messages.append({"role": "assistant", "content": response_text})
-                data["messages"] = messages
-                latency = (datetime.now(timezone.utc) - started_at).total_seconds()
-                await self._persist_message(session_id, "assistant", response_text, latency=latency)
+            # Normally a no-op: the producer committed when the model finished.
+            commit_reply(results[0] if isinstance(results[0], str) else "")
 
+        except asyncio.CancelledError:
+            # Interrupted (barge-in, stop button, disconnect) before the model
+            # finished. Keep what the avatar had already said: it used to
+            # vanish from both the context and the database, so the model had
+            # no idea it had started an answer and the saved transcript showed
+            # a question with no reply.
+            commit_reply(progress.get("text") or "")
+            raise
         except LLMError as e:
             logger.error(f"Text turn LLM error [{session_id}]: {type(e).__name__}: {e}")
             await self.send_message(session_id, {"type": "error", "message": _llm_error_message(e)})
         except Exception as e:
             logger.error(f"Text error [{session_id}]: {e}")
             await self.send_message(session_id, {"type": "error", "message": "Processing failed"})
+        finally:
+            if self._pending_commits.get(session_id) is commit_so_far:
+                self._pending_commits.pop(session_id, None)
+
+    def _schedule_memory_roll(self, session_id: str, dropped: list[dict]) -> None:
+        """
+        Summarise `dropped` in the background, after any roll already running
+        for this session — each roll folds the previous summary into the next,
+        so two running at once would both start from the same one and the
+        slower would overwrite the faster.
+        """
+        data = self.session_data.get(session_id)
+        if data is None:
+            return
+        previous: Optional[asyncio.Task] = data.get("_memory_task")
+
+        async def _chain() -> None:
+            if previous is not None and not previous.done():
+                await asyncio.gather(previous, return_exceptions=True)
+            await self._roll_memory(session_id, dropped)
+
+        data["_memory_task"] = self._spawn_bg(_chain())
 
     # ── streaming pipeline ────────────────────────────────────────────────────
 
@@ -809,6 +1051,8 @@ class ConnectionManager:
         messages: List[dict],
         system_prompt: Optional[str],
         queue: "asyncio.Queue[Optional[str]]",
+        progress: Optional[dict] = None,
+        on_complete=None,
     ) -> str:
         """
         Stream LLM tokens, emit `token` events to the frontend, and push
@@ -818,6 +1062,10 @@ class ConnectionManager:
         a low length bar so TTS+animation can start within the opening few
         words; every chunk after that uses sentence boundaries for smoother
         prosody and fewer synthesis calls. Returns the complete response text.
+
+        `progress["text"]` tracks the reply so far, for the caller to keep if
+        this turn is cancelled. `on_complete(text)` is called as soon as the
+        model has finished, before the remaining sentences are spoken.
         """
         buf = ""
         full_text = ""
@@ -831,6 +1079,8 @@ class ConnectionManager:
 
                     full_text += token
                     buf += token
+                    if progress is not None:
+                        progress["text"] = full_text
 
                     # Send live token to frontend
                     await self.send_message(session_id, {"type": "token", "token": token})
@@ -842,18 +1092,31 @@ class ConnectionManager:
                         await queue.put(chunk)
                         first_chunk_sent = True
 
+            if on_complete is not None:
+                on_complete(full_text)
+
             # Flush any remaining tail — it's the end of the reply, so speak it
             # even if it's short.
             remainder = buf.strip()
             if remainder:
                 await queue.put(remainder)
 
+        except asyncio.CancelledError:
+            # The consumer is being cancelled with us, so nothing will ever
+            # read this queue again. Do NOT wait on it: a `finally` that awaited
+            # put(None) here blocked forever whenever the queue was full (any
+            # reply long enough to get ahead of the animation), leaving the
+            # turn task and the provider's HTTP stream open for good.
+            raise
         except Exception as e:
             logger.error(f"LLM producer error [{session_id}]: {e}")
-            raise
-        finally:
-            # Always signal end so the consumer doesn't hang
+            # The consumer is still running (gather does not cancel siblings),
+            # so it will make room; tell it there is nothing more to wait for.
             await queue.put(None)
+            raise
+
+        # Signal end so the consumer finishes once it has spoken what is queued.
+        await queue.put(None)
 
         # Send complete assembled message
         await self.send_message(
@@ -867,28 +1130,19 @@ class ConnectionManager:
         queue: "asyncio.Queue[Optional[str]]",
     ) -> None:
         """
-        Consume sentences from the queue and run TTS + animation for each,
-        streaming video_chunk events to the frontend as they complete.
+        Consume sentences from the queue, run TTS + animation for each, and
+        stream `video_chunk` events to the frontend as they complete.
+
+        Two stages joined by a small queue, so speech for sentence N+1 is
+        synthesised WHILE sentence N is being animated. They used to run
+        strictly one after the other — TTS, then animation, then upload, then
+        TTS again — which left the synthesiser idle for the whole of every
+        animation and put its latency into the gap between sentences.
         """
         data = self.session_data.get(session_id, {})
         avatar_image = data.get("avatar_image_local")
         speaker_wav: Optional[str] = data.get("voice_wav")
         language: str = data.get("language", "en")
-
-        # If no avatar image, drain queue silently
-        if not avatar_image:
-            logger.warning(f"No avatar image for session {session_id}")
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-            return
-
-        chunk_index: int = 0
-        sent_any = False
-        # Only warn about TTS fallback once per turn — repeated warnings on
-        # every sentence would be noisy. We reset this in the enclosing turn.
-        fallback_announced = False
 
         await self.send_message(
             session_id,
@@ -898,115 +1152,167 @@ class ConnectionManager:
             },
         )
 
-        while True:
-            sentence = await queue.get()
-            if sentence is None:
-                break
-
-            if session_id not in self.active_connections:
-                break  # client disconnected mid-stream
-
-            job_id = uuid.uuid4().hex[:12]
-            session_dir = _private_session_dir(session_id)
-            tmp_audio = session_dir / f"{job_id}_audio.wav"
-            tmp_video = session_dir / f"{job_id}_video.mp4"
-
-            try:
+        if not avatar_image:
+            # Nothing to animate. Drain so the producer never blocks, then
+            # close the turn out explicitly — returning silently left the
+            # client showing its "generating" spinner indefinitely.
+            logger.warning(f"No avatar image for session {session_id}")
+            unspoken = 0
+            while await queue.get() is not None:
+                unspoken += 1
+            await self.send_message(session_id, {"type": "video_chunk_end", "sent_chunks": 0})
+            # Only when there was something to say: if the model itself failed
+            # the caller reports that, and a second error would bury it.
+            if unspoken:
                 await self.send_message(
                     session_id,
-                    {
-                        "type": "status",
-                        "message": "Animating…",
-                        "stage": "animation",
-                    },
+                    {"type": "error", "message": "This avatar's image is unavailable."},
                 )
+            return
 
-                with span(
-                    "tts.synthesize",
-                    **{"chars": len(sentence), "lang": language, "cloned": bool(speaker_wav)},
-                ):
-                    synth = await tts_service.synthesize(
-                        text=sentence,
-                        output_path=str(tmp_audio),
-                        speaker_wav=speaker_wav,
-                        language=language,
+        session_dir = _private_session_dir(session_id)
+        # (sentence, audio path, synthesis result), or None for end-of-stream.
+        audio_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+        # Every temp file this turn creates, so cancellation at any point
+        # (including between the two stages) leaves nothing behind.
+        created: set[Path] = set()
+        sent_chunks = 0
+
+        async def synthesize_stage() -> None:
+            try:
+                while True:
+                    sentence = await queue.get()
+                    if sentence is None:
+                        break
+                    if session_id not in self.active_connections:
+                        continue  # client gone: keep draining, do no work
+                    tmp_audio = session_dir / f"{uuid.uuid4().hex[:12]}_audio.wav"
+                    created.add(tmp_audio)
+                    try:
+                        with span(
+                            "tts.synthesize",
+                            **{
+                                "chars": len(sentence),
+                                "lang": language,
+                                "cloned": bool(speaker_wav),
+                            },
+                        ):
+                            synth = await tts_service.synthesize(
+                                text=sentence,
+                                output_path=str(tmp_audio),
+                                speaker_wav=speaker_wav,
+                                language=language,
+                            )
+                    except Exception as e:
+                        logger.error(f"TTS failed for a sentence [{session_id}]: {e}")
+                        continue
+                    await audio_queue.put((sentence, tmp_audio, synth))
+            except asyncio.CancelledError:
+                raise  # the animate stage is cancelled too; see _llm_producer
+            except Exception:
+                await audio_queue.put(None)
+                raise
+            await audio_queue.put(None)
+
+        async def animate_stage() -> None:
+            nonlocal sent_chunks
+            # Only announce a TTS fallback once per turn — a notice on every
+            # sentence would be noise.
+            fallback_announced = False
+            while True:
+                item = await audio_queue.get()
+                if item is None:
+                    break
+                sentence, tmp_audio, synth = item
+                tmp_video = session_dir / f"{tmp_audio.stem.split('_')[0]}_video.mp4"
+                created.add(tmp_video)
+                try:
+                    if session_id not in self.active_connections:
+                        continue
+
+                    await self.send_message(
+                        session_id,
+                        {"type": "status", "message": "Animating…", "stage": "animation"},
                     )
 
-                # Notify the client exactly once if Chatterbox bailed and
-                # we ended up serving the un-cloned gTTS voice instead.
-                if synth.fallback and not fallback_announced:
-                    fallback_announced = True
+                    # Notify the client exactly once if the configured engine
+                    # bailed and we ended up serving a different voice.
+                    if synth.fallback and not fallback_announced:
+                        fallback_announced = True
+                        await self.send_message(
+                            session_id,
+                            {
+                                "type": "tts_fallback",
+                                "engine": synth.engine,
+                                "voice_cloned": synth.voice_cloned,
+                                "message": (
+                                    "Cloned voice unavailable — using default voice for this reply."
+                                    if speaker_wav
+                                    else f"Voice engine fell back to {synth.engine} for this reply."
+                                ),
+                            },
+                        )
+
+                    with span("avatar.animate", **{"chunk": sent_chunks}):
+                        await avatar_animator.animate(
+                            avatar_image_path=avatar_image,
+                            audio_path=str(tmp_audio),
+                            output_path=str(tmp_video),
+                        )
+
+                    ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+                    video_key = f"videos/{session_id}/{ts}_c{sent_chunks}.mp4"
+                    with span("storage.upload", **{"chunk": sent_chunks}):
+                        video_bytes = await asyncio.to_thread(tmp_video.read_bytes)
+                        await storage_service.upload_file(
+                            video_bytes, video_key, content_type="video/mp4"
+                        )
+                        # S3 objects are private — hand the client a URL it can
+                        # actually fetch (presigned on S3, /uploads/ locally).
+                        video_url = await storage_service.serving_url(video_key)
+
                     await self.send_message(
                         session_id,
                         {
-                            "type": "tts_fallback",
-                            "engine": synth.engine,
-                            "voice_cloned": synth.voice_cloned,
-                            "message": (
-                                "Cloned voice unavailable — using default voice for this reply."
-                                if speaker_wav
-                                else f"Voice engine fell back to {synth.engine} for this reply."
-                            ),
+                            "type": "video_chunk",
+                            "chunk_index": sent_chunks,
+                            "total_chunks": -1,
+                            "video_url": video_url,
+                            "text": sentence,
                         },
                     )
+                    sent_chunks += 1
+                    logger.info(f"Chunk {sent_chunks} ready [{session_id}]")
 
-                with span("avatar.animate", **{"chunk": chunk_index}):
-                    await avatar_animator.animate(
-                        avatar_image_path=avatar_image,
-                        audio_path=str(tmp_audio),
-                        output_path=str(tmp_video),
-                    )
+                except Exception as e:
+                    logger.error(f"Chunk {sent_chunks} failed [{session_id}]: {e}")
 
-                ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-                video_key = f"videos/{session_id}/{ts}_c{chunk_index}.mp4"
-                with span("storage.upload", **{"chunk": chunk_index}):
-                    await storage_service.upload_file(
-                        tmp_video.read_bytes(), video_key, content_type="video/mp4"
-                    )
-                    # S3 objects are private — hand the client a URL it can
-                    # actually fetch (presigned on S3, /uploads/ locally).
-                    video_url = await storage_service.serving_url(video_key)
+                finally:
+                    for f in (tmp_audio, tmp_video):
+                        f.unlink(missing_ok=True)
+                        created.discard(f)
 
-                await self.send_message(
-                    session_id,
-                    {
-                        "type": "video_chunk",
-                        "chunk_index": chunk_index,
-                        "total_chunks": -1,
-                        "video_url": video_url,
-                        "text": sentence,
-                    },
-                )
-                chunk_index = chunk_index + 1
-                sent_any = True
-                logger.info(f"Chunk {chunk_index} ready [{session_id}]")
-
-            except Exception as e:
-                logger.error(f"Chunk {chunk_index} failed [{session_id}]: {e}")
-
-            finally:
-                tmp_audio.unlink(missing_ok=True)
-                tmp_video.unlink(missing_ok=True)
+        try:
+            await asyncio.gather(synthesize_stage(), animate_stage())
+        finally:
+            for f in created:
+                f.unlink(missing_ok=True)
 
         await self.send_message(
             session_id,
             {
                 "type": "video_chunk_end",
-                "sent_chunks": chunk_index,
+                "sent_chunks": sent_chunks,
             },
         )
 
-        if not sent_any:
+        if sent_chunks == 0:
             await self.send_message(
                 session_id,
                 {"type": "error", "message": "Avatar animation failed for all sentences."},
             )
 
     # ── helpers ───────────────────────────────────────────────────────────────
-
-    async def set_avatar(self, session_id: str, avatar_id: str):
-        if session_id in self.session_data:
-            self.session_data[session_id]["avatar_id"] = avatar_id
 
     async def set_voice_by_id(self, session_id: str, voice_id: str) -> bool:
         """
@@ -1024,8 +1330,8 @@ class ConnectionManager:
         # session. Otherwise user A could guess user B's voice UUID and
         # surreptitiously use their cloned voice.
         session_user = self.session_data[session_id].get("user_id")
-        voice_user = entry.get("user_id", "demo-user")
-        if session_user and voice_user != session_user:
+        voice_user = entry.get("user_id")
+        if not session_user or voice_user != session_user:
             logger.warning(
                 f"WS set_voice rejected: voice {voice_id} owned by "
                 f"{voice_user!r} but session belongs to {session_user!r}"
@@ -1141,7 +1447,7 @@ class ConnectionManager:
                             )
                         except (asyncio.TimeoutError, Exception):
                             logger.info(f"WS keepalive failed for {session_id} — disconnecting")
-                            await self.disconnect(session_id)
+                            await self.disconnect(session_id, ws)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:

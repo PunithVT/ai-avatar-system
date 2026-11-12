@@ -1,0 +1,34 @@
+# Keep the build context — and the image — to the application.
+#
+# `COPY . .` used to pull in everything beside the Dockerfile: a local
+# virtualenv (~6 GB), the MuseTalk checkout and its weights (~7 GB), uploaded
+# avatars, users' recorded voice samples, and the test database. On a
+# developer machine that made builds enormous and baked personal data into
+# the image; the weights and uploads are mounted at run time instead
+# (see docker-compose.prod.yml).
+
+venv/
+.venv/
+models/
+uploads/
+voice_profiles/
+*.db
+*.sqlite3
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+tests/
+.env
+.env.*
+*.log
+.git
+.gitignore
+.dockerignore
+Dockerfile

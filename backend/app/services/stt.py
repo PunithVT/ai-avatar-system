@@ -58,6 +58,13 @@ class STTService:
             if self.model is None:
                 self.model = await asyncio.to_thread(self._build_model)
 
+    async def warm(self) -> None:
+        """Load the model ahead of the first voice turn. Never raises."""
+        try:
+            await self.initialize()
+        except Exception as e:
+            logger.warning(f"STT warm-up skipped: {e}")
+
     async def transcribe(self, audio_data: Union[bytes, str], language: str = "en") -> str:
         if self.provider != "whisper":
             raise ValueError(f"Unsupported STT provider: {self.provider}")
@@ -98,7 +105,7 @@ class STTService:
                 segments, info = self.model.transcribe(
                     source,
                     language=language,
-                    beam_size=5,
+                    beam_size=settings.WHISPER_BEAM_SIZE,
                     vad_filter=True,
                     vad_parameters=dict(min_silence_duration_ms=500),
                 )
@@ -109,7 +116,7 @@ class STTService:
                 segments, info = self.model.transcribe(
                     audio,
                     language=language,
-                    beam_size=5,
+                    beam_size=settings.WHISPER_BEAM_SIZE,
                     vad_filter=True,
                     vad_parameters=dict(min_silence_duration_ms=500),
                 )

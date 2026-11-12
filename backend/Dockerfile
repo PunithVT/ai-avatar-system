@@ -3,7 +3,7 @@ FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-# Install Python 3.10 + system dependencies.
+# Install system dependencies. Python itself comes from uv, below.
 #
 # Wrapped in a retry loop because this layer is the build's most fragile step:
 # it runs right after the multi-GB CUDA base image is pulled, then fetches
@@ -29,9 +29,7 @@ RUN set -eux; \
             && apt-get install -y \
                 -o Acquire::Retries=5 \
                 -o Acquire::http::Timeout=30 \
-                python3.10 \
-                python3.10-dev \
-                python3-pip \
+                ca-certificates \
                 ffmpeg \
                 libsm6 \
                 libxext6 \
@@ -45,10 +43,44 @@ RUN set -eux; \
         sleep $((attempt * 15)); \
     done; \
     [ "$apt_ok" = 1 ] || { echo "apt failed after 5 attempts" >&2; exit 1; }; \
-    rm -rf /var/lib/apt/lists/*; \
-    ln -sf python3.10 /usr/bin/python3; \
-    ln -sf python3 /usr/bin/python; \
-    ln -sf pip3 /usr/bin/pip
+    rm -rf /var/lib/apt/lists/*
+
+# Python 3.11, in a virtualenv.
+#
+# 3.11, not Ubuntu 22.04's default 3.10: 3.10 is past end-of-life, and the
+# fixed releases of Pillow and filelock (57 advisories between them) need
+# 3.11. And NOT Ubuntu 22.04's own python3.11 package either — that is
+# 3.11.0rc1, a 2022 release candidate that never received a single fix.
+# uv installs a current, maintained 3.11 build (the same one the test suite
+# runs on), independent of what the base image's distribution happens to ship.
+ARG UV_VERSION=0.12.8
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
+RUN set -eux; \
+    curl -fsSL --retry 5 --retry-delay 5 \
+        "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
+        | tar -xz -C /usr/local/bin --strip-components=1; \
+    uv python install 3.11; \
+    uv venv --seed --python 3.11 /opt/venv; \
+    /opt/venv/bin/python --version
+
+# Everything below — pip, python, alembic, uvicorn, celery — resolves to the
+# virtualenv.
+ENV PATH="/opt/venv/bin:${PATH}" \
+    VIRTUAL_ENV=/opt/venv
+
+# Install PyTorch with CUDA 11.8 (matches base image) FIRST.
+#
+# requirements.txt pins the same versions without a CUDA suffix. Installed in
+# the other order, pip fetched the default PyPI build of torch — a different
+# CUDA generation, with its multi-GB nvidia-* wheels — and then this step
+# replaced torch but left those wheels behind in an earlier layer for good.
+# With the +cu118 builds already present, `torch==2.2.0` in requirements.txt
+# is satisfied and nothing is downloaded twice.
+RUN pip install --no-cache-dir \
+    torch==2.2.0+cu118 \
+    torchvision==0.17.0+cu118 \
+    torchaudio==2.2.0+cu118 \
+    --index-url https://download.pytorch.org/whl/cu118
 
 # Copy requirements
 COPY requirements.txt .
@@ -56,18 +88,11 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install PyTorch with CUDA 11.8 (matches base image)
-RUN pip install --no-cache-dir \
-    torch==2.2.0+cu118 \
-    torchvision==0.17.0+cu118 \
-    torchaudio==2.2.0+cu118 \
-    --index-url https://download.pytorch.org/whl/cu118
-
 # Copy application code
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /tmp/avatars /tmp/videos /tmp/audio voice_profiles
+RUN mkdir -p /tmp/avatars /tmp/videos /tmp/audio voice_profiles uploads models
 
 # Entrypoint: run migrations then start server
 COPY entrypoint.sh .
@@ -81,4 +106,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
 # Run application via entrypoint (handles migrations automatically)
-CMD ["./entrypoint.sh"]
+# Through bash rather than relying on the file's execute bit: the development
+# compose file bind-mounts the source over /app, replacing this script with
+# the host's copy, whose mode depends on the checkout.
+CMD ["bash", "./entrypoint.sh"]

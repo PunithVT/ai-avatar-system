@@ -10,8 +10,8 @@ ruff==0.15.15
 
 # Test stack (also pulled in by requirements.txt, repeated here so
 # `pip install -r requirements-dev.txt` alone is enough for a test run).
-pytest==7.4.4
-pytest-asyncio==0.23.3
-pytest-cov==4.1.0
+pytest==9.0.3
+pytest-asyncio==1.4.1.post1
+pytest-cov==7.1.0
 httpx==0.26.0
 aiosqlite==0.19.0

@@ -94,8 +94,14 @@ fi
 # ── 6. Build and start services ──────────────────────────────────────────────
 echo "[6/6] Building and starting services..."
 cd "$APP_DIR"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml build --no-cache
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# --env-file .env.prod: compose substitutes ${VARS} in the compose files from
+# this file. Without it compose read only `.env` (which a production host does
+# not have), so every ${BACKEND_URL}/${DATABASE_PASSWORD} fell back to its
+# development default: the frontend was BUILT to call http://localhost:8000 —
+# the visitor's own machine — and Postgres was created with the placeholder
+# password, whatever .env.prod said.
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml build --no-cache
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 echo ""
@@ -113,5 +119,5 @@ echo "  GPU status  :"
 docker exec avatar-backend nvidia-smi --query-gpu=name,memory.used,memory.total,temperature.gpu \
   --format=csv,noheader 2>/dev/null || echo "  (GPU info not yet available — backend still starting)"
 echo ""
-echo "  Logs        : docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f backend"
+echo "  Logs        : docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml logs -f backend"
 echo "========================================"

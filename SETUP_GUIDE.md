@@ -4,7 +4,7 @@
 
 ### Required Software
 - **Docker** (20.10+) and **Docker Compose** (2.0+)
-- **Python** 3.10+
+- **Python** 3.11+
 - **Node.js** 18+
 - **AWS CLI** configured with credentials
 - **Git**
@@ -235,7 +235,7 @@ AVATAR_ENGINE=simple
 **Use Claude (Recommended)**:
 ```env
 LLM_PROVIDER=anthropic
-LLM_MODEL=claude-sonnet-4-20250514
+LLM_MODEL=claude-sonnet-5-5
 ANTHROPIC_API_KEY=your_key_here
 ```
 
@@ -436,11 +436,16 @@ aws sts get-caller-identity
              capabilities: [gpu]
    ```
 
-2. **Increase workers**
-   ```bash
-   # In Dockerfile CMD
-   CMD ["uvicorn", "main:app", "--workers", "4"]
-   ```
+2. **Keep one server worker per GPU**
+
+   Do not raise `UVICORN_WORKERS` above 1. Each worker process loads its own
+   speech models and starts its own lip-sync process, and live sessions are
+   held in the process — more workers means several copies of the models
+   competing for one GPU and sessions that cannot find each other. The server
+   is async, so one process already serves many conversations. To scale, run
+   more backend containers (one per GPU) behind the load balancer.
+
+   Set `PRELOAD_MODELS=true` so the models load at startup, not on the first turn.
 
 3. **Enable caching**
    - Use Redis for session data

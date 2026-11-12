@@ -1,13 +1,18 @@
 'use client'
 
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, type ChangeEvent } from 'react'
 import {
   Mic, MicOff, Play, Pause, Trash2, Upload, Check, Loader2,
   Volume2, Wand2, Music, AlertCircle, PlusCircle, RefreshCw,
 } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
-import type { VoiceApiResponse, ApiError } from '@/lib/types'
+import {
+  MIC_CONSTRAINTS, closeContext, createRecorder, micErrorMessage, micUnavailableReason,
+  openAnalyser, stopStream,
+} from '@/lib/chat/audio'
+import { errorMessage } from '@/lib/errors'
+import type { VoiceApiResponse } from '@/lib/types'
 
 interface VoiceProfile {
   id: string
@@ -31,38 +36,55 @@ const SUPPORTED_LANGUAGES: { code: string; label: string }[] = [
   { code: 'ko', label: '🇰🇷 Korean' },
 ]
 
-const PRESET_VOICES: VoiceProfile[] = [
-  { id: 'default-en', name: 'Alex (English)', language: 'en', duration: 0, createdAt: new Date(), isDefault: true },
-  { id: 'default-warm', name: 'Jordan (Warm)', language: 'en', duration: 0, createdAt: new Date(), isDefault: true },
-  { id: 'default-deep', name: 'Morgan (Deep)', language: 'en', duration: 0, createdAt: new Date(), isDefault: true },
-  { id: 'default-es', name: 'Sofia (Spanish)', language: 'es', duration: 0, createdAt: new Date(), isDefault: true },
-]
+/**
+ * "No cloned voice": the avatar speaks with the server's built-in voice.
+ *
+ * This replaces four named presets (Alex, Jordan, Morgan, Sofia) that existed
+ * only in this file. The backend had no voices with those ids, so they all
+ * sounded identical and assigning one could only fail. One honest entry says
+ * what actually happens. Selecting it unassigns the avatar's voice.
+ */
+export const DEFAULT_VOICE_ID = 'default'
 
-const LANG_FLAGS: Record<string, string> = {
-  en: '🇺🇸', es: '🇪🇸', fr: '🇫🇷', de: '🇩🇪', zh: '🇨🇳', ja: '🇯🇵', pt: '🇧🇷', hi: '🇮🇳',
+const DEFAULT_VOICE: VoiceProfile = {
+  id: DEFAULT_VOICE_ID,
+  name: 'Default voice',
+  language: 'en',
+  duration: 0,
+  createdAt: new Date(0),
+  isDefault: true,
 }
 
-function WaveformBar({ active, height }: { active: boolean; height: number }) {
+const LANG_FLAGS: Record<string, string> = {
+  en: '🇺🇸', es: '🇪🇸', fr: '🇫🇷', de: '🇩🇪', zh: '🇨🇳', ja: '🇯🇵', pt: '🇧🇷', hi: '🇮🇳', it: '🇮🇹', ko: '🇰🇷',
+}
+
+const MAX_RECORDING_SECS = 30
+const IDLE_WAVE = Array<number>(20).fill(4)
+
+function WaveformBar({ height }: { height: number }) {
   return (
     <div
-      className="w-1 rounded-full transition-all duration-100"
-      style={{
-        height: active ? `${height}px` : '4px',
-        background: '#444ce7', // primary-600 — rule 4: flat, not a ramp
-        minHeight: '4px',
-        maxHeight: '40px',
-      }}
+      className="w-1 rounded-full bg-primary-600 transition-all duration-100"
+      style={{ height: `${height}px`, minHeight: '4px', maxHeight: '40px' }}
     />
   )
 }
 
 interface VoicePanelProps {
+  /** Called with a cloned voice's id, or DEFAULT_VOICE_ID to clear the voice. */
   onVoiceSelect?: (voiceId: string) => void
+  /** The voice currently assigned to the selected avatar, if any. */
+  assignedVoiceId?: string | null
 }
 
-export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
-  const [voices, setVoices] = useState<VoiceProfile[]>(PRESET_VOICES)
-  const [selectedVoice, setSelectedVoice] = useState<string>(PRESET_VOICES[0].id)
+export function VoicePanel({ onVoiceSelect, assignedVoiceId }: VoicePanelProps = {}) {
+  const [voices, setVoices] = useState<VoiceProfile[]>([DEFAULT_VOICE])
+  // Highlight follows the avatar's real assignment rather than defaulting to
+  // the first row, which showed a selection that matched nothing.
+  const [pickedVoice, setPickedVoice] = useState<string | null>(null)
+  const selectedVoice = pickedVoice ?? assignedVoiceId ?? DEFAULT_VOICE_ID
+
   const [isRecording, setIsRecording] = useState(false)
   const [recordingTime, setRecordingTime] = useState(0)
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null)
@@ -71,7 +93,7 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   const [isCloning, setIsCloning] = useState(false)
   const [newVoiceName, setNewVoiceName] = useState('')
   const [newVoiceLang, setNewVoiceLang] = useState('en')
-  const [waveHeights, setWaveHeights] = useState<number[]>(Array(20).fill(4))
+  const [waveHeights, setWaveHeights] = useState<number[]>(IDLE_WAVE)
   const [step, setStep] = useState<'select' | 'record' | 'name'>('select')
   const [recordMode, setRecordMode] = useState<'mic' | 'file'>('mic')
 
@@ -80,20 +102,25 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   const previewAudioRef = useRef<HTMLAudioElement | null>(null)
   const previewUrlRef = useRef<string | null>(null)
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const audioRef = useRef<HTMLAudioElement | null>(null)
-  const timerRef = useRef<NodeJS.Timeout | null>(null)
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  const animFrameRef = useRef<number | null>(null)
+  const sampleAudioRef = useRef<HTMLAudioElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  const MAX_RECORDING_SECS = 30
+  // Everything a live recording holds open, so there is one teardown.
+  const recording = useRef<{
+    stream: MediaStream
+    ctx: AudioContext
+    recorder: MediaRecorder
+    raf: number
+    timer: ReturnType<typeof setInterval>
+    discard: boolean
+  } | null>(null)
+  const mounted = useRef(true)
 
   // Load persisted custom voices from backend on mount
   useEffect(() => {
     api.listVoices()
       .then((data: VoiceApiResponse[]) => {
-        if (!Array.isArray(data) || data.length === 0) return
+        if (!mounted.current || !Array.isArray(data)) return
         const custom: VoiceProfile[] = data.map((v) => ({
           id: v.id,
           name: v.name,
@@ -102,22 +129,51 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
           createdAt: v.created_at ? new Date(v.created_at) : new Date(),
           isDefault: false,
         }))
-        setVoices([...PRESET_VOICES, ...custom])
+        setVoices([DEFAULT_VOICE, ...custom])
       })
-      .catch(() => { /* backend may not be up yet — keep presets */ })
+      .catch(() => {
+        if (mounted.current) toast.error('Could not load your voices')
+      })
   }, [])
 
-  // Clean up any in-flight preview when the panel unmounts.
-  useEffect(() => () => {
-    if (previewAudioRef.current) {
-      previewAudioRef.current.pause()
-      previewAudioRef.current = null
-    }
-    if (previewUrlRef.current) {
-      URL.revokeObjectURL(previewUrlRef.current)
-      previewUrlRef.current = null
-    }
+  // ── Sample (the recording being named) ───────────────────────────────────
+
+  /**
+   * Replace the sample awaiting a name. Also drops the <audio> element built
+   * for the previous one: it was created once and reused, so after
+   * "Re-record" the Play button played the OLD take while the NEW one was
+   * what got cloned.
+   */
+  const setSample = useCallback((blob: Blob | null) => {
+    sampleAudioRef.current?.pause()
+    sampleAudioRef.current = null
+    setIsPlaying(false)
+    setAudioBlob(blob)
+    setAudioUrl((previous) => {
+      if (previous) URL.revokeObjectURL(previous)
+      return blob ? URL.createObjectURL(blob) : null
+    })
   }, [])
+
+  const togglePlay = () => {
+    if (!audioUrl) return
+    if (!sampleAudioRef.current) {
+      const audio = new Audio(audioUrl)
+      audio.onended = () => setIsPlaying(false)
+      sampleAudioRef.current = audio
+    }
+    if (isPlaying) {
+      sampleAudioRef.current.pause()
+      setIsPlaying(false)
+    } else {
+      sampleAudioRef.current.play().then(
+        () => setIsPlaying(true),
+        () => toast.error('Could not play the sample'),
+      )
+    }
+  }
+
+  // ── Library preview ──────────────────────────────────────────────────────
 
   const stopPreview = useCallback(() => {
     if (previewAudioRef.current) {
@@ -132,11 +188,6 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
   }, [])
 
   const playPreview = useCallback(async (voiceId: string) => {
-    // Preset voices have no recorded sample — bail with a helpful toast
-    if (voiceId.startsWith('default-')) {
-      toast('Preset voices are previewed in chat', { icon: '🎧' })
-      return
-    }
     if (previewingId === voiceId) {
       stopPreview()
       return
@@ -161,69 +212,119 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
     }
   }, [previewingId, stopPreview])
 
-  const startRecording = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  // ── Recording ────────────────────────────────────────────────────────────
 
-      const audioCtx = new AudioContext()
-      const analyser = audioCtx.createAnalyser()
-      analyser.fftSize = 64
-      audioCtx.createMediaStreamSource(stream).connect(analyser)
-      analyserRef.current = analyser
-
-      const animateWave = () => {
-        const data = new Uint8Array(analyser.frequencyBinCount)
-        analyser.getByteFrequencyData(data)
-        const bars = Array.from({ length: 20 }, (_, i) => {
-          const val = data[Math.floor((i / 20) * data.length)] || 0
-          return Math.max(4, Math.min(40, val * 0.4))
-        })
-        setWaveHeights(bars)
-        animFrameRef.current = requestAnimationFrame(animateWave)
-      }
-      animateWave()
-
-      const recorder = new MediaRecorder(stream)
-      const chunks: Blob[] = []
-      recorder.ondataavailable = (e) => chunks.push(e.data)
-      recorder.onstop = () => {
-        if (animFrameRef.current !== null) cancelAnimationFrame(animFrameRef.current)
-        setWaveHeights(Array(20).fill(4))
-        stream.getTracks().forEach(t => t.stop())
-        audioCtx.close()
-        const blob = new Blob(chunks, { type: 'audio/webm' })
-        setAudioBlob(blob)
-        setAudioUrl(URL.createObjectURL(blob))
-        setStep('name')
-      }
-
-      recorder.start()
-      mediaRecorderRef.current = recorder
-      setIsRecording(true)
-      setRecordingTime(0)
-
-      timerRef.current = setInterval(() => {
-        setRecordingTime(t => {
-          if (t + 1 >= MAX_RECORDING_SECS) {
-            stopRecording()
-            return t
-          }
-          return t + 1
-        })
-      }, 1000)
-    } catch {
-      toast.error('Microphone access denied')
-    }
+  /** Release the mic, analyser, meter loop and timer. Idempotent. */
+  const releaseRecording = useCallback(() => {
+    const r = recording.current
+    recording.current = null
+    if (!r) return
+    cancelAnimationFrame(r.raf)
+    clearInterval(r.timer)
+    closeContext(r.ctx)
+    stopStream(r.stream)
   }, [])
 
   const stopRecording = useCallback(() => {
-    mediaRecorderRef.current?.stop()
-    if (timerRef.current) clearInterval(timerRef.current)
+    const r = recording.current
+    if (r && r.recorder.state === 'recording') r.recorder.stop()
     setIsRecording(false)
   }, [])
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const startRecording = useCallback(async () => {
+    const reason = micUnavailableReason()
+    if (reason) {
+      toast.error(reason)
+      return
+    }
+    if (recording.current) return
+
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
+    } catch (err) {
+      toast.error(micErrorMessage(err))
+      return
+    }
+    // The panel was left (or a second start raced this one) while the
+    // permission prompt was up: hand the mic straight back.
+    if (!mounted.current || recording.current) {
+      stopStream(stream)
+      return
+    }
+
+    const { ctx, analyser } = openAnalyser(stream, 64)
+    const bins = new Uint8Array(analyser.frequencyBinCount)
+    const recorder = createRecorder(stream)
+    const chunks: Blob[] = []
+    const startedAt = Date.now()
+
+    const current = { stream, ctx, recorder, raf: 0, timer: undefined as never, discard: false }
+
+    const animateWave = () => {
+      analyser.getByteFrequencyData(bins)
+      setWaveHeights(Array.from({ length: 20 }, (_, i) => {
+        const val = bins[Math.floor((i / 20) * bins.length)] || 0
+        return Math.max(4, Math.min(40, val * 0.4))
+      }))
+      current.raf = requestAnimationFrame(animateWave)
+    }
+    current.raf = requestAnimationFrame(animateWave)
+
+    // Elapsed time comes from the clock, not from counting ticks: interval
+    // callbacks are throttled in a background tab, which made the counter
+    // (and the 30-second cap that hung off it) run slow.
+    current.timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000)
+      setRecordingTime(Math.min(elapsed, MAX_RECORDING_SECS))
+      if (elapsed >= MAX_RECORDING_SECS && recorder.state === 'recording') {
+        recorder.stop()
+        setIsRecording(false)
+      }
+    }, 250) as never
+
+    recorder.ondataavailable = (e) => chunks.push(e.data)
+    recorder.onstop = () => {
+      const discard = current.discard
+      if (recording.current === current) releaseRecording()
+      if (discard || !mounted.current) return
+      setWaveHeights(IDLE_WAVE)
+      setSample(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
+      setStep('name')
+    }
+
+    recording.current = current
+    recorder.start()
+    setIsRecording(true)
+    setRecordingTime(0)
+  }, [releaseRecording, setSample])
+
+  // Leaving the panel mid-recording must release the microphone. Nothing did
+  // before, so the browser's mic indicator stayed on until the tab closed.
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      const r = recording.current
+      if (r) {
+        r.discard = true
+        if (r.recorder.state === 'recording') r.recorder.stop()
+      }
+      releaseRecording()
+      sampleAudioRef.current?.pause()
+      previewAudioRef.current?.pause()
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
+    }
+  }, [releaseRecording])
+
+  // Revoke the sample's object URL when it is replaced or the panel unmounts.
+  useEffect(() => () => {
+    if (audioUrl) URL.revokeObjectURL(audioUrl)
+  }, [audioUrl])
+
+  const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
+    e.target.value = ''
     if (!file) return
     if (!file.type.startsWith('audio/')) {
       toast.error('Please select an audio file (MP3, WAV, M4A, OGG…)')
@@ -233,25 +334,16 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
       toast.error('File must be under 20 MB')
       return
     }
-    setAudioBlob(file)
-    setAudioUrl(URL.createObjectURL(file))
+    setSample(file)
     setRecordingTime(0)
     setStep('name')
   }
 
-  const togglePlay = () => {
-    if (!audioUrl) return
-    if (!audioRef.current) {
-      audioRef.current = new Audio(audioUrl)
-      audioRef.current.onended = () => setIsPlaying(false)
-    }
-    if (isPlaying) {
-      audioRef.current.pause()
-      setIsPlaying(false)
-    } else {
-      audioRef.current.play()
-      setIsPlaying(true)
-    }
+  // ── Library actions ──────────────────────────────────────────────────────
+
+  const selectVoice = (id: string) => {
+    setPickedVoice(id)
+    onVoiceSelect?.(id)
   }
 
   const cloneVoice = async () => {
@@ -271,257 +363,268 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
         createdAt: data.created_at ? new Date(data.created_at) : new Date(),
         isDefault: false,
       }
-      setVoices(v => [...v, newProfile])
-      setSelectedVoice(newProfile.id)
-      onVoiceSelect?.(newProfile.id)
+      setVoices((v) => [...v, newProfile])
+      selectVoice(newProfile.id)
       toast.success(`Voice "${newProfile.name}" cloned!`, { icon: '🎙️' })
-      // Reset
-      setAudioBlob(null)
-      setAudioUrl(null)
+      setSample(null)
       setNewVoiceName('')
       setNewVoiceLang('en')
       setStep('select')
     } catch (err: unknown) {
-      const detail = (err as ApiError)?.response?.data?.detail || (err as ApiError)?.message
-      toast.error(detail || 'Voice cloning failed — check backend is running')
+      toast.error(errorMessage(err, 'Voice cloning failed — check that the server is running'))
     } finally {
       setIsCloning(false)
     }
   }
 
-  const deleteVoice = async (id: string) => {
-    if (previewingId === id) stopPreview()
+  const deleteVoice = async (voice: VoiceProfile) => {
+    if (!window.confirm(`Delete the voice "${voice.name}"? This cannot be undone.`)) return
+    if (previewingId === voice.id) stopPreview()
     try {
-      await api.deleteVoice(id)
-    } catch { /* ignore network errors — local state still updates */ }
-    setVoices(v => v.filter(x => x.id !== id))
-    if (selectedVoice === id) {
-      setSelectedVoice(PRESET_VOICES[0].id)
-      onVoiceSelect?.(PRESET_VOICES[0].id)
+      await api.deleteVoice(voice.id)
+    } catch {
+      // Report the failure. This used to be swallowed and followed by a
+      // "Voice removed" toast, and the voice reappeared on the next reload.
+      toast.error('Could not delete the voice')
+      return
     }
+    setVoices((v) => v.filter((x) => x.id !== voice.id))
+    if (selectedVoice === voice.id) selectVoice(DEFAULT_VOICE_ID)
     toast.success('Voice removed')
   }
 
-  const fmtTime = (s: number) => `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`
+  const fmtTime = (s: number) =>
+    `${Math.floor(s / 60).toString().padStart(2, '0')}:${Math.floor(s % 60).toString().padStart(2, '0')}`
+
+  const active = voices.find((x) => x.id === selectedVoice) ?? DEFAULT_VOICE
+  const customCount = voices.length - 1
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
       {/* ── Voice Library ── */}
       <div className="card flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-xl font-bold text-gray-900">Voice Library</h2>
-            <p className="text-sm text-gray-500 mt-0.5">{voices.length} voices available</p>
+            <h2 className="text-xl text-gray-900">Voice Library</h2>
+            <p className="mt-0.5 text-sm text-gray-500">
+              {customCount === 0 ? 'No cloned voices yet' : `${customCount} cloned voice${customCount === 1 ? '' : 's'}`}
+            </p>
           </div>
-          <button
-            onClick={() => setStep('record')}
-            className="btn-primary px-4 py-2 text-sm"
-          >
-            <PlusCircle size={15} />
+          <button onClick={() => setStep('record')} className="btn-primary px-4 py-2 text-sm">
+            <PlusCircle size={15} aria-hidden="true" />
             Clone Voice
           </button>
         </div>
 
         <div className="divider" />
 
-        <div className="space-y-2 overflow-y-auto max-h-96 messages-scroll">
+        <ul className="messages-scroll max-h-96 space-y-2 overflow-y-auto p-1">
           {voices.map((voice) => {
             const isSelected = selectedVoice === voice.id
             const isPreviewing = previewingId === voice.id
             return (
-              <div
+              <li
                 key={voice.id}
-                onClick={() => { setSelectedVoice(voice.id); onVoiceSelect?.(voice.id) }}
-                className={`flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all duration-200 group
- ${isSelected
- ? 'bg-primary-500/15 border border-primary-500/40 shadow-xs'
- : 'bg-gray-100 border border-gray-200 hover:bg-gray-100 hover:border-primary-500/20'
- }`}
+                className={`group relative flex items-center gap-3 rounded-lg border px-4 py-3 transition-colors duration-150
+ ${isSelected ? 'border-primary-600 bg-primary-50' : 'border-gray-200 bg-white hover:bg-gray-50'}`}
               >
-                {/* Voice icon */}
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-lg flex-shrink-0
- ${voice.isDefault ? 'bg-gray-200' : ' '}`}
-                >
-                  {LANG_FLAGS[voice.language] || '🎙️'}
+                {/* Selection is a real button covering the row, so it works
+                    from the keyboard; the row's own actions sit above it. */}
+                <button
+                  type="button"
+                  onClick={() => selectVoice(voice.id)}
+                  aria-pressed={isSelected}
+                  aria-label={`Use voice ${voice.name}`}
+                  className="absolute inset-0 z-10 rounded-lg"
+                />
+
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-lg" aria-hidden="true">
+                  {voice.isDefault ? '🔈' : LANG_FLAGS[voice.language] || '🎙️'}
                 </div>
 
-                <div className="flex-1 min-w-0">
-                  <p className="font-semibold text-sm text-gray-900 truncate">{voice.name}</p>
-                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold text-gray-900">{voice.name}</p>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-2">
                     {voice.isDefault ? (
-                      <span className="badge-blue text-xs">Preset</span>
+                      <span className="badge-gray">Built-in · not cloned</span>
                     ) : (
                       <>
-                        <span className="badge-purple text-xs">Custom · {fmtTime(voice.duration)}</span>
-                        {voice.createdAt && (
-                          <span className="text-[10px] text-gray-500">
-                            {new Date(voice.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                          </span>
-                        )}
+                        <span className="badge-brand">Custom · {fmtTime(voice.duration)}</span>
+                        <span className="text-[11px] text-gray-500">
+                          {voice.createdAt.toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                        </span>
                       </>
                     )}
                   </div>
                 </div>
 
-                {/* Preview button — custom voices only */}
                 {!voice.isDefault && (
                   <button
-                    onClick={(e) => { e.stopPropagation(); playPreview(voice.id) }}
-                    className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0
- transition-all duration-200
+                    onClick={() => playPreview(voice.id)}
+                    className={`relative z-20 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border shadow-xs transition-colors
  ${isPreviewing
- ? 'bg-primary-600 text-gray-900'
- : 'bg-gray-100 hover:bg-primary-600/30 text-gray-500 hover:text-primary-300 opacity-0 group-hover:opacity-100'
- }`}
+   ? 'border-primary-600 bg-primary-600 text-white'
+   : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 hover:text-gray-900'}`}
                     title={isPreviewing ? 'Stop preview' : 'Preview voice sample'}
-                    aria-label={isPreviewing ? 'Stop preview' : 'Preview voice sample'}
+                    aria-label={isPreviewing ? `Stop preview of ${voice.name}` : `Preview ${voice.name}`}
                   >
-                    {isPreviewing ? <Pause size={12} /> : <Play size={12} />}
+                    {isPreviewing ? <Pause size={13} /> : <Play size={13} />}
                   </button>
                 )}
 
-                {isSelected ? (
-                  <div className="w-6 h-6 rounded-full bg-primary-500 flex items-center justify-center flex-shrink-0">
-                    <Check size={13} className="text-gray-900" />
-                  </div>
-                ) : !voice.isDefault ? (
+                {!voice.isDefault && (
                   <button
-                    onClick={(e) => { e.stopPropagation(); deleteVoice(voice.id) }}
-                    className="w-7 h-7 rounded-lg bg-error-50 hover:bg-error-50 flex items-center justify-center
- text-gray-500 hover:text-error-600 opacity-0 group-hover:opacity-100
- transition-all duration-200 flex-shrink-0"
-                    aria-label="Delete voice"
+                    onClick={() => deleteVoice(voice)}
+                    className="relative z-20 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-600 shadow-xs transition-colors hover:bg-error-50 hover:text-error-700"
+                    aria-label={`Delete voice ${voice.name}`}
+                    title="Delete voice"
                   >
                     <Trash2 size={13} />
                   </button>
-                ) : null}
-              </div>
+                )}
+
+                {isSelected && (
+                  <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary-600" aria-hidden="true">
+                    <Check size={13} className="text-white" />
+                  </div>
+                )}
+              </li>
             )
           })}
-        </div>
+        </ul>
       </div>
 
       {/* ── Right Panel ── */}
       <div className="flex flex-col gap-4">
-
-        {/* Select step — show selected voice info */}
         {step === 'select' && (
-          <div className="card flex flex-col gap-5 animate-fade-in">
-            <h2 className="text-xl font-bold text-gray-900">Active Voice</h2>
+          <div className="card flex animate-fade-in flex-col gap-5">
+            <h2 className="text-xl text-gray-900">Active Voice</h2>
             <div className="divider" />
-            {(() => {
-              const v = voices.find(x => x.id === selectedVoice)
-              if (!v) return null
-              return (
-                <div className="flex flex-col items-center text-center gap-4 py-6">
-                  <div className="w-20 h-20 rounded-2xl border border-gray-200 flex items-center justify-center text-4xl">
-                    {LANG_FLAGS[v.language] || '🎙️'}
-                  </div>
-                  <div>
-                    <p className="text-2xl font-black text-gray-900">{v.name}</p>
-                    <div className="flex items-center justify-center gap-2 mt-2">
-                      {v.isDefault ? <span className="badge-blue">Preset Voice</span> : <span className="badge-purple">Custom Clone</span>}
-                    </div>
-                  </div>
-                  <div className="flex gap-2 mt-2">
-                    {!v.isDefault && (
-                      <button onClick={() => playPreview(v.id)} className="btn-secondary">
-                        {previewingId === v.id ? <><Pause size={16} /> Stop</> : <><Play size={16} /> Preview</>}
-                      </button>
-                    )}
-                    <button onClick={() => setStep('record')} className="btn-secondary">
-                      <Wand2 size={16} />
-                      Clone a New Voice
-                    </button>
-                  </div>
+            <div className="flex flex-col items-center gap-4 py-6 text-center">
+              <div className="flex h-20 w-20 items-center justify-center rounded-xl border border-gray-200 bg-gray-50 text-4xl" aria-hidden="true">
+                {active.isDefault ? '🔈' : LANG_FLAGS[active.language] || '🎙️'}
+              </div>
+              <div>
+                <p className="font-display text-2xl text-gray-900">{active.name}</p>
+                <div className="mt-2 flex items-center justify-center gap-2">
+                  {active.isDefault
+                    ? <span className="badge-gray">Built-in voice</span>
+                    : <span className="badge-brand">Custom Clone</span>}
                 </div>
-              )
-            })()}
+                {active.isDefault && (
+                  <p className="mx-auto mt-3 max-w-xs text-sm text-gray-500">
+                    The avatar speaks with the server&apos;s standard voice. Clone one to make it sound like a specific person.
+                  </p>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap justify-center gap-2">
+                {!active.isDefault && (
+                  <button onClick={() => playPreview(active.id)} className="btn-secondary">
+                    {previewingId === active.id ? <><Pause size={16} /> Stop</> : <><Play size={16} /> Preview</>}
+                  </button>
+                )}
+                <button onClick={() => setStep('record')} className="btn-secondary">
+                  <Wand2 size={16} aria-hidden="true" />
+                  Clone a New Voice
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
-        {/* Record step */}
         {step === 'record' && (
-          <div className="card flex flex-col gap-5 animate-fade-in">
+          <div className="card flex animate-fade-in flex-col gap-5">
             <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900">Voice Sample</h2>
-              <button onClick={() => setStep('select')} className="btn-ghost text-sm">Cancel</button>
+              <h2 className="text-xl text-gray-900">Voice Sample</h2>
+              <button
+                onClick={() => {
+                  // Cancelling mid-recording discards the take and frees the mic.
+                  const r = recording.current
+                  if (r) r.discard = true
+                  stopRecording()
+                  setWaveHeights(IDLE_WAVE)
+                  setStep('select')
+                }}
+                className="btn-ghost text-sm"
+              >
+                Cancel
+              </button>
             </div>
             <div className="divider" />
 
-            {/* Tab switcher: mic vs file */}
-            <div className="flex gap-1 p-1 rounded-xl bg-white border border-gray-200">
-              {(['mic', 'file'] as const).map(mode => (
+            <div className="flex gap-1 rounded-lg border border-gray-200 bg-white p-1" role="group" aria-label="Sample source">
+              {(['mic', 'file'] as const).map((mode) => (
                 <button
                   key={mode}
+                  type="button"
                   onClick={() => setRecordMode(mode)}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-all duration-200
- ${recordMode === mode
- ? ' text-gray-900 shadow-xs'
- : 'text-gray-500 hover:text-gray-900'
- }`}
+                  disabled={isRecording}
+                  aria-pressed={recordMode === mode}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 text-sm font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50
+ ${recordMode === mode ? 'bg-gray-100 text-gray-900' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
                 >
                   {mode === 'mic' ? <><Mic size={14} /> Record Mic</> : <><Upload size={14} /> Upload File</>}
                 </button>
               ))}
             </div>
 
-            {/* Instructions */}
-            <div className="flex items-start gap-3 px-4 py-3 rounded-xl bg-primary-500/10 border border-primary-500/20">
-              <AlertCircle size={16} className="text-primary-400 mt-0.5 flex-shrink-0" />
+            <div className="card-tint flex items-start gap-3 rounded-lg px-4 py-3">
+              <AlertCircle size={16} className="mt-0.5 shrink-0 text-gray-500" aria-hidden="true" />
               <p className="text-sm text-gray-700">
                 {recordMode === 'mic'
                   ? <>Record at least <strong className="text-gray-900">10 seconds</strong> of clear speech. Read naturally — avoid background noise.</>
-                  : <>Upload an audio file (MP3, WAV, M4A, OGG) with at least <strong className="text-gray-900">10 seconds</strong> of clear speech.</>
-                }
+                  : <>Upload an audio file (MP3, WAV, M4A, OGG) with at least <strong className="text-gray-900">10 seconds</strong> of clear speech.</>}
               </p>
             </div>
 
             {recordMode === 'mic' ? (
-              /* Big record button */
               <div className="flex flex-col items-center gap-6 py-4">
                 <button
                   onClick={isRecording ? stopRecording : startRecording}
                   aria-label={isRecording ? 'Stop recording' : 'Start recording'}
-                  className={`relative w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300
- ${isRecording
- ? 'bg-error-600 shadow-[0_0_40px_rgba(239,68,68,0.5)] scale-110'
- : ' hover:shadow-sm hover:scale-105'
- }`}
+                  aria-pressed={isRecording}
+                  className={`relative flex h-24 w-24 items-center justify-center rounded-full text-white transition-colors duration-200
+ ${isRecording ? 'bg-error-600 hover:bg-error-700' : 'bg-primary-600 shadow-xs hover:bg-primary-700'}`}
                 >
                   {isRecording && (
-                    <span className="absolute inset-0 rounded-full border-2 border-error-600 animate-ping" />
+                    <span className="absolute inset-0 animate-ping rounded-full border-2 border-error-600" aria-hidden="true" />
                   )}
-                  {isRecording ? <MicOff size={36} className="text-gray-900" /> : <Mic size={36} className="text-gray-900" />}
+                  {isRecording ? <MicOff size={36} /> : <Mic size={36} />}
                 </button>
 
-                <div className="text-center">
-                  <p className={`text-3xl font-mono font-black ${isRecording ? 'text-error-600' : 'text-gray-500'}`}>
+                <div className="text-center" aria-live="off">
+                  <p className={`font-mono text-3xl tabular-nums ${isRecording ? 'text-error-600' : 'text-gray-500'}`}>
                     {fmtTime(recordingTime)}
-                    {isRecording && <span className="text-base ml-2 text-gray-500">/ {fmtTime(MAX_RECORDING_SECS)}</span>}
+                    {isRecording && <span className="ml-2 text-base text-gray-500">/ {fmtTime(MAX_RECORDING_SECS)}</span>}
                   </p>
-                  <p className="text-sm text-gray-500 mt-1">
+                  <p className="mt-1 text-sm text-gray-500">
                     {isRecording ? 'Recording — tap to stop' : 'Tap the mic to start'}
                   </p>
                 </div>
 
                 {isRecording && (
-                  <div className="flex items-center gap-1">
-                    {waveHeights.map((h, i) => <WaveformBar key={i} active={isRecording} height={h} />)}
+                  <div className="flex h-10 items-center gap-1" aria-hidden="true">
+                    {waveHeights.map((h, i) => <WaveformBar key={i} height={h} />)}
                   </div>
                 )}
 
                 {isRecording && (
-                  <div className="w-full max-w-xs h-1.5 rounded-full bg-gray-200 overflow-hidden">
+                  <div
+                    className="h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-gray-200"
+                    role="progressbar"
+                    aria-label="Recording time used"
+                    aria-valuemin={0}
+                    aria-valuemax={MAX_RECORDING_SECS}
+                    aria-valuenow={recordingTime}
+                  >
                     <div
-                      className="h-full rounded-full transition-all duration-1000"
+                      className="h-full rounded-full bg-primary-600 transition-all duration-300"
                       style={{ width: `${(recordingTime / MAX_RECORDING_SECS) * 100}%` }}
                     />
                   </div>
                 )}
               </div>
             ) : (
-              /* File upload */
               <div className="flex flex-col items-center gap-4 py-4">
                 <input
                   ref={fileInputRef}
@@ -529,14 +632,13 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
                   accept="audio/*"
                   className="hidden"
                   onChange={handleFileUpload}
+                  aria-label="Choose an audio file"
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="w-full max-w-xs flex flex-col items-center gap-3 py-10 rounded-2xl border-2 border-dashed
- border-gray-200 hover:border-primary-500/50 hover:bg-primary-500/5
- text-gray-500 hover:text-gray-900 transition-all duration-200 cursor-pointer"
+                  className="flex w-full max-w-xs cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed border-gray-300 py-10 text-gray-600 transition-colors duration-200 hover:border-gray-400 hover:bg-gray-50 hover:text-gray-900"
                 >
-                  <Upload size={36} className="opacity-60" />
+                  <Upload size={36} className="opacity-60" aria-hidden="true" />
                   <span className="text-sm font-medium">Click to browse audio file</span>
                   <span className="text-xs text-gray-500">MP3, WAV, M4A, OGG · max 20 MB</span>
                 </button>
@@ -545,35 +647,33 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
           </div>
         )}
 
-        {/* Name step */}
         {step === 'name' && audioUrl && (
-          <div className="card flex flex-col gap-5 animate-fade-in">
+          <div className="card flex animate-fade-in flex-col gap-5">
             <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900">Name Your Voice</h2>
+              <h2 className="text-xl text-gray-900">Name Your Voice</h2>
               <button
-                onClick={() => { setStep('record'); setAudioBlob(null); setAudioUrl(null) }}
+                onClick={() => { setSample(null); setRecordingTime(0); setStep('record') }}
                 className="btn-ghost text-sm"
               >
-                <RefreshCw size={14} /> Re-record
+                <RefreshCw size={14} aria-hidden="true" /> Re-record
               </button>
             </div>
             <div className="divider" />
 
-            {/* Playback */}
-            <div className="flex items-center gap-4 px-4 py-3 rounded-xl bg-gray-100 border border-gray-200">
+            <div className="flex items-center gap-4 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
               <button
                 onClick={togglePlay}
                 aria-label={isPlaying ? 'Pause playback' : 'Play sample'}
-                className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 hover:shadow-sm transition-all"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary-600 text-white shadow-xs transition-colors hover:bg-primary-700"
               >
-                {isPlaying ? <Pause size={18} className="text-gray-900" /> : <Play size={18} className="text-gray-900 ml-0.5" />}
+                {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}
               </button>
-              <div className="flex-1">
+              <div className="flex-1" aria-hidden="true">
                 <div className="flex items-center gap-1">
                   {Array.from({ length: 32 }).map((_, i) => (
                     <div
                       key={i}
-                      className="w-0.5 rounded-full bg-primary-500/60"
+                      className="w-0.5 rounded-full bg-gray-400"
                       // Deterministic static waveform — a smooth sine pattern
                       // instead of impure Math.random() in render.
                       style={{ height: `${4 + Math.round(Math.abs(Math.sin(i * 0.6)) * 20)}px` }}
@@ -581,16 +681,18 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
                   ))}
                 </div>
               </div>
-              <div className="flex items-center gap-1.5 text-xs text-gray-500">
-                <Volume2 size={12} />
-                <span>{fmtTime(recordingTime)}</span>
-              </div>
+              {recordingTime > 0 && (
+                <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                  <Volume2 size={12} aria-hidden="true" />
+                  <span className="tabular-nums">{fmtTime(recordingTime)}</span>
+                </div>
+              )}
             </div>
 
-            {/* Name input */}
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-700">Voice Name</label>
+              <label htmlFor="voice-name" className="text-sm font-medium text-gray-700">Voice Name</label>
               <input
+                id="voice-name"
                 type="text"
                 value={newVoiceName}
                 onChange={(e) => setNewVoiceName(e.target.value)}
@@ -601,25 +703,24 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
               />
             </div>
 
-            {/* Language selector */}
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-700">Language spoken in sample</label>
+              <label htmlFor="voice-language" className="text-sm font-medium text-gray-700">Language spoken in sample</label>
               <select
+                id="voice-language"
                 value={newVoiceLang}
                 onChange={(e) => setNewVoiceLang(e.target.value)}
-                className="input-field appearance-none"
+                className="input-field"
               >
-                {SUPPORTED_LANGUAGES.map(l => (
+                {SUPPORTED_LANGUAGES.map((l) => (
                   <option key={l.code} value={l.code}>{l.label}</option>
                 ))}
               </select>
             </div>
 
-            {/* Clone button */}
             <button
               onClick={cloneVoice}
               disabled={isCloning || !newVoiceName.trim()}
-              className="btn-primary w-full py-3.5 text-base rounded-xl"
+              className="btn-primary w-full py-3 text-base"
             >
               {isCloning ? (
                 <>
@@ -635,21 +736,19 @@ export function VoicePanel({ onVoiceSelect }: VoicePanelProps = {}) {
             </button>
 
             {isCloning && (
-              <p className="text-xs text-center text-gray-500 animate-pulse">
-                Extracting voice characteristics · Training speaker model…
-              </p>
+              <p className="text-center text-xs text-gray-500">Extracting voice characteristics…</p>
             )}
           </div>
         )}
 
-        {/* Info card */}
-        <div className="card flex items-start gap-3 animate-slide-up">
-          <Music size={16} className="text-primary-400 mt-0.5 flex-shrink-0" />
+        <div className="card flex animate-slide-up items-start gap-3">
+          <Music size={16} className="mt-0.5 shrink-0 text-gray-400" aria-hidden="true" />
           <div>
-            <p className="text-sm font-semibold text-gray-900 mb-1">How voice cloning works</p>
-            <p className="text-xs text-gray-500 leading-relaxed">
-              Record 10–60 seconds of your voice reading naturally. Chatterbox Multilingual extracts a
-              speaker embedding and applies it as the avatar&apos;s voice during TTS synthesis. 23 languages supported.
+            <p className="mb-1 text-sm font-semibold text-gray-900">How voice cloning works</p>
+            <p className="text-xs leading-relaxed text-gray-500">
+              Record 10–30 seconds of your voice reading naturally, or upload a longer file. Chatterbox
+              Multilingual extracts a speaker embedding and applies it as the avatar&apos;s voice during
+              TTS synthesis. 23 languages supported.
             </p>
           </div>
         </div>

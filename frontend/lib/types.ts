@@ -31,19 +31,6 @@ export interface SessionSummary {
   ended_at?: string | null
 }
 
-export type WsMessageType =
-  | 'token'
-  | 'transcription'
-  | 'message'
-  | 'video_chunk_start'
-  | 'video_chunk'
-  | 'video_chunk_end'
-  | 'status'
-  | 'error'
-  | 'pong'
-  | 'tts_fallback'
-  | 'interrupted'
-
 // Discriminated union — each WS event has a well-typed payload so the handler
 // can rely on field presence without optional-chaining everywhere.
 export type WsMessage =
@@ -54,8 +41,14 @@ export type WsMessage =
   | { type: 'video_chunk'; chunk_index: number; total_chunks: number; video_url: string; text: string }
   | { type: 'video_chunk_end'; sent_chunks: number }
   | { type: 'status'; message: string; stage?: string }
-  | { type: 'error'; message: string }
+  // `code` is set for machine-readable failures, e.g. 'rate_limited'.
+  | { type: 'error'; message: string; code?: string }
   | { type: 'pong' }
+  // First frame after a successful connect. Its arrival (like any frame's) is
+  // what marks the connection as established; it carries nothing.
+  | { type: 'ready' }
+  // Server keepalive. Carries nothing; it only has to be accepted.
+  | { type: 'ping' }
   | { type: 'tts_fallback'; engine: string; voice_cloned: boolean; message: string }
   | { type: 'interrupted'; message: string }
 
@@ -69,8 +62,12 @@ export interface VoiceApiResponse {
 
 export interface ApiError {
   response?: {
+    status?: number
     data?: {
-      detail?: string
+      // A string for errors the API raises itself; an ARRAY of
+      // {loc, msg, …} for request-validation failures (HTTP 422). Never
+      // render it directly — use errorMessage() from lib/errors.
+      detail?: unknown
     }
   }
   message?: string

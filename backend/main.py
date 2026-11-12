@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -86,16 +87,48 @@ async def lifespan(app: FastAPI):
         logger.info(f"Serving local uploads from {uploads_dir}")
 
     websocket_manager.start_cleanup_task()
+
+    # Load models now rather than on the first turn. In the background: the
+    # server should accept connections (and pass its health check) while the
+    # weights load, not sit unreachable for a minute.
+    warmup_task = None
+    if settings.PRELOAD_MODELS:
+        warmup_task = asyncio.create_task(_warm_models(), name="model-warmup")
+
     logger.info("AI Avatar System started successfully")
 
     yield
 
     # Cleanup
     logger.info("Shutting down AI Avatar System...")
+    if warmup_task is not None and not warmup_task.done():
+        warmup_task.cancel()
+        await asyncio.gather(warmup_task, return_exceptions=True)
     await websocket_manager.stop_cleanup_task()
+    # Without this the MuseTalk worker process outlived the server on a
+    # reload or restart, still holding its VRAM.
+    try:
+        from app.services.animator import avatar_animator
+
+        await avatar_animator.shutdown()
+    except Exception as e:
+        logger.warning(f"Animator shutdown failed: {e}")
     await storage_service.cleanup()
     await cache_service.cleanup()
     logger.info("Shutdown complete")
+
+
+async def _warm_models() -> None:
+    """Load STT, TTS and the lip-sync worker concurrently. Never raises."""
+    from app.services.animator import avatar_animator
+    from app.services.stt import stt_service
+    from app.services.tts import tts_service
+
+    logger.info("Preloading models (PRELOAD_MODELS=true)…")
+    await asyncio.gather(
+        stt_service.warm(), tts_service.warm(), avatar_animator.warm(), return_exceptions=True
+    )
+    logger.info("Model preload finished")
 
 
 app = FastAPI(
@@ -105,6 +138,9 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None,
+    # The schema too, not just the pages that render it: with only the UIs
+    # disabled, /openapi.json still handed the full API map to anyone.
+    openapi_url="/openapi.json" if settings.DEBUG else None,
 )
 
 # Middleware. `add_middleware` INSERTS AT THE FRONT of the stack, so the
@@ -268,6 +304,15 @@ async def health_check(response: Response):
         services["stt"] = services["tts"] = f"error: {e}"
 
     health["avatar_engine"] = settings.AVATAR_ENGINE
+    # What is ACTUALLY animating, not just what was configured: a worker that
+    # failed to start means every reply is a still image, and nothing else
+    # surfaced that.
+    try:
+        from app.services.animator import avatar_animator
+
+        health["avatar_engine_state"] = avatar_animator.worker_state()
+    except Exception as e:
+        health["avatar_engine_state"] = f"error: {e}"
     health["active_ws_sessions"] = len(websocket_manager.active_connections)
 
     # Only a hard-dependency failure takes the instance out of rotation.
@@ -276,34 +321,46 @@ async def health_check(response: Response):
     return health
 
 
-async def _verify_ws_session(session_id: str, token: str | None) -> str | None:
+# WebSocket close codes for a refused handshake. They are distinct because the
+# client must react differently to each, and conflating them is destructive:
+# when "this conversation was deleted" and "the database hiccuped" both looked
+# like "your login expired", the client signed the user out — and a guest,
+# whose token is their only way back into the account, lost it for good.
+WS_CLOSE_UNAUTHENTICATED = 4401  # no token, or a token that does not verify
+WS_CLOSE_SESSION_UNAVAILABLE = 4404  # no such session, or not the caller's
+WS_CLOSE_INTERNAL_ERROR = 1011  # we failed to check; safe to retry
+
+
+async def _ws_handshake(session_id: str, token: str | None) -> tuple[str | None, int]:
     """
-    Validate the WebSocket handshake. Returns the user_id that owns the session
-    or None if the session is unknown / token invalid / token user doesn't own
-    the session.
+    Decide a WebSocket handshake. Returns (user_id, 0) to accept, or
+    (None, close_code) to refuse.
 
     A token is always required. There used to be a DEBUG fallback to a seeded
     `demo-user`, but sessions can no longer be created anonymously, so nothing
     can resolve to that identity.
     """
+    user_id = subject_from_token(token) if token else None
+    if not user_id:
+        return None, WS_CLOSE_UNAUTHENTICATED
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
             sess = result.scalar_one_or_none()
-            if not sess:
-                return None
-
-            if token:
-                user_id = subject_from_token(token)
-                if user_id and user_id == sess.user_id:
-                    return user_id
-                return None
-
-            # No credentials presented — reject the handshake.
-            return None
     except Exception as e:
         logger.error(f"WS session verification failed: {e}")
-        return None
+        return None, WS_CLOSE_INTERNAL_ERROR
+    # Unknown and not-yours are deliberately the same answer: telling them
+    # apart would confirm to a stranger that a session id exists.
+    if sess is None or sess.user_id != user_id:
+        return None, WS_CLOSE_SESSION_UNAVAILABLE
+    return user_id, 0
+
+
+async def _verify_ws_session(session_id: str, token: str | None) -> str | None:
+    """The owning user_id if the handshake is acceptable, else None."""
+    user_id, _ = await _ws_handshake(session_id, token)
+    return user_id
 
 
 @app.websocket("/ws/session/{session_id}")
@@ -316,11 +373,16 @@ async def websocket_endpoint(
     # httpOnly auth cookie the browser sends automatically on same-site WS.
     if token is None:
         token = websocket.cookies.get(settings.AUTH_COOKIE_NAME)
-    user_id = await _verify_ws_session(session_id, token)
+    user_id, refusal = await _ws_handshake(session_id, token)
     if user_id is None:
-        # 4401 is a custom WebSocket close code we use for auth failures
-        await websocket.close(code=4401)
-        logger.warning(f"WS auth rejected for session {session_id}")
+        # Accept first: closing a socket that was never accepted is sent as an
+        # HTTP 403 on the handshake, which a browser reports as close code
+        # 1006 ("abnormal") whatever we meant. The client could not tell an
+        # expired login from a network fault, so it retried with backoff and
+        # then reported a lost connection instead of asking the user to sign in.
+        await websocket.accept()
+        await websocket.close(code=refusal)
+        logger.warning(f"WS handshake refused for session {session_id} (close {refusal})")
         return
 
     # Refuse new sockets once WS_MAX_CONNECTIONS is reached. A reconnect to a
@@ -330,6 +392,7 @@ async def websocket_endpoint(
     if session_id not in websocket_manager.active_connections and (
         await websocket_manager.at_capacity()
     ):
+        await websocket.accept()  # so the code below reaches the client
         await websocket.close(code=1013)
         logger.warning(
             f"WS connection refused for session {session_id}: "
@@ -338,6 +401,10 @@ async def websocket_endpoint(
         return
 
     await websocket_manager.connect(session_id, websocket, user_id=user_id)
+    # First frame of every accepted connection. Refusals are also "opened"
+    # (see above), so a client cannot take the socket opening as success;
+    # this frame is what tells it the connection is real.
+    await websocket_manager.send_message(session_id, {"type": "ready"})
     try:
         while True:
             # This loop must never block on a full turn — handle_text_input /
@@ -396,10 +463,12 @@ async def websocket_endpoint(
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from session {session_id}")
-        await websocket_manager.disconnect(session_id)
+        # Scoped to THIS socket: if a newer connection has taken the session
+        # over, its state is not ours to tear down.
+        await websocket_manager.disconnect(session_id, websocket)
     except Exception as e:
         logger.error(f"WebSocket error in session {session_id}: {e}")
-        await websocket_manager.disconnect(session_id)
+        await websocket_manager.disconnect(session_id, websocket)
 
 
 if __name__ == "__main__":

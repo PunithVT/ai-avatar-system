@@ -1,3 +1,18 @@
+# Base stack. Safe to run as-is: nothing here publishes an application or
+# database port, and no source directory is mounted into a container.
+#
+#   Development   docker compose up -d
+#                 (docker-compose.override.yml is picked up automatically and
+#                 adds localhost ports plus the backend source mount)
+#   Production    docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Dev-only conveniences used to live in THIS file, with the production file
+# expected to switch them off. It could not: Compose merges `ports` and
+# `volumes` lists across files rather than replacing them, so `ports: []` and
+# an override volume list removed nothing. Production ran with the source
+# trees bind-mounted over the built images and with the backend (:8000) and
+# frontend (:3000) published on every interface, behind nginx's back.
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -8,8 +23,6 @@ services:
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-change_this_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-avatar_user}"]
       interval: 10s
@@ -29,8 +42,6 @@ services:
     command: redis-server --appendonly yes --maxmemory 384mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
-    ports:
-      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -49,8 +60,12 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: avatar-backend
-    ports:
-      - "8000:8000"
+    # Reached through nginx, or on localhost via the dev override. Publishing
+    # it directly let clients bypass nginx's rate limits and body cap — and
+    # uvicorn trusts X-Forwarded-For, so each request could claim a new IP
+    # and never hit the app's own rate limiter either.
+    expose:
+      - "8000"
     # Everything from .env, the way docker-compose.prod.yml already does it.
     # This used to be an explicit allowlist of 13 keys, which silently dropped
     # 56 of the 69 settings the app defines — AVATAR_ENGINE, FACE_RESTORE,
@@ -69,7 +84,6 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
     volumes:
-      - ./backend:/app
       - avatar_cache:/tmp/avatars
       - video_cache:/tmp/videos
       - audio_cache:/tmp/audio
@@ -105,27 +119,29 @@ services:
       # has no effect on the compiled JS.
       args:
         - NEXT_PUBLIC_API_URL=${BACKEND_URL:-http://localhost:8000}
-        - NEXT_PUBLIC_WS_URL=${WS_URL:-ws://localhost:8000}
+        # Empty unless WS_URL is set: the client then derives it from the API
+        # URL (http→ws, https→wss), so one setting cannot contradict the other.
+        - NEXT_PUBLIC_WS_URL=${WS_URL:-}
         - NEXT_PUBLIC_SITE_URL=${FRONTEND_URL:-http://localhost:3000}
         - NEXT_PUBLIC_S3_BUCKET_DOMAIN=${S3_BUCKET_NAME}
         - NEXT_PUBLIC_CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}
     container_name: avatar-frontend
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     environment:
       - NEXT_PUBLIC_API_URL=${BACKEND_URL:-http://localhost:8000}
-      - NEXT_PUBLIC_WS_URL=${WS_URL:-ws://localhost:8000}
+      - NEXT_PUBLIC_WS_URL=${WS_URL:-}
       - NEXT_PUBLIC_S3_BUCKET_DOMAIN=${S3_BUCKET_NAME}
       - NEXT_PUBLIC_CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}
     depends_on:
       backend:
         condition: service_healthy
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000 || exit 1"]
+      # 127.0.0.1, not localhost: the standalone server listens on IPv4 only,
+      # and in the Alpine image `localhost` resolves to ::1 first — the probe
+      # was refused, the container went unhealthy, and nginx (which waits on
+      # this check) never started.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -139,7 +155,13 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: avatar-celery-worker
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    # --beat runs the scheduler inside this worker. Without it the schedule in
+    # celery_app.py was never executed by anything: the guest-account and
+    # media cleanups were defined, documented, and had never once run. An
+    # embedded scheduler is right for a single worker; if this service is
+    # ever scaled past one replica, move beat to its own service so the
+    # schedule does not fire once per replica.
+    command: celery -A app.celery_app worker --beat --schedule /tmp/celerybeat-schedule --loglevel=info --concurrency=2
     # Same reasoning as the backend: the worker runs the same application code
     # (avatar_animator.animate, tts_service.synthesize), so it needs the same
     # settings. An allowlist here meant a task could behave differently from
@@ -151,7 +173,6 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
     volumes:
-      - ./backend:/app
       - avatar_cache:/tmp/avatars
       - video_cache:/tmp/videos
       - audio_cache:/tmp/audio
@@ -184,8 +205,9 @@ services:
       dockerfile: Dockerfile
     container_name: avatar-flower
     command: celery -A app.celery_app flower --port=5555
-    ports:
-      - "127.0.0.1:5555:5555"
+    # Flower imports the app, and the app refuses to start without its
+    # secrets — with no env_file this container crash-looped.
+    env_file: .env
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2

@@ -82,6 +82,32 @@ resource "aws_s3_bucket_versioning" "media" {
   }
 }
 
+# Generated clips are one spoken sentence each and are never needed again once
+# played, yet nothing deleted them: every sentence of every conversation
+# stayed in the bucket (and, with versioning on, so did every old version).
+# The application sweeps local storage itself (MEDIA_RETENTION_HOURS); on S3
+# the bucket does it.
+resource "aws_s3_bucket_lifecycle_configuration" "media" {
+  bucket = aws_s3_bucket.media.id
+
+  rule {
+    id     = "expire-generated-clips"
+    status = "Enabled"
+
+    filter {
+      prefix = "videos/"
+    }
+
+    expiration {
+      days = 1
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 1
+    }
+  }
+}
+
 resource "aws_s3_bucket_cors_configuration" "media" {
   bucket = aws_s3_bucket.media.id
 

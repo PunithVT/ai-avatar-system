@@ -77,13 +77,27 @@ echo "[startup] Starting uvicorn..."
 # SAFETY PRECONDITION: "*" means "trust X-Forwarded-For from anyone", which
 # is only sound because this service is never reachable directly — neither
 # docker-compose.yml nor docker-compose.prod.yml publishes a port for the
-# backend, so nginx is the sole ingress. If you ever expose this container
-# directly, override FORWARDED_ALLOW_IPS with the proxy's literal address:
-# otherwise a client can spoof X-Forwarded-For and forge its rate-limit
-# identity at will.
+# backend, so nginx is the sole ingress. (docker-compose.override.yml, the
+# development file, publishes it on 127.0.0.1 only.) If you ever expose this
+# container directly, override FORWARDED_ALLOW_IPS with the proxy's literal
+# address: otherwise a client can spoof X-Forwarded-For and forge its
+# rate-limit identity at will.
+#
+# ONE WORKER, deliberately. This is not an ordinary stateless web app:
+#   * each worker process loads its own speech models and starts its own
+#     MuseTalk process (~9 GB of weights) — four workers meant four copies
+#     competing for one GPU's memory;
+#   * live WebSocket sessions, the connection cap and the per-user turn limit
+#     are held in the process, so with several workers "end session" only
+#     worked when the request happened to reach the process holding the
+#     socket, and every limit was multiplied by the worker count.
+# The server is async and the heavy work runs in threads and a subprocess, so
+# one process already serves many concurrent conversations. To scale, run
+# more backend CONTAINERS (one per GPU) behind the load balancer with sticky
+# routing — not more workers in this one.
 exec uvicorn main:app \
     --host 0.0.0.0 \
     --port 8000 \
-    --workers "${UVICORN_WORKERS:-4}" \
+    --workers "${UVICORN_WORKERS:-1}" \
     --proxy-headers \
     --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}"

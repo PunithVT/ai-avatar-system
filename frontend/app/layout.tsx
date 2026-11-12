@@ -1,6 +1,7 @@
 import './globals.css'
 import type { Metadata } from 'next'
-import { Inter, Urbanist, JetBrains_Mono, Playfair_Display } from 'next/font/google'
+import type { ReactNode } from 'react'
+import { Inter, Urbanist, JetBrains_Mono } from 'next/font/google'
 import { Toaster } from 'react-hot-toast'
 import { QueryProvider } from '@/components/providers/QueryProvider'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
@@ -24,16 +25,12 @@ const jetbrainsMono = JetBrains_Mono({
   variable: '--font-jetbrains',
   display: 'swap',
 })
-// Rule 6: loaded italic-only, because that is the only way it is ever used.
-const playfair = Playfair_Display({
-  subsets: ['latin'],
-  weight: ['400', '500'],
-  style: ['italic'],
-  variable: '--font-playfair',
-  display: 'swap',
-})
+// Playfair (rule 6, the italic accent) is deliberately NOT loaded: nothing in
+// the app uses `.accent-italic` yet, and a webfont nobody renders is a wasted
+// download on every first visit. The class falls back to Georgia; add the
+// next/font import back alongside its first real use.
 
-const FONT_VARS = [inter, urbanist, jetbrainsMono, playfair].map((f) => f.variable).join(' ')
+const FONT_VARS = [inter, urbanist, jetbrainsMono].map((f) => f.variable).join(' ')
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'
 const SITE_TITLE = 'AvatarAI — Real-Time AI Avatar with Lip-Sync & Voice Cloning'
@@ -66,7 +63,7 @@ export const metadata: Metadata = {
     locale: 'en_US',
   },
   twitter: {
-    card: 'summary_large_image',
+    card: 'summary',
     title: SITE_TITLE,
     description: SITE_DESCRIPTION,
   },
@@ -102,7 +99,7 @@ const JSON_LD = {
 export default function RootLayout({
   children,
 }: {
-  children: React.ReactNode
+  children: ReactNode
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
@@ -117,7 +114,7 @@ export default function RootLayout({
         <a
           href="#main-content"
           className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[100]
- focus:px-4 focus:py-2 focus:rounded-lg focus:bg-primary-600 focus:text-gray-900
+ focus:px-4 focus:py-2 focus:rounded-lg focus:bg-primary-600 focus:text-white
  focus:shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-300"
         >
           Skip to main content
@@ -129,7 +126,9 @@ export default function RootLayout({
           <Toaster
             position="top-right"
             toastOptions={{
-              className: ' ',
+              // A card, like every other floating surface in the system.
+              className: 'border border-gray-200 !rounded-lg !bg-white !text-sm !text-gray-900 !shadow-lg',
+              duration: 4000,
             }}
           />
         </QueryProvider>

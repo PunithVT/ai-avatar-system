@@ -70,7 +70,15 @@
      Rule 4: no gradients. Depth comes from a hairline border and the
      lightest shadow, never from a colour ramp. */
   .card {
-    @apply rounded-xl border border-gray-200 bg-white shadow-xs;
+    /* 24px padding is part of the card, as in DESIGN_SYSTEM.html. Callers
+       that need a flush edge (image cards, list rows) opt out with p-0. */
+    @apply rounded-xl border border-gray-200 bg-white p-6 shadow-xs;
+  }
+
+  /* Landing-page feature tile: a card that lifts one shadow step on hover. */
+  .feature-card {
+    @apply rounded-xl border border-gray-200 bg-white p-6 shadow-xs
+           transition-shadow duration-200 hover:shadow-sm;
   }
 
   /* The 2% black tint the system uses instead of a tinted background. */
@@ -125,6 +133,16 @@
            focus:border-primary-300 focus:outline-none focus:ring-4 focus:ring-primary-50;
   }
 
+  /* Same control as .input. Kept as a second name because every form in the
+     app was written against it before the design-system restyle. */
+  .input-field {
+    @apply w-full rounded-md border border-gray-300 bg-white px-3.5 py-2.5
+           text-sm text-gray-900 placeholder:text-gray-400 shadow-xs
+           transition-shadow duration-150
+           focus:border-primary-300 focus:outline-none focus:ring-4 focus:ring-primary-50
+           disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500;
+  }
+
   .label {
     @apply mb-1.5 block text-sm font-medium text-gray-700;
   }
@@ -139,6 +157,41 @@
   .badge-yellow { @apply badge bg-warning-50 text-warning-700 ring-1 ring-inset ring-warning-700/[.12]; }
   .badge-red    { @apply badge bg-error-50 text-error-700     ring-1 ring-inset ring-error-700/[.12]; }
   .badge-brand  { @apply badge bg-primary-50 text-primary-700 ring-1 ring-inset ring-primary-600/[.12]; }
+  /* Names from before the restyle, mapped onto the system's palette (which
+     has one accent, so "blue" and "purple" are both the brand badge). */
+  .badge-blue   { @apply badge bg-primary-50 text-primary-700 ring-1 ring-inset ring-primary-600/[.12]; }
+  .badge-purple { @apply badge bg-primary-50 text-primary-700 ring-1 ring-inset ring-primary-600/[.12]; }
+  .badge-amber  { @apply badge bg-warning-50 text-warning-700 ring-1 ring-inset ring-warning-700/[.12]; }
+
+  /* ── Status & meters ──────────────────────────────────────────────────── */
+  .status-dot {
+    @apply inline-block h-2 w-2 shrink-0 rounded-full bg-gray-300;
+  }
+  .status-dot.online     { @apply bg-success-500; }
+  .status-dot.processing { @apply animate-pulse-soft bg-warning-500; }
+  .status-dot.offline    { @apply bg-error-500; }
+
+  /* Mic input meter fill. Flat brand colour — rule 4, no ramp. */
+  .voice-level {
+    @apply rounded-full bg-primary-600;
+    transition: width 80ms linear;
+  }
+
+  /* Loading placeholder block. */
+  .skeleton {
+    @apply animate-pulse-soft bg-gray-100;
+  }
+
+  /* The one accent on the stage: a hairline brand ring while the avatar is
+     speaking. A ring, not a glow — there is no glow shadow in this system. */
+  .speaking-ring {
+    @apply ring-2 ring-inset ring-primary-600/40;
+  }
+
+  /* Modal scrim: ink at low opacity so the page stays legible behind it. */
+  .scrim {
+    @apply fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm;
+  }
 
   .divider {
     @apply h-px w-full bg-gray-200;
@@ -146,14 +199,30 @@
 
   /* Scrollbars, kept in the monochrome register rather than left as the
      browser default, which reads as unfinished against this much white. */
-  .scrollbar-thin {
+  .scrollbar-thin,
+  .messages-scroll {
     scrollbar-width: thin;
     scrollbar-color: theme('colors.gray.300') transparent;
   }
-  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
-  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
-  .scrollbar-thin::-webkit-scrollbar-thumb {
+  .scrollbar-thin::-webkit-scrollbar,
+  .messages-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-track,
+  .messages-scroll::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb,
+  .messages-scroll::-webkit-scrollbar-thumb {
     @apply rounded-full bg-gray-300;
   }
-  .scrollbar-thin::-webkit-scrollbar-thumb:hover { @apply bg-gray-400; }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover,
+  .messages-scroll::-webkit-scrollbar-thumb:hover { @apply bg-gray-400; }
+}
+
+/* Recording indicator bars. Defined here rather than in the Tailwind config
+   because each bar offsets it with its own animation-delay. */
+@keyframes waveform {
+  0%, 100% { transform: scaleY(.45); }
+  50% { transform: scaleY(1); }
+}
+.animate-waveform {
+  animation: waveform 1.2s ease-in-out infinite;
+  transform-origin: center;
 }

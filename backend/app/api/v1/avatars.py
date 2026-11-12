@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import tempfile
 import uuid
@@ -75,13 +76,14 @@ async def upload_avatar(
     metadata: dict = {}
 
     try:
-        temp_orig.write_bytes(file_data)
+        await asyncio.to_thread(temp_orig.write_bytes, file_data)
 
         _, metadata = await avatar_processor.process_image(str(temp_orig), str(temp_processed))
 
+        processed_bytes = await asyncio.to_thread(temp_processed.read_bytes)
         image_key = f"avatars/{avatar_id}/image.jpg"
         image_url = await storage_service.upload_file(
-            temp_processed.read_bytes(), image_key, content_type="image/jpeg"
+            processed_bytes, image_key, content_type="image/jpeg"
         )
 
         # Resolve the thumbnail path defensively: an empty/missing value would
@@ -91,9 +93,9 @@ async def upload_avatar(
         thumb_file = Path(thumb_value) if thumb_value else None
         thumb_key = f"avatars/{avatar_id}/thumbnail.jpg"
         thumb_bytes = (
-            thumb_file.read_bytes()
+            await asyncio.to_thread(thumb_file.read_bytes)
             if thumb_file and thumb_file.is_file()
-            else temp_processed.read_bytes()
+            else processed_bytes
         )
         thumbnail_url = await storage_service.upload_file(
             thumb_bytes, thumb_key, content_type="image/jpeg"
@@ -122,6 +124,10 @@ async def upload_avatar(
             thumb_file = Path(thumb_value)
             if thumb_file.is_file():
                 thumb_file.unlink(missing_ok=True)
+
+    # A server temp path is of no use to a client and has no business in the
+    # database or the API response.
+    metadata.pop("thumbnail_path", None)
 
     avatar = Avatar(
         id=avatar_id,
@@ -195,8 +201,19 @@ async def set_avatar_voice(
     if avatar.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorised to modify this avatar")
 
+    normalized = (voice_id or "").strip() or None
+    if normalized is not None:
+        # The voice must exist and belong to the caller. This used to store
+        # any string, and a session then resolved it with no owner check — so
+        # anyone who learned another user's voice id could make their own
+        # avatar speak in that person's cloned voice.
+        from app.api.v1.voices import _load_index, _owned
+
+        entry = next((e for e in await _load_index() if e.get("id") == normalized), None)
+        if entry is None or not _owned(entry, current_user.id):
+            raise HTTPException(status_code=404, detail="Voice profile not found")
+
     try:
-        normalized = (voice_id or "").strip() or None
         avatar.voice_id = normalized
         await db.commit()
         await db.refresh(avatar)
@@ -296,6 +313,14 @@ async def delete_avatar(
     if avatar.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorised to delete this avatar")
 
+    from app.models import Session as SessionModel
+
+    session_ids = (
+        (await db.execute(select(SessionModel.id).where(SessionModel.avatar_id == avatar_id)))
+        .scalars()
+        .all()
+    )
+
     # Delete the DB row first (sessions/messages/conversations cascade), THEN
     # the stored files — if the DB delete fails we haven't orphaned the row by
     # removing its image out from under it.
@@ -310,8 +335,12 @@ async def delete_avatar(
     try:
         await storage_service.delete_file(avatar.s3_key)
         await storage_service.delete_file(avatar.s3_key.replace("image.jpg", "thumbnail.jpg"))
+        # The sessions cascaded away with the row; their generated clips are
+        # storage objects, which no cascade reaches.
+        for sid in session_ids:
+            await storage_service.delete_prefix(f"videos/{sid}/")
     except Exception as e:
-        # Row is gone; leftover files are harmless and reaped by the cleanup task.
+        # Row is gone. Anything left is swept by the media retention task.
         logger.warning(f"Could not delete stored files for avatar {avatar_id}: {e}")
 
     logger.info(f"Avatar deleted: {avatar_id}")

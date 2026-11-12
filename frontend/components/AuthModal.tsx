@@ -1,17 +1,18 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Sparkles, Loader2, Eye, EyeOff, UserPlus, LogIn, User } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { useStore } from '@/store/useStore'
-import type { ApiError } from '@/lib/types'
+import { errorMessage } from '@/lib/errors'
+import { emailProblem, passwordProblem, usernameProblem } from '@/lib/validation'
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 export function AuthModal() {
-  const { setAuth } = useStore()
+  const setAuth = useStore((s) => s.setAuth)
   const [tab, setTab] = useState<'login' | 'register'>('login')
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
@@ -46,9 +47,11 @@ export function AuthModal() {
       }
     }
 
-    // Defer focusing the first input until after the modal mounts
+    // Focus the first field, not the first focusable: index 1 of the
+    // focusables was the "Register" tab, so keyboard users started on a
+    // button they did not want.
     const t = window.setTimeout(() => {
-      const el = focusables()[1] || focusables()[0]
+      const el = dialog.querySelector<HTMLElement>('input') ?? focusables()[0]
       el?.focus()
     }, 50)
 
@@ -72,35 +75,40 @@ export function AuthModal() {
   const [regPassword, setRegPassword] = useState('')
   const [regFullName, setRegFullName] = useState('')
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: FormEvent) => {
     e.preventDefault()
     if (!loginEmail || !loginPassword) return
     setIsLoading(true)
     try {
       const data = await api.login(loginEmail, loginPassword)
-      const profile = await api.getProfile()
+      const profile = await api.getProfile(data.access_token)
       setAuth(data.access_token, profile)
       toast.success(`Welcome back, ${profile.username}!`, { icon: '👋' })
     } catch (err: unknown) {
-      toast.error((err as ApiError)?.response?.data?.detail || 'Invalid credentials')
+      toast.error(errorMessage(err, 'Invalid credentials'))
     } finally {
       setIsLoading(false)
     }
   }
 
-  const handleRegister = async (e: React.FormEvent) => {
+  const handleRegister = async (e: FormEvent) => {
     e.preventDefault()
     if (!regEmail || !regUsername || !regPassword) return
+    const problem = emailProblem(regEmail) || usernameProblem(regUsername) || passwordProblem(regPassword)
+    if (problem) {
+      toast.error(problem)
+      return
+    }
     setIsLoading(true)
     try {
-      await api.register({ email: regEmail, username: regUsername, password: regPassword, full_name: regFullName })
+      await api.register({ email: regEmail.trim(), username: regUsername.trim(), password: regPassword, full_name: regFullName })
       // Auto-login after register
       const data = await api.login(regEmail, regPassword)
-      const profile = await api.getProfile()
+      const profile = await api.getProfile(data.access_token)
       setAuth(data.access_token, profile)
       toast.success(`Account created! Welcome, ${profile.username}!`, { icon: '🎉' })
     } catch (err: unknown) {
-      toast.error((err as ApiError)?.response?.data?.detail || 'Registration failed')
+      toast.error(errorMessage(err, 'Registration failed'))
     } finally {
       setIsLoading(false)
     }
@@ -116,11 +124,11 @@ export function AuthModal() {
     setIsLoading(true)
     try {
       const data = await api.createGuest()
-      const profile = await api.getProfile()
+      const profile = await api.getProfile(data.access_token)
       setAuth(data.access_token, profile)
       toast('Continuing as guest — sign up to keep your data', { icon: '👤' })
     } catch (err: unknown) {
-      toast.error((err as ApiError)?.response?.data?.detail || 'Could not start a guest session')
+      toast.error(errorMessage(err, 'Could not start a guest session'))
     } finally {
       setIsLoading(false)
     }
@@ -134,11 +142,11 @@ export function AuthModal() {
       aria-labelledby="auth-modal-title"
       aria-describedby="auth-modal-desc"
     >
-      <div ref={dialogRef} className="w-full max-w-md mx-4 card rounded-2xl p-8 animate-scale-in">
+      <div ref={dialogRef} className="w-full max-w-md mx-4 card rounded-2xl p-8 shadow-lg animate-scale-in">
         {/* Logo */}
         <div className="flex flex-col items-center gap-3 mb-8">
-          <div className="w-12 h-12 rounded-xl flex items-center justify-center shadow-sm">
-            <Sparkles size={22} className="text-gray-900" />
+          <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-ink">
+            <Sparkles size={22} className="text-white" aria-hidden="true" />
           </div>
           <div className="text-center">
             <h1 id="auth-modal-title" className="text-2xl font-black text-gray-900">AvatarAI</h1>
@@ -147,15 +155,17 @@ export function AuthModal() {
         </div>
 
         {/* Tab switcher */}
-        <div className="flex gap-1 p-1 rounded-xl bg-white border border-gray-200 mb-6">
+        <div className="mb-6 flex gap-1 rounded-lg border border-gray-200 bg-white p-1" role="group" aria-label="Sign in or register">
           {(['login', 'register'] as const).map(t => (
             <button
               key={t}
+              type="button"
               onClick={() => setTab(t)}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-all duration-200
+              aria-pressed={tab === t}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 text-sm font-medium transition-colors duration-150
  ${tab === t
- ? ' text-gray-900 shadow-xs'
- : 'text-gray-500 hover:text-gray-900'
+ ? 'bg-gray-100 text-gray-900'
+ : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'
  }`}
             >
               {t === 'login' ? <><LogIn size={14} /> Sign In</> : <><UserPlus size={14} /> Register</>}
@@ -167,8 +177,9 @@ export function AuthModal() {
         {tab === 'login' && (
           <form onSubmit={handleLogin} className="space-y-4">
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-700">Email</label>
+              <label htmlFor="login-email" className="text-sm font-medium text-gray-700">Email</label>
               <input
+                id="login-email"
                 type="email"
                 value={loginEmail}
                 onChange={e => setLoginEmail(e.target.value)}
@@ -179,9 +190,10 @@ export function AuthModal() {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-700">Password</label>
+              <label htmlFor="login-password" className="text-sm font-medium text-gray-700">Password</label>
               <div className="relative">
                 <input
+                  id="login-password"
                   type={showPassword ? 'text' : 'password'}
                   value={loginPassword}
                   onChange={e => setLoginPassword(e.target.value)}
@@ -193,7 +205,9 @@ export function AuthModal() {
                 <button
                   type="button"
                   onClick={() => setShowPassword(s => !s)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded-sm text-gray-500 hover:text-gray-700"
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
@@ -211,8 +225,10 @@ export function AuthModal() {
           <form onSubmit={handleRegister} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <label className="text-sm font-medium text-gray-700">Username</label>
+                <label htmlFor="reg-username" className="text-sm font-medium text-gray-700">Username</label>
                 <input
+                  id="reg-username"
+                  autoComplete="username"
                   type="text"
                   value={regUsername}
                   onChange={e => setRegUsername(e.target.value)}
@@ -222,8 +238,10 @@ export function AuthModal() {
                 />
               </div>
               <div className="space-y-1.5">
-                <label className="text-sm font-medium text-gray-700">Full Name</label>
+                <label htmlFor="reg-fullname" className="text-sm font-medium text-gray-700">Full Name</label>
                 <input
+                  id="reg-fullname"
+                  autoComplete="name"
                   type="text"
                   value={regFullName}
                   onChange={e => setRegFullName(e.target.value)}
@@ -233,8 +251,10 @@ export function AuthModal() {
               </div>
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-700">Email</label>
+              <label htmlFor="reg-email" className="text-sm font-medium text-gray-700">Email</label>
               <input
+                id="reg-email"
+                autoComplete="email"
                 type="email"
                 value={regEmail}
                 onChange={e => setRegEmail(e.target.value)}
@@ -244,9 +264,11 @@ export function AuthModal() {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-700">Password</label>
+              <label htmlFor="reg-password" className="text-sm font-medium text-gray-700">Password</label>
               <div className="relative">
                 <input
+                  id="reg-password"
+                  autoComplete="new-password"
                   type={showPassword ? 'text' : 'password'}
                   value={regPassword}
                   onChange={e => setRegPassword(e.target.value)}
@@ -258,7 +280,9 @@ export function AuthModal() {
                 <button
                   type="button"
                   onClick={() => setShowPassword(s => !s)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded-sm text-gray-500 hover:text-gray-700"
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
@@ -273,9 +297,9 @@ export function AuthModal() {
 
         {/* Divider */}
         <div className="flex items-center gap-3 my-5">
-          <div className="flex-1 h-px bg-white" />
+          <div className="h-px flex-1 bg-gray-200" />
           <span className="text-xs text-gray-500">or</span>
-          <div className="flex-1 h-px bg-white" />
+          <div className="h-px flex-1 bg-gray-200" />
         </div>
 
         {/* Guest mode */}
