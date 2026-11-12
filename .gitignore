@@ -81,8 +81,6 @@ infrastructure/*.tfstate.backup
 infrastructure/*.tfvars
 infrastructure/.terraform.lock.hcl
 
-# Docker
-docker-compose.override.yml
 
 # Logs
 *.log

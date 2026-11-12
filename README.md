@@ -15,7 +15,7 @@
 <p>
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js&style=flat-square" />
   <img src="https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&style=flat-square" />
-  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&style=flat-square" />
+  <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&style=flat-square" />
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&style=flat-square" />
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&style=flat-square" />
   <img src="https://img.shields.io/badge/CUDA-11.8-76B900?logo=nvidia&style=flat-square" />
@@ -177,8 +177,9 @@ ai-avatar-system/
 ├── scripts/
 │   ├── setup_musetalk.sh       # Download MuseTalk models (~9 GB)
 │   └── deploy-aws.sh           # One-command EC2 GPU deployment
-├── docker-compose.yml          # Development (CPU) — all services
-├── docker-compose.prod.yml     # Production overrides (GPU, no bind mounts, logging)
+├── docker-compose.yml          # Base stack — publishes nothing, mounts no source
+├── docker-compose.override.yml # Development: localhost ports + backend source mount (auto-loaded)
+├── docker-compose.prod.yml     # Production additions (GPU, model + upload mounts, logging)
 ├── deploy.sh                   # ECR push + Terraform deploy (ECS path)
 ├── .env.example                # Development env template
 └── .env.prod.example           # Production env template
@@ -191,7 +192,7 @@ ai-avatar-system/
 ### Prerequisites
 
 - **Docker & Docker Compose** v2+ (recommended)
-- OR: Python 3.10+, Node.js 18+, FFmpeg, PostgreSQL, Redis
+- OR: Python 3.11+, Node.js 20.9+, FFmpeg, PostgreSQL, Redis
 
 ### Option A — Docker / CPU (development)
 
@@ -289,16 +290,43 @@ The script automatically:
 
 ```bash
 cp .env.prod.example .env.prod   # fill in your values
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-**What `docker-compose.prod.yml` adds over development:**
-- GPU reservation (`nvidia` driver, count=1) for backend + celery-worker
-- `float16` inference enabled automatically on CUDA → ~2× speedup
-- Persistent `musetalk_models` volume (survive container restarts)
-- No source-code bind mounts (runs from built image)
-- Log rotation (100 MB max, 5 files)
-- Flower disabled (security)
+`--env-file .env.prod` is required: it is where the `${...}` substitutions in
+the compose files (the URLs the frontend is built with, the database password)
+come from. Without it they silently fall back to development defaults.
+
+> **Upgrading an existing deployment:** earlier versions started the stack
+> without `--env-file`, so Postgres was initialised with the placeholder
+> password regardless of `.env.prod`. If your database volume already exists,
+> either keep `DATABASE_PASSWORD=change_this_password` in `.env.prod`, or
+> change the password inside Postgres first
+> (`ALTER USER avatar_user PASSWORD '...'`) and then set the same value.
+
+**How the three compose files fit together:**
+- `docker-compose.yml` is the base and is safe on its own: no application or
+  database port is published and no source directory is mounted.
+- `docker-compose.override.yml` is loaded automatically by a plain
+  `docker compose up` and adds the development conveniences — the backend,
+  frontend, Postgres, Redis and Flower on `127.0.0.1`, and the backend source
+  mount. It is **not** loaded when files are named with `-f`, so none of that
+  reaches production.
+- `docker-compose.prod.yml` adds, for a GPU host:
+  - GPU reservation (`nvidia` driver, count=1) for backend + celery-worker
+  - `float16` inference enabled automatically on CUDA → ~2× speedup
+  - `backend/models` (the MuseTalk weights) and `backend/uploads` mounted from the host
+  - Log rotation (100 MB max, 5 files)
+  - Flower disabled (security)
+
+In production only nginx is published (80/443). The backend runs **one**
+server process (`UVICORN_WORKERS=1`): each process loads its own models and
+holds its own live sessions, so scale with more backend containers — one per
+GPU — rather than more workers. Set `PRELOAD_MODELS=true` so models load at
+startup instead of on the first conversation.
+
+`GET /health` reports `avatar_engine_state` — whether the lip-sync worker is
+actually running, or has failed and replies are falling back to a still image.
 
 ### Verify GPU is Working
 
@@ -592,7 +620,7 @@ Key `.env` variables:
 ```bash
 # LLM
 LLM_PROVIDER=anthropic            # anthropic | openai | ollama (local & free)
-LLM_MODEL=claude-sonnet-4-6       # or gpt-4o · llama3.1 · qwen2.5 …
+LLM_MODEL=claude-sonnet-5-5       # or gpt-4o · llama3.1 · qwen2.5 …
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_BASE_URL=                  # e.g. http://localhost:11434/v1 for Ollama / vLLM / LM Studio
 

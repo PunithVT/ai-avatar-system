@@ -413,10 +413,13 @@ resource "aws_ecs_task_definition" "worker" {
   memory                   = 2048
 
   container_definitions = jsonencode([{
-    name        = "worker"
-    image       = local.backend_image
-    essential   = true
-    command     = ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    name      = "worker"
+    image     = local.backend_image
+    essential = true
+    # --beat: the scheduler runs inside this worker. Nothing else executes the
+    # cleanup schedule in celery_app.py. Correct while the worker service has
+    # one task; move beat to its own service before raising desired_count.
+    command     = ["celery", "-A", "app.celery_app", "worker", "--beat", "--schedule", "/tmp/celerybeat-schedule", "--loglevel=info", "--concurrency=2"]
     environment = local.backend_env
     secrets     = local.backend_secrets
     # Off by default. With one GPU instance the backend already holds the only

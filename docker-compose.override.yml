@@ -1,0 +1,33 @@
+# Development conveniences. Compose loads this file automatically alongside
+# docker-compose.yml for a plain `docker compose up`, and NOT when files are
+# named explicitly with -f — which is how production is started. So nothing
+# here can reach a production deployment.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  backend:
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Source, plus what lives beside it on the host: models/ (the MuseTalk
+      # weights from scripts/setup_musetalk.sh) and uploads/.
+      - ./backend:/app
+
+  celery-worker:
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  flower:
+    ports:
+      - "127.0.0.1:5555:5555"
