@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  ICE_GATHER_CAP_MS, MAX_RTC_OFFERS, RTC_DISCONNECT_GRACE_MS, RTC_LIVE_TIMEOUT_MS, RtcSession, initialRtcState, rtcReduce,
-  transportOf, type RtcEffect, type RtcEvent, type RtcPeer, type RtcPeerEvents, type RtcPhase,
+  ICE_GATHER_CAP_MS, MAX_RTC_OFFERS, RTC_DISCONNECT_GRACE_MS, RTC_LIVE_TIMEOUT_MS, RtcSession, initialRtcState,
+  offerAudioDirection, rtcReduce, transportOf, type AudioDirection, type RtcEffect, type RtcEvent, type RtcPeer, type RtcPeerEvents, type RtcPhase,
   type RtcState,
 } from '@/lib/chat/rtcSession'
 import type { IceServer, MediaCapabilities, RtcSignal } from '@/lib/types'
@@ -255,7 +255,7 @@ describe('rtcReduce', () => {
 
 type Track = { id: string }
 
-class FakePeer implements RtcPeer {
+class FakePeer implements RtcPeer<Track> {
   calls: string[] = []
   closed = false
   gathering = 'new'
@@ -264,10 +264,19 @@ class FakePeer implements RtcPeer {
   failCreateOffer = false
   failRemote = false
 
+  /** What is on the audio sender: undefined until something was put there. */
+  micTrack: Track | null | undefined = undefined
+  failMicTrack = false
+
   constructor(readonly iceServers: IceServer[], readonly events: RtcPeerEvents<Track>) {}
 
-  addTransceiver(kind: 'audio' | 'video', init: { direction: 'recvonly' }) {
+  addTransceiver(kind: 'audio' | 'video', init: { direction: AudioDirection }) {
     this.calls.push(`transceiver:${kind}:${init.direction}`)
+  }
+  async setMicTrack(track: Track | null) {
+    this.calls.push(`micTrack:${track ? track.id : 'null'}`)
+    if (this.failMicTrack) throw new Error('InvalidModificationError')
+    this.micTrack = track
   }
   async createOffer() {
     this.calls.push('createOffer')
@@ -304,7 +313,9 @@ class FakePeer implements RtcPeer {
   }
 }
 
-function setup(options: { supported?: boolean; socketOpen?: boolean; createThrows?: boolean } = {}) {
+function setup(
+  options: { supported?: boolean; socketOpen?: boolean; createThrows?: boolean; media?: MediaCapabilities } = {},
+) {
   const peers: FakePeer[] = []
   const sent: RtcSignal[] = []
   const attached: Track[] = []
@@ -340,7 +351,7 @@ function setup(options: { supported?: boolean; socketOpen?: boolean; createThrow
   const settle = () => vi.advanceTimersByTimeAsync(0)
   /** ready → offer on the wire. */
   const offer = async () => {
-    session.ready(OFFERED)
+    session.ready(options.media ?? OFFERED)
     await settle()
     latest().finishGathering()
     await settle()
@@ -819,5 +830,153 @@ describe('RtcSession', () => {
     session.dispose()
     expect(sent).toEqual([])
     expect(world.detached).toBe(0)
+  })
+})
+
+// ── The microphone's half of the offer ────────────────────────────────────
+
+const WITH_MIC: MediaCapabilities = { webrtc: true, ice_servers: ICE, mic: true }
+const MIC: Track = { id: 'mic' }
+
+describe('offerAudioDirection', () => {
+  it('sends as well as receives only when the server offers the stream microphone', () => {
+    expect(offerAudioDirection(WITH_MIC)).toBe('sendrecv')
+  })
+
+  it.each([
+    ['a server that predates the field', OFFERED],
+    ['mic: false', { ...OFFERED, mic: false }],
+    ['a truthy value that is not true', { ...OFFERED, mic: 'yes' } as unknown as MediaCapabilities],
+    ['no media at all', undefined],
+  ])('is receive-only for %s', (_name, media) => {
+    expect(offerAudioDirection(media)).toBe('recvonly')
+  })
+})
+
+describe('RtcSession: the stream microphone', () => {
+  const transceivers = (peer: FakePeer) => peer.calls.filter((c) => c.startsWith('transceiver:'))
+
+  it('offers sendrecv audio, with no track, when media.mic is true — video stays recvonly', async () => {
+    const { session, latest, settle, sent } = setup()
+    session.ready(WITH_MIC)
+    await settle()
+    const peer = latest()
+    expect(peer.calls).toEqual([
+      'transceiver:audio:sendrecv', 'transceiver:video:recvonly', 'createOffer', 'setLocalDescription',
+    ])
+    // Nothing was put on the sender to make the offer.
+    expect(peer.micTrack).toBeUndefined()
+    peer.finishGathering()
+    await settle()
+    expect(sent).toEqual([{ type: 'webrtc_offer', sdp: 'OFFER-WITH-CANDIDATES' }])
+  })
+
+  it.each([
+    ['absent', OFFERED],
+    ['false', { ...OFFERED, mic: false }],
+  ])('offers exactly what it always has when media.mic is %s', async (_name, media) => {
+    const { session, latest, settle } = setup()
+    session.ready(media)
+    await settle()
+    expect(latest().calls).toEqual([
+      'transceiver:audio:recvonly', 'transceiver:video:recvonly', 'createOffer', 'setLocalDescription',
+    ])
+  })
+
+  it('media.mic without media.webrtc opens nothing', () => {
+    const { session, peers, sent } = setup()
+    session.ready({ webrtc: false, mic: true })
+    expect(peers).toHaveLength(0)
+    expect(sent).toEqual([])
+  })
+
+  it('the retry offers the same direction as the first attempt', async () => {
+    const { session, peers, settle, offer } = setup({ media: WITH_MIC })
+    await offer()
+    session.serverError()
+    await settle()
+    expect(peers).toHaveLength(2)
+    expect(transceivers(peers[1])).toEqual(['transceiver:audio:sendrecv', 'transceiver:video:recvonly'])
+  })
+
+  it('a reconnect to a server without the microphone goes back to recvonly', async () => {
+    const { session, peers, settle, goLive } = setup({ media: WITH_MIC })
+    await goLive()
+    session.socketClosed()
+    session.ready(OFFERED)
+    await settle()
+    expect(transceivers(peers[1])).toEqual(['transceiver:audio:recvonly', 'transceiver:video:recvonly'])
+    expect(await session.setMicTrack(MIC)).toBe(false)
+  })
+
+  it('puts the microphone on a live stream, and takes it off again', async () => {
+    const { session, latest, goLive } = setup({ media: WITH_MIC })
+    await goLive()
+    expect(await session.setMicTrack(MIC)).toBe(true)
+    expect(latest().micTrack).toBe(MIC)
+    expect(await session.setMicTrack(null)).toBe(true)
+    expect(latest().micTrack).toBeNull()
+  })
+
+  it.each(['offering', 'answered'] as const)('refuses a track while still %s', async (phase) => {
+    const { session, latest, settle, offer } = setup({ media: WITH_MIC })
+    await offer()
+    if (phase === 'answered') {
+      session.answer('ANSWER')
+      await settle()
+    }
+    expect(session.phase).toBe(phase)
+    expect(await session.setMicTrack(MIC)).toBe(false)
+    expect(latest().micTrack).toBeUndefined()
+  })
+
+  it('never touches the sender of a stream that was offered recvonly', async () => {
+    const { session, latest, goLive } = setup()
+    await goLive()
+    expect(await session.setMicTrack(MIC)).toBe(false)
+    expect(await session.setMicTrack(null)).toBe(false)
+    expect(latest().calls.some((c) => c.startsWith('micTrack'))).toBe(false)
+  })
+
+  it('reports false with no peer connection at all', async () => {
+    const { session } = setup()
+    expect(await session.setMicTrack(MIC)).toBe(false)
+    expect(await session.setMicTrack(null)).toBe(false)
+  })
+
+  it('reports false when the browser rejects the track', async () => {
+    const { session, latest, goLive } = setup({ media: WITH_MIC })
+    await goLive()
+    latest().failMicTrack = true
+    expect(await session.setMicTrack(MIC)).toBe(false)
+  })
+
+  it('reports false when the stream died while the track was being attached', async () => {
+    const { session, latest, goLive } = setup({ media: WITH_MIC })
+    await goLive()
+    const first = latest()
+    const attaching = session.setMicTrack(MIC)
+    first.connectionState('failed')
+    expect(await attaching).toBe(false)
+  })
+
+  it('closing the peer leaves the microphone track to its owner', async () => {
+    // `detach` stops the tracks that came FROM the server. The microphone
+    // is not one of them: whoever acquired it stops it.
+    const { session, attached, world, goLive } = setup({ media: WITH_MIC })
+    await goLive()
+    await session.setMicTrack(MIC)
+    session.socketClosed()
+    expect(world.detached).toBe(1)
+    expect(attached).not.toContain(MIC)
+  })
+
+  it('does nothing after dispose', async () => {
+    const { session, latest, goLive } = setup({ media: WITH_MIC })
+    await goLive()
+    const peer = latest()
+    session.dispose()
+    expect(await session.setMicTrack(MIC)).toBe(false)
+    expect(peer.micTrack).toBeUndefined()
   })
 })

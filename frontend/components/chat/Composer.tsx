@@ -56,6 +56,11 @@ interface Props {
   onToggleRecording(): void
   handsFree: boolean
   onToggleHandsFree(): void
+  /**
+   * Hands-free is running on the live stream — the server hears the
+   * microphone and decides the turns — rather than on the browser detector.
+   */
+  handsFreeLive?: boolean
   levelRef: RefObject<number>
 }
 
@@ -65,7 +70,7 @@ const ROUND_IDLE = 'border border-gray-300 bg-white text-gray-600 shadow-xs hove
 
 export function Composer({
   value, onChange, onSend, onStop, isBusy, isProcessing, isRecording,
-  onToggleRecording, handsFree, onToggleHandsFree, levelRef,
+  onToggleRecording, handsFree, onToggleHandsFree, handsFreeLive = false, levelRef,
 }: Props) {
   return (
     <div className="border-t border-gray-200 px-4 py-3">
@@ -83,7 +88,9 @@ export function Composer({
       )}
       {handsFree && !isRecording && (
         <div className="mb-3 flex items-center gap-2 px-1">
-          <span className="font-mono text-eyebrow uppercase text-primary-600">Hands-free</span>
+          <span className="font-mono text-eyebrow uppercase text-primary-600">
+            {handsFreeLive ? 'Hands-free (live)' : 'Hands-free'}
+          </span>
           <span className="ml-auto text-xs text-gray-500">
             {isBusy ? 'Speak to interrupt' : 'Just start talking'}
           </span>
@@ -105,9 +112,21 @@ export function Composer({
 
         <button
           onClick={onToggleHandsFree}
-          aria-label={handsFree ? 'Turn off hands-free listening' : 'Turn on hands-free listening'}
+          aria-label={
+            !handsFree
+              ? 'Turn on hands-free listening'
+              : handsFreeLive
+                ? 'Turn off hands-free listening (live)'
+                : 'Turn off hands-free listening'
+          }
           aria-pressed={handsFree}
-          title={handsFree ? 'Hands-free on — just talk' : 'Hands-free: listen continuously'}
+          title={
+            !handsFree
+              ? 'Hands-free: listen continuously'
+              : handsFreeLive
+                ? 'Hands-free (live) on — just talk'
+                : 'Hands-free on — just talk'
+          }
           className={`${ROUND_BUTTON} ${handsFree ? 'bg-primary-600 text-white hover:bg-primary-700' : ROUND_IDLE}`}
         >
           <Radio size={18} />

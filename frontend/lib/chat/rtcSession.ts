@@ -208,9 +208,32 @@ export function rtcReduce(state: RtcState, event: RtcEvent): RtcStep {
 
 // ── Running the effects ────────────────────────────────────────────────────
 
+export type AudioDirection = 'recvonly' | 'sendrecv'
+
+/**
+ * Which way the offer's audio runs. Receive-only unless the server said it
+ * can take the microphone on the stream (`media.mic`), in which case the same
+ * transceiver also sends. Strictly `true`: for a server that predates the
+ * field, or says anything else, the offer is byte for byte what it was.
+ *
+ * No track is attached when the offer is made. The direction alone reserves
+ * the sending half, so the microphone can be put on it later with
+ * `replaceTrack` — no renegotiation, and no permission prompt for a user who
+ * never turns hands-free on.
+ */
+export function offerAudioDirection(media: MediaCapabilities | undefined): AudioDirection {
+  return media?.mic === true ? 'sendrecv' : 'recvonly'
+}
+
 /** The slice of RTCPeerConnection the session uses. */
-export interface RtcPeer {
-  addTransceiver(kind: 'audio' | 'video', init: { direction: 'recvonly' }): void
+export interface RtcPeer<Track = unknown> {
+  addTransceiver(kind: 'audio' | 'video', init: { direction: AudioDirection }): void
+  /**
+   * Put a microphone track on the audio transceiver's sender, or take it off
+   * with null (`RTCRtpSender.replaceTrack`). Only called on a peer whose
+   * audio was offered `sendrecv`.
+   */
+  setMicTrack(track: Track | null): Promise<void>
   createOffer(): Promise<{ type: 'offer'; sdp?: string }>
   setLocalDescription(description: { type: 'offer'; sdp?: string }): Promise<void>
   setRemoteDescription(description: { type: 'answer'; sdp: string }): Promise<void>
@@ -229,7 +252,7 @@ export interface RtcPeerEvents<Track> {
 export interface RtcEnvironment<Track> {
   /** Does this browser have RTCPeerConnection? */
   supported(): boolean
-  createPeer(iceServers: IceServer[], events: RtcPeerEvents<Track>): RtcPeer
+  createPeer(iceServers: IceServer[], events: RtcPeerEvents<Track>): RtcPeer<Track>
   /** Send a signalling frame. False if the socket was not open. */
   send(signal: RtcSignal): boolean
   /** An incoming track: put it on the stage. */
@@ -250,7 +273,13 @@ export interface RtcEnvironment<Track> {
  */
 export class RtcSession<Track = unknown> {
   private state: RtcState = initialRtcState
-  private peer: RtcPeer | null = null
+  private peer: RtcPeer<Track> | null = null
+  /**
+   * Audio direction for every offer on this socket connection, from its
+   * `ready` frame. Held here rather than re-read so the retry offers the
+   * same thing the first attempt did.
+   */
+  private audioDirection: AudioDirection = 'recvonly'
   private deadline: ReturnType<typeof setTimeout> | null = null
   /** Running while the current peer reports `disconnected`. */
   private disconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -269,6 +298,7 @@ export class RtcSession<Track = unknown> {
 
   /** The socket's `ready` frame arrived: a new connection, a new negotiation. */
   ready(media: MediaCapabilities | undefined): void {
+    this.audioDirection = offerAudioDirection(media)
     this.dispatch({ type: 'ready', media, supported: this.env.supported() })
   }
 
@@ -286,6 +316,29 @@ export class RtcSession<Track = unknown> {
 
   socketClosed(): void {
     this.dispatch({ type: 'socket-closed' })
+  }
+
+  /**
+   * Put the microphone on the stream, or take it off (null). Resolves true
+   * if the current peer connection now carries exactly that.
+   *
+   * A track is only accepted on a LIVE stream whose audio was offered
+   * `sendrecv`: the server listens to nothing else, and a track handed to a
+   * peer that is still negotiating would be sending before anyone agreed to
+   * receive it. Taking the track off is always allowed.
+   */
+  async setMicTrack(track: Track | null): Promise<boolean> {
+    const peer = this.peer
+    if (this.disposed || !peer || this.audioDirection !== 'sendrecv') return false
+    if (track !== null && this.state.phase !== 'live') return false
+    try {
+      await peer.setMicTrack(track)
+    } catch {
+      return false
+    }
+    // Replaced while the browser was working: that peer is closed, and what
+    // was put on it went with it.
+    return this.peer === peer && (track === null || this.state.phase === 'live')
   }
 
   /** The owner is going away. Closes for good; later events do nothing. */
@@ -324,7 +377,7 @@ export class RtcSession<Track = unknown> {
   }
 
   private async open(iceServers: IceServer[]): Promise<void> {
-    let peer: RtcPeer
+    let peer: RtcPeer<Track>
     let gathered: () => void = () => {}
     try {
       peer = this.env.createPeer(iceServers, {
@@ -353,7 +406,8 @@ export class RtcSession<Track = unknown> {
     }, RTC_LIVE_TIMEOUT_MS)
 
     try {
-      peer.addTransceiver('audio', { direction: 'recvonly' })
+      peer.addTransceiver('audio', { direction: this.audioDirection })
+      // The camera is never sent, whatever the server offers.
       peer.addTransceiver('video', { direction: 'recvonly' })
       const offer = await peer.createOffer()
       if (this.peer !== peer) return
@@ -398,7 +452,7 @@ export class RtcSession<Track = unknown> {
    * in between (back to `connected`, or on to `failed`, which is handled as
    * its own event) stops the clock.
    */
-  private watchDisconnect(peer: RtcPeer, state: string): void {
+  private watchDisconnect(peer: RtcPeer<Track>, state: string): void {
     if (state !== 'disconnected') {
       this.clearDisconnectTimer()
       return

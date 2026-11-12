@@ -49,6 +49,12 @@ export interface AvatarPlayer {
   handleFrame(message: WsMessage): void
   /** The socket closed: the peer connection that rode on it goes too. */
   handleSocketClosed(): void
+  /**
+   * Put the microphone on the live stream, or take it off (null). Resolves
+   * false when there is no live stream that can carry one. The track stays
+   * the caller's: nothing here ever stops it.
+   */
+  setMicTrack(track: MediaStreamTrack | null): Promise<boolean>
 }
 
 const NO_STREAM: StreamView = { live: false, speaking: false, suppressed: false }
@@ -124,7 +130,7 @@ export function useAvatarPlayer(
     [setClipsMuted, setSilenced, enableAudio, transport, clipsActive],
   )
 
-  const { ready, answer, serverError, mediaTransport, socketClosed } = rtc
+  const { ready, answer, serverError, mediaTransport, socketClosed, setMicTrack } = rtc
   const handleFrame = useCallback(
     (message: WsMessage) => routeMediaFrame(message, { ready, answer, serverError, mediaTransport }, transport),
     [ready, answer, serverError, mediaTransport, transport],
@@ -144,10 +150,11 @@ export function useAvatarPlayer(
       streamOnScreen: view.live && rtc.hasPicture && !view.suppressed,
       handleFrame,
       handleSocketClosed: socketClosed,
+      setMicTrack,
     }),
     [
       transport, setMuted, muted, clipOnScreen, view, clips.audioBlocked, rtc.audioBlocked,
-      rtc.hasPicture, handleFrame, socketClosed,
+      rtc.hasPicture, handleFrame, socketClosed, setMicTrack,
     ],
   )
 }

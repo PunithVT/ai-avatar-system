@@ -11,8 +11,12 @@ import { useChatSession } from '@/hooks/useChatSession'
 import { useAvatarPlayer } from '@/hooks/useAvatarPlayer'
 import { usePushToTalk } from '@/hooks/usePushToTalk'
 import { useHandsFree } from '@/hooks/useHandsFree'
+import { useStreamMic } from '@/hooks/useStreamMic'
 import { isNewSentence } from '@/lib/chat/avatarTransport'
 import { ReplyGate, initialTurnState, turnReducer } from '@/lib/chat/turnState'
+import {
+  initialSpeechState, isPartialTranscription, speechReduce, speechTurnStep, type SpeechTurnEvent,
+} from '@/lib/chat/userSpeech'
 import {
   EMOTION_CONFIG, detectEmotion, fromServer, liveMessage, reconcilePersisted, type Message,
 } from '@/lib/chat/messages'
@@ -20,7 +24,7 @@ import { AvatarStage } from '@/components/chat/AvatarStage'
 import { MessageList } from '@/components/chat/MessageList'
 import { Composer } from '@/components/chat/Composer'
 import { ShortcutsDialog } from '@/components/chat/ShortcutsDialog'
-import type { Avatar, RtcSignal, WsMessage } from '@/lib/types'
+import type { Avatar, MicSignal, RtcSignal, WsMessage } from '@/lib/types'
 
 interface ChatInterfaceProps {
   avatarId: string
@@ -50,7 +54,10 @@ function isTextField(target: EventTarget | null): boolean {
  *   useChatSession  — create / resume / end the session
  *   useChatSocket   — the WebSocket and its reconnects
  *   useAvatarPlayer — everything the avatar plays, clips or live stream
- *   usePushToTalk / useHandsFree — the microphone
+ *   usePushToTalk / useHandsFree — the microphone, recorded in the browser
+ *   useStreamMic    — hands-free on the live stream, where the server
+ *                     decides the turns; and which of the two is in charge
+ *   speechReduce    — the user's utterance as the server reports it
  *   turnReducer     — spinner, typing dots, streaming text, latency
  */
 export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInterfaceProps) {
@@ -63,19 +70,35 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [sessionFailed, setSessionFailed] = useState(false)
   const [turn, dispatch] = useReducer(turnReducer, initialTurnState)
+  const [speech, dispatchSpeech] = useReducer(speechReduce, initialSpeechState)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const preloadRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<HTMLVideoElement>(null)
   // WebRTC signalling rides the chat socket, which is created further down
   // (it needs the message handler, which needs the player).
-  const sendSignalRef = useRef<(signal: RtcSignal) => boolean>(() => false)
-  const sendSignal = useCallback((signal: RtcSignal) => sendSignalRef.current(signal), [])
+  const sendSignalRef = useRef<(signal: RtcSignal | MicSignal) => boolean>(() => false)
+  const sendSignal = useCallback((signal: RtcSignal | MicSignal) => sendSignalRef.current(signal), [])
   const player = useAvatarPlayer(videoRef, preloadRef, streamRef, sendSignal)
 
   // Mic level, written by the capture hooks and painted by the meter without
   // passing through React state.
   const levelRef = useRef(0)
+  // Synchronous mirror of speech.speaking, for the meter's frame loop.
+  const userSpeakingRef = useRef(false)
+  // The server took an utterance for a turn (`user_speech stopped, turn`)
+  // and its final transcript has not arrived. That is when the spinner went
+  // up, so it is also what has to take it down if the transcript never comes.
+  // Only speechTurn() writes it.
+  const speechTurnRef = useRef(false)
+  const streamMic = useStreamMic({
+    wanted: handsFree,
+    live: player.transport === 'webrtc',
+    setTrack: player.setMicTrack,
+    send: sendSignal,
+    isSpeaking: () => userSpeakingRef.current,
+    levelRef,
+  })
   const sessionIdRef = useRef<string | null>(null)
   const languageRef = useRef('en')
   const sendTimeRef = useRef(0)
@@ -163,11 +186,57 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
     if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current)
   }, [])
 
+  // ── Starting a turn ──────────────────────────────────────────────────────
+
+  /** Common to typed and spoken turns: clear the stage for the new reply. */
+  const beginTurn = () => {
+    // Stop, not just hide: hiding the element left the previous sentence's
+    // audio playing under the idle image.
+    acceptChunksRef.current = false
+    player.stop()
+    commitPartialReply()
+    replyGate.close()
+    firstChunkSeenRef.current = false
+    awaitingReplyRef.current = true
+    sendTimeRef.current = Date.now()
+  }
+
+  /**
+   * Everything that can end, or begin, a microphone turn goes through here
+   * (see speechTurnStep), so that no way out of "waiting for the transcript"
+   * can forget the pending bubble or the spinner. Abandoning is done here;
+   * the two outcomes that need the player are returned to the caller.
+   */
+  const speechTurn = useCallback((event: SpeechTurnEvent): 'barge-in' | 'begin' | null => {
+    const step = speechTurnStep(speechTurnRef.current, event)
+    speechTurnRef.current = step.pending
+    if (step.speech) {
+      userSpeakingRef.current = step.speech.type === 'started'
+      dispatchSpeech(step.speech)
+    }
+    if (step.turn === 'abandon') {
+      // Undo what `stopped, turn` set up; nothing follows.
+      awaitingReplyRef.current = false
+      dispatch({ type: 'reset' })
+      return null
+    }
+    return step.turn
+  }, [])
+
   // ── Server events ────────────────────────────────────────────────────────
   const handleMessage = (data: WsMessage) => {
     // Transport negotiation and the stream's `speaking` state. Before the
     // gate: none of it is reply text, and all of it must be seen.
     player.handleFrame(data)
+    streamMic.handleFrame(data)
+
+    // A running transcript of what the user is still saying. Handled apart
+    // from the final one on purpose: it must not create a message, reopen
+    // the reply gate or touch the turn — the turn has not started.
+    if (data.type === 'transcription' && isPartialTranscription(data)) {
+      dispatchSpeech({ type: 'partial', text: data.text })
+      return
+    }
 
     // Text from a reply the user has already stopped or talked over.
     if (!replyGate.admit(data)) return
@@ -180,9 +249,37 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
 
       case 'transcription':
         streamingRef.current = ''
+        // Takes the pending bubble away in the same update that adds the
+        // message, so the utterance is on screen once throughout.
+        speechTurn({ type: 'final' })
         setMessages((prev) => [...prev, liveMessage('user', data.text)])
         dispatch({ type: 'transcription' })
         break
+
+      case 'user_speech': {
+        const next = speechTurn({
+          type: 'user-speech', state: data.state, reason: data.reason, stream: streamMic.isStream(),
+        })
+        if (next === 'barge-in') {
+          // Confirmed speech over a reply is a barge-in, and on the stream
+          // microphone the SERVER performs it: it flushes, commits what was
+          // said and sends `interrupted`. So no `interrupt` goes out from
+          // here — only the local half, which also marks the old turn as
+          // over so that `interrupted` is not mistaken for news about a
+          // turn sent after it.
+          if (awaitingReplyRef.current || player.isActive()) {
+            awaitingReplyRef.current = false
+            endTurnLocally()
+            replyGate.close()
+          }
+        } else if (next === 'begin') {
+          // The same point in a turn as an uploaded recording leaving: the
+          // utterance is with the server and its transcript comes next.
+          beginTurn()
+          dispatch({ type: 'audio-sent' })
+        }
+        break
+      }
 
       case 'message':
         streamingRef.current = ''
@@ -224,6 +321,9 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
         break
 
       case 'error':
+        // A turn that failed before its transcript: nothing will replace
+        // the pending bubble.
+        speechTurn({ type: 'error' })
         awaitingReplyRef.current = false
         toast.error(data.message)
         commitPartialReply()
@@ -242,6 +342,12 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
         // If we have already sent the next one,
         // this is about the previous turn: stop its playback and keep its
         // partial text, but leave the new turn's spinner alone.
+        //
+        // Unless what is in flight is a microphone turn still waiting for
+        // its transcript: a turn of the user's own would have cleared that
+        // (`turn-sent`), so this is that turn being cancelled, and nothing
+        // else will ever take its bubble and spinner down.
+        speechTurn({ type: 'interrupted' })
         if (awaitingReplyRef.current) {
           player.stop()
           commitPartialReply()
@@ -258,6 +364,8 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
       case 'webrtc_error':
       case 'media_transport':
       case 'speaking':
+      // Handled by the stream microphone, above.
+      case 'mic_state':
         break
     }
   }
@@ -275,6 +383,8 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
     // stream does not survive: its peer connection belongs to this socket.
     onDrop: () => {
       player.handleSocketClosed()
+      streamMic.handleSocketClosed()
+      speechTurn({ type: 'socket-dropped' })
       awaitingReplyRef.current = false
       replyGate.reset()
       commitPartialReply()
@@ -310,24 +420,12 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
       sessionIdRef.current = null
       // disconnect() closes silently (no onDrop), so say it here.
       player.handleSocketClosed()
+      streamMic.handleSocketClosed()
       socket.disconnect()
     },
   })
 
   // ── Sending ──────────────────────────────────────────────────────────────
-
-  /** Common to typed and spoken turns: clear the stage for the new reply. */
-  const beginTurn = () => {
-    // Stop, not just hide: hiding the element left the previous sentence's
-    // audio playing under the idle image.
-    acceptChunksRef.current = false
-    player.stop()
-    commitPartialReply()
-    replyGate.close()
-    firstChunkSeenRef.current = false
-    awaitingReplyRef.current = true
-    sendTimeRef.current = Date.now()
-  }
 
   const sendText = () => {
     const text = inputText.trim()
@@ -339,6 +437,7 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
       toast.error('Not connected to the avatar yet — try again in a moment.')
       return
     }
+    speechTurn({ type: 'turn-sent' })
     beginTurn()
     setMessages((prev) => [...prev, liveMessage('user', text)])
     setInputText('')
@@ -361,6 +460,7 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
         toast.error('Not connected — your recording was not sent.')
         return
       }
+      speechTurn({ type: 'turn-sent' })
       beginTurn()
       dispatch({ type: 'audio-sent' })
     }
@@ -369,6 +469,9 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
 
   const stopGeneration = () => {
     socket.send({ type: 'stop' })
+    // A microphone turn stopped before its transcript is cancelled without
+    // another frame about it: its pending bubble goes with the spinner.
+    speechTurn({ type: 'stop' })
     awaitingReplyRef.current = false
     endTurnLocally()
     replyGate.close()
@@ -383,7 +486,9 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
   // ── Microphone ───────────────────────────────────────────────────────────
   const pushToTalk = usePushToTalk({ onBlob: sendAudioBlob, levelRef })
   const handsFreeMic = useHandsFree({
-    enabled: handsFree,
+    // Not `handsFree` itself: on a live stream that offers it, the server
+    // listens instead and this detector must not run alongside.
+    enabled: streamMic.localEnabled,
     onBlob: sendAudioBlob,
     // Only called once the detector has confirmed real speech. Cutting the
     // avatar off on the first loud frame meant a cough cancelled the reply.
@@ -398,7 +503,19 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
     onFailed: () => setHandsFree(false),
     levelRef,
   })
-  const isRecording = pushToTalk.isRecording || handsFreeMic.isCapturing
+  const isRecording = pushToTalk.isRecording || handsFreeMic.isCapturing || speech.speaking
+
+  // The stream microphone went away mid-utterance (fallback, hands-free
+  // switched off, a long-hidden tab). The server discards what it was
+  // hearing and cancels a turn whose transcript it has not sent, so the
+  // listening row, the pending bubble and that turn's spinner have nothing
+  // left to wait for. A turn whose transcript is already here is not
+  // affected: it is an ordinary turn by now.
+  const micMode = streamMic.mode
+  useEffect(() => {
+    if (micMode === 'stream') return
+    speechTurn({ type: 'mic-left' })
+  }, [micMode, speechTurn])
 
   // ── Transcript actions ───────────────────────────────────────────────────
   const copyMessage = useCallback((content: string) => {
@@ -582,6 +699,7 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
           messages={messages}
           streamingContent={turn.streamingContent}
           isTyping={turn.isTyping}
+          pendingUserText={speech.pending}
           onCopy={copyMessage}
           onSaveEdit={saveEditMessage}
           onDelete={deleteMessage}
@@ -598,6 +716,7 @@ export function ChatInterface({ avatarId, resumeSessionId, onStartNew }: ChatInt
           onToggleRecording={pushToTalk.isRecording ? pushToTalk.stop : pushToTalk.start}
           handsFree={handsFree}
           onToggleHandsFree={() => setHandsFree(!handsFree)}
+          handsFreeLive={handsFree && micMode === 'stream'}
           levelRef={levelRef}
         />
       </div>

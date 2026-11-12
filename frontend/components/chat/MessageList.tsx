@@ -157,12 +157,19 @@ interface Props {
   /** Tokens of the reply being generated, shown as a live bubble. */
   streamingContent: string
   isTyping: boolean
+  /**
+   * What the server has heard so far of an utterance still being spoken.
+   * Provisional: not a message, and replaced by one when the turn is taken.
+   */
+  pendingUserText?: string | null
   onCopy(content: string): void
   onSaveEdit(id: string, content: string): void
   onDelete(id: string): void
 }
 
-export function MessageList({ messages, streamingContent, isTyping, onCopy, onSaveEdit, onDelete }: Props) {
+export function MessageList({
+  messages, streamingContent, isTyping, pendingUserText, onCopy, onSaveEdit, onDelete,
+}: Props) {
   const endRef = useRef<HTMLDivElement>(null)
 
   // Follow the conversation, including while a reply streams in. Smooth
@@ -170,11 +177,11 @@ export function MessageList({ messages, streamingContent, isTyping, onCopy, onSa
   // overlapping animations and the view judders.
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: streamingContent ? 'auto' : 'smooth', block: 'end' })
-  }, [messages, isTyping, streamingContent])
+  }, [messages, isTyping, streamingContent, pendingUserText])
 
   return (
     <div className="messages-scroll flex-1 space-y-4 overflow-y-auto px-4 py-4">
-      {messages.length === 0 && !streamingContent && !isTyping ? (
+      {messages.length === 0 && !streamingContent && !isTyping && !pendingUserText ? (
         <div className="flex h-full flex-col items-center justify-center gap-4 py-12 text-center">
           <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-gray-200 bg-gray-50">
             <Sparkles size={28} className="text-gray-400" aria-hidden="true" />
@@ -194,6 +201,20 @@ export function MessageList({ messages, streamingContent, isTyping, onCopy, onSa
             onDelete={onDelete}
           />
         ))
+      )}
+
+      {pendingUserText && (
+        // Outlined rather than filled, and without a timestamp or actions:
+        // it reads as the user's side, but not yet as something that was said.
+        <div className="flex flex-row-reverse gap-2.5">
+          <Disc role="user" />
+          <div className="flex max-w-[85%] flex-col items-end gap-1">
+            <div className="whitespace-pre-wrap break-words rounded-xl rounded-tr-xs border border-dashed border-primary-300 bg-primary-50 px-4 py-2.5 text-sm italic leading-relaxed text-primary-700">
+              {pendingUserText}
+              <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-soft rounded-xs bg-primary-600 align-middle" aria-hidden="true" />
+            </div>
+          </div>
+        </div>
       )}
 
       {streamingContent && (

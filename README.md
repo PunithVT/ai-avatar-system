@@ -567,9 +567,10 @@ WEBRTC_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302"]}]
 - `GET /health` reports `media_transport` and `webrtc_available`; the chat
   header shows "Live stream" when a conversation is actually on it.
 
-The microphone still travels over the WebSocket; moving it onto the same
-connection (which is what makes a proper turn detector possible) is the next
-step on the roadmap.
+In hands-free mode the microphone travels over the same connection, and the
+server decides when you have started and finished speaking — see
+[Hands-Free Mode](#-hands-free-mode). Push-to-talk and typed messages are
+unchanged.
 
 ---
 
@@ -595,6 +596,35 @@ How turns are decided (`frontend/lib/vad.ts`):
 The detector is pure — it takes `(level, timestamp)` samples and returns turn
 boundaries — so its timing logic can be exercised against a synthetic trace
 without a browser or a microphone.
+
+### On the live stream: the server decides turns
+
+A loudness threshold cannot tell a finished thought from a pause for breath.
+When a conversation is on the [live stream](#-live-stream-webrtc-optional),
+hands-free sends the microphone up the same WebRTC connection instead, and the
+**server** decides turns with two models from the
+[Pipecat](https://github.com/pipecat-ai/pipecat) framework:
+
+- **Silero VAD** detects speech starting and stopping, frame by frame.
+- **Smart Turn** is asked at each pause whether the sentence sounds finished.
+  A complete sentence is answered at once; a pause mid-sentence is waited out
+  (up to `TURN_MAX_WAIT_SECS`), and if you carry on it stays one turn.
+
+Speaking over the avatar interrupts it — the server does that itself, and
+raises its detection threshold while the avatar is talking so its own voice
+is not mistaken for yours. Short answers ("yes", "no") count as turns.
+
+Both models run on CPU (well under a millisecond per audio frame for the
+detector, about a tenth of a second per end-of-turn decision). The microphone
+is processed only while hands-free is on; nothing is listened to, buffered or
+transcribed otherwise. If the stream drops, hands-free carries on with the
+browser-side detector above without you doing anything.
+
+```env
+VOICE_TURN_DETECTION=smart   # smart | vad (silence timeout only) | off (browser-side)
+TURN_MAX_WAIT_SECS=3.0
+STT_PARTIALS=auto            # running transcript while you speak (auto = on a GPU)
+```
 
 ---
 
@@ -801,7 +831,7 @@ pytest --cov=app --cov-report=html  # HTML coverage
 - [x] **Local LLMs** — Ollama / vLLM / LM Studio via OpenAI-compatible API ✅
 - [x] **Hands-free mode** — VAD-driven always-listening with auto end-of-turn (no tap-to-record) ✅
 - [x] **WebRTC delivery** — one continuous audio/video stream instead of chunked MP4 (opt-in: `MEDIA_TRANSPORT=webrtc`)
-- [ ] **WebRTC microphone + semantic turn detection** — full-duplex audio on the same connection
+- [x] **WebRTC microphone + semantic turn detection** — hands-free audio on the same connection; Silero VAD + Smart Turn decide turns on the server
 - [ ] **Wav2Lip engine** — lighter lip-sync option for weaker GPUs
 - [ ] **Emotion-driven animation** — detected emotion changes facial expression
 - [ ] **Embeddable widget** — drop a talking avatar into any website with 3 lines of JS
