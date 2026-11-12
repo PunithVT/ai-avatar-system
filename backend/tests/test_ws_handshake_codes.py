@@ -126,9 +126,25 @@ async def test_the_ready_frame_offers_webrtc_only_when_it_is_configured(seeded, 
                 return ws.receive_json()
 
     servers = [{"urls": ["turn:turn.example.com:3478"], "username": "u", "credential": "p"}]
-    assert ready() == {"type": "ready", "media": {"webrtc": False, "ice_servers": servers}}
+    # `mic` (will the server take the microphone over the stream and decide
+    # the turns?) can only be true where there is a stream to carry it.
+    monkeypatch.setattr(settings, "VOICE_TURN_DETECTION", "smart")
+    assert ready() == {
+        "type": "ready",
+        "media": {"webrtc": False, "ice_servers": servers, "mic": False},
+    }
     monkeypatch.setattr(settings, "MEDIA_TRANSPORT", "webrtc")
-    assert ready() == {"type": "ready", "media": {"webrtc": True, "ice_servers": servers}}
+    from app.services.turn_taking import turn_taking_available
+
+    assert ready() == {
+        "type": "ready",
+        "media": {"webrtc": True, "ice_servers": servers, "mic": turn_taking_available()},
+    }
+    monkeypatch.setattr(settings, "VOICE_TURN_DETECTION", "off")
+    assert ready() == {
+        "type": "ready",
+        "media": {"webrtc": True, "ice_servers": servers, "mic": False},
+    }
 
 
 async def test_signalling_frames_are_dispatched_and_never_drop_the_socket(seeded, monkeypatch):
@@ -149,5 +165,31 @@ async def test_signalling_frames_are_dispatched_and_never_drop_the_socket(seeded
             ws.send_json({"type": "webrtc_offer"})
             assert ws.receive_json()["type"] == "webrtc_error"
             ws.send_json({"type": "webrtc_close"})
+            ws.send_json({"type": "ping"})
+            assert ws.receive_json() == {"type": "pong"}
+
+
+async def test_a_mic_frame_on_the_default_transport_is_answered_and_changes_nothing(
+    seeded, monkeypatch
+):
+    """A client that asks anyway is told no; the server builds nothing for it."""
+    import app.websocket as wsmod
+
+    async def no_load(session_id):
+        return None
+
+    monkeypatch.setattr(wsmod.websocket_manager, "_load_session_data", no_load)
+    monkeypatch.setattr(wsmod.settings, "MEDIA_TRANSPORT", "clips")
+    token = create_access_token(data={"sub": "owner"})
+    with TestClient(main.app) as tc:
+        with tc.websocket_connect(f"/ws/session/s1?token={token}") as ws:
+            assert ws.receive_json()["media"]["mic"] is False
+            ws.send_json({"type": "mic", "active": True})
+            assert ws.receive_json() == {"type": "mic_state", "listening": False}
+            ws.send_json({"type": "mic", "active": False})
+            assert ws.receive_json() == {"type": "mic_state", "listening": False}
+            ws.send_json({"type": "mic"})
+            assert ws.receive_json() == {"type": "mic_state", "listening": False}
+            assert wsmod.websocket_manager._mics == {}
             ws.send_json({"type": "ping"})
             assert ws.receive_json() == {"type": "pong"}

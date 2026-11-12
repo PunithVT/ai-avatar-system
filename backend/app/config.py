@@ -222,6 +222,47 @@ class Settings(BaseSettings):
     # A malformed value is logged and treated as "no servers", not fatal.
     WEBRTC_ICE_SERVERS: str = '[{"urls": ["stun:stun.l.google.com:19302"]}]'
 
+    # Who decides when the user has finished speaking, in hands-free mode on
+    # the WebRTC transport. There the microphone travels up the same peer
+    # connection as the avatar comes down, and the server takes the turns
+    # (services/turn_taking.py) instead of the browser's loudness detector.
+    #   smart — default. Silero VAD finds speech; when the speaker pauses, the
+    #           Smart Turn model judges whether the sentence sounds finished.
+    #           A complete thought is answered after VAD_STOP_SECS; a pause
+    #           mid-sentence is waited through. Costs ~0.1 s of one CPU core
+    #           per pause, and two small ONNX models per listening session.
+    #   vad   — Silero VAD only: a turn ends after VAD_STOP_SECS of silence.
+    #           Nothing to wait for and nothing to misjudge, but a pause for
+    #           thought is taken as the end.
+    #   off   — the microphone is not offered over WebRTC; hands-free stays
+    #           in the browser, exactly as on the clips transport.
+    # Has no effect unless MEDIA_TRANSPORT=webrtc. Needs the pipecat-ai
+    # package; without it this behaves as "off".
+    VOICE_TURN_DETECTION: str = "smart"  # smart | vad | off
+    # Silence, in seconds, before the VAD reports that speech has stopped.
+    # In "vad" mode that ends the turn; in "smart" mode it is only the pause
+    # after which the turn model is asked. 0 picks the default for the mode:
+    #   smart — 0.2, Pipecat's VAD default and the value Smart Turn is tuned
+    #           against. Longer delays every reply by the difference.
+    #   vad   — 0.8 (Pipecat's 0.2 plus its 0.6 s speech timeout). Shorter
+    #           answers faster and cuts more people off mid-sentence.
+    VAD_STOP_SECS: float = 0.0
+    # "smart" mode: how long to wait for more after a pause the turn model
+    # judged unfinished, before answering anyway. Longer is more patient with
+    # slow speakers; it is also how long a turn the model misjudged hangs.
+    TURN_MAX_WAIT_SECS: float = 3.0
+    # Show the user's words while they are still speaking, by transcribing
+    # the utterance so far every STT_PARTIAL_INTERVAL_SECS. Each one is a
+    # full Whisper pass over everything said so far, so:
+    #   auto — default: only when speech-to-text runs on a GPU, where a pass
+    #          takes a fraction of the interval.
+    #   on   — always. On CPU the passes queue up behind each other and the
+    #          final transcript waits for the one in flight.
+    #   off  — never; the transcript appears once, when the turn ends.
+    STT_PARTIALS: str = "auto"  # auto | on | off
+    # Shorter feels more live and costs proportionally more transcription.
+    STT_PARTIAL_INTERVAL_SECS: float = 1.5
+
     # Guest accounts. "Continue as Guest" mints a real (anonymous) user row
     # so the ordinary per-user ownership checks scope a guest's data to just
     # that guest. They are disposable: the daily cleanup task deletes guest

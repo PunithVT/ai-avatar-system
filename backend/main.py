@@ -21,7 +21,8 @@ from app.middleware.security import RequestLoggingMiddleware, SecurityHeadersMid
 from app.models import Session as SessionModel
 from app.services.cache import cache_service
 from app.services.storage import storage_service
-from app.services.webrtc import WEBRTC_AVAILABLE, media_descriptor
+from app.services.turn_taking import turn_detection_mode, turn_taking_installed
+from app.services.webrtc import WEBRTC_AVAILABLE, media_descriptor, mic_enabled, webrtc_enabled
 from app.telemetry import init_telemetry
 from app.tokens import subject_from_token
 from app.websocket import websocket_manager
@@ -89,6 +90,16 @@ async def lifespan(app: FastAPI):
 
     websocket_manager.start_cleanup_task()
 
+    # The ready frame says whether the server will take the microphone, which
+    # depends on Pipecat importing. Find out here, off the loop, rather than
+    # inside the first connection's handshake. Only on the WebRTC transport:
+    # on clips nothing ever asks.
+    if webrtc_enabled():
+        try:
+            await asyncio.to_thread(mic_enabled)
+        except Exception as e:
+            logger.warning(f"Turn-detection check failed: {e}")
+
     # Load models now rather than on the first turn. In the background: the
     # server should accept connections (and pass its health check) while the
     # weights load, not sit unreachable for a minute.
@@ -123,15 +134,20 @@ async def lifespan(app: FastAPI):
 
 
 async def _warm_models() -> None:
-    """Load STT, TTS and the lip-sync worker concurrently. Never raises."""
+    """
+    Load STT, TTS, the lip-sync worker and — where the microphone comes over
+    WebRTC — the turn-detection models, concurrently. Never raises.
+    """
+    from app.services import turn_taking
     from app.services.animator import avatar_animator
     from app.services.stt import stt_service
     from app.services.tts import tts_service
 
     logger.info("Preloading models (PRELOAD_MODELS=true)…")
-    await asyncio.gather(
-        stt_service.warm(), tts_service.warm(), avatar_animator.warm(), return_exceptions=True
-    )
+    warmups = [stt_service.warm(), tts_service.warm(), avatar_animator.warm()]
+    if mic_enabled():
+        warmups.append(turn_taking.warm())
+    await asyncio.gather(*warmups, return_exceptions=True)
     logger.info("Model preload finished")
 
 
@@ -322,6 +338,11 @@ async def health_check(response: Response):
     # aiortc quietly serves clips, and this is where that shows.
     health["media_transport"] = settings.MEDIA_TRANSPORT
     health["webrtc_available"] = WEBRTC_AVAILABLE
+    # Likewise for who takes the turns in hands-free: "smart" configured
+    # without pipecat installed quietly leaves it to the browser. (Only
+    # matters on the webrtc transport; reported regardless.)
+    health["voice_turn_detection"] = turn_detection_mode()
+    health["voice_turn_detection_available"] = turn_taking_installed()
 
     # Only a hard-dependency failure takes the instance out of rotation.
     if health["status"] == "unhealthy":
@@ -414,7 +435,9 @@ async def websocket_endpoint(
     # this frame is what tells it the connection is real.
     # `media` tells it whether a WebRTC offer would be welcome (and with
     # which ICE servers); when it says no, nothing else about the session
-    # differs from before the field existed.
+    # differs from before the field existed. `media.mic` says whether the
+    # server will also take the microphone over that connection and decide
+    # the turns itself.
     await websocket_manager.send_message(session_id, {"type": "ready", "media": media_descriptor()})
     try:
         while True:
@@ -457,6 +480,11 @@ async def websocket_endpoint(
 
             elif msg_type == "webrtc_close":
                 await websocket_manager.handle_webrtc_close(session_id)
+
+            elif msg_type == "mic":
+                # The stream microphone on (after the client attached its
+                # track) or off. Answered with mic_state; never raises.
+                await websocket_manager.handle_mic(session_id, data.get("active"))
 
             elif msg_type == "set_voice":
                 # Accept voice_id only — never a raw filesystem path from the client.

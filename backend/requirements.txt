@@ -42,10 +42,15 @@ boto3==1.40.61
 aioboto3==15.5.0
 
 # WebSocket
-websockets==12.0
+websockets==17.4
 # WebRTC media delivery (MEDIA_TRANSPORT=webrtc; off by default). Pure-Python
 # stack; shares PyAV with faster-whisper and resolves to the same version.
 aiortc==1.16.0
+# Voice-agent framework. Used for its turn-taking components — Silero voice
+# activity detection and the Smart Turn end-of-turn model — rather than
+# re-implementing them. Installing it is what moved numpy (1.26.3 → 1.26.4),
+# websockets, aiofiles and soundfile; nothing in the ML stack changed.
+pipecat-ai[silero,local-smart-turn-v3]==1.16.0
 python-socketio==5.16.2
 
 # AI/ML
@@ -62,7 +67,7 @@ torchaudio==2.2.0
 transformers==4.37.2
 accelerate==0.26.1
 diffusers==0.32.2
-numpy==1.26.3
+numpy==1.26.4
 opencv-python==4.9.0.80
 # 10.2.0 carried 3 advisories; some are only fixed in 12.2+. Safe for the
 # lip-sync path: MuseTalk uses only Image.fromarray/new/open and
@@ -82,7 +87,7 @@ librosa==0.10.1
 # failed on import. Pinned so the environment does not depend on what the
 # venv tool happened to preinstall.
 setuptools>=68,<81
-soundfile==0.12.1
+soundfile==0.13.1
 scipy==1.12.0
 
 # STT
@@ -140,7 +145,7 @@ dnspython>=2.9.0
 
 # Utilities
 httpx==0.26.0
-aiofiles==23.2.1
+aiofiles==25.1.0
 tenacity==8.2.3
 pyyaml==6.0.1
 requests==2.33.0
