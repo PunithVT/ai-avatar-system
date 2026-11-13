@@ -119,6 +119,20 @@ class Settings(BaseSettings):
     LIVEAVATAR_TIMEOUT_SECS: int = 1800
     AVATAR_RESOLUTION: int = 512
     AVATAR_FPS: int = 25
+    # Lip-sync frames onto the WebRTC stream as they are generated, instead
+    # of after the whole sentence has been rendered, encoded to MP4 and
+    # decoded again. Only with MEDIA_TRANSPORT=webrtc and the musetalk engine.
+    #
+    # What it buys is the wait before each sentence's first frame: one batch
+    # of frames instead of all of them plus an encode and a decode. What it
+    # risks is a sentence that starts and then stalls, if the engine produces
+    # frames slower than they are played — so a sentence is only started
+    # early while the engine's measured rate is comfortably above AVATAR_FPS
+    # (see /health -> lipsync_fps); otherwise its frames are held until it is
+    # complete, which is no worse than leaving this off. Off by default: it
+    # has been exercised on CPU, where the engine never keeps up, and not yet
+    # on a GPU, where it is meant to matter.
+    LIPSYNC_PROGRESSIVE: bool = False
     MUSETALK_PATH: str = "models/MuseTalk"
 
     # STT Configuration

@@ -55,6 +55,32 @@ _FAKE_WORKER = textwrap.dedent(
         if "bad" in job["audio"]:
             print(json.dumps({"id": job["id"], "status": "error", "msg": "No face detected"}), flush=True)
             continue
+        if job.get("frames_dir"):
+            # Frames ahead of the result, as the real worker sends them when
+            # asked: FAKE_BATCHES files of 4 frames, 6 high by 8 wide, every
+            # pixel of frame i in batch k holding k*10+i.
+            os.makedirs(job["frames_dir"], exist_ok=True)
+            failed = False
+            for k in range(int(os.environ.get("FAKE_BATCHES", "3"))):
+                data = bytes(v for i in range(4) for v in [k * 10 + i] * (6 * 8 * 3))
+                path = os.path.join(job["frames_dir"], "%06d.bgr" % k)
+                try:
+                    with open(path, "wb") as f:
+                        f.write(data)
+                except OSError as e:
+                    # The parent gave up and removed the directory. Like the
+                    # real worker, that fails the job, not the process.
+                    print(json.dumps({"id": job["id"], "status": "error", "msg": str(e)}), flush=True)
+                    failed = True
+                    break
+                print(json.dumps({"id": job["id"], "status": "frames", "seq": k, "count": 4,
+                                  "height": 6, "width": 8, "path": path}), flush=True)
+                time.sleep(float(os.environ.get("FAKE_BATCH_SECS", "0")))
+            if failed:
+                continue
+            if "latefail" in job["audio"]:
+                print(json.dumps({"id": job["id"], "status": "error", "msg": "CUDA out of memory"}), flush=True)
+                continue
         with open(job["output"], "w") as f:
             f.write(job["audio"])
         print(json.dumps({"id": job["id"], "status": "ok", "output": job["output"]}), flush=True)

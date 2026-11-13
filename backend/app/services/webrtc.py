@@ -483,14 +483,165 @@ class _QueuedClip:
     One clip's place in the queues: where its last frame and its last sample
     sit, counted in frames/samples pushed since the queues were last emptied.
     It has played when both tracks have taken that many.
+
+    A clip being built up batch by batch (see ProgressiveClip) is `open`: its
+    end keeps moving, so it has not played however much of it has been taken,
+    and its token is not the stream's to account for yet. `handle` is that
+    builder, while it is open.
     """
 
-    __slots__ = ("token", "video_end", "audio_end")
+    __slots__ = ("token", "video_end", "audio_end", "open", "handle")
 
     def __init__(self, token: Any, video_end: int, audio_end: int) -> None:
         self.token = token
         self.video_end = video_end
         self.audio_end = audio_end
+        self.open = False
+        self.handle: Optional["ProgressiveClip"] = None
+
+
+def bgr_frames_to_stream(batch: "np.ndarray", size: int) -> list:
+    """
+    A batch of (n, H, W, 3) uint8 BGR pictures as stream frames — the same
+    fit-to-square yuv420p frames decode_clip produces. Blocking.
+    """
+    return [
+        _fit_square(av.VideoFrame.from_ndarray(np.ascontiguousarray(picture), format="bgr24"), size)
+        for picture in batch
+    ]
+
+
+class ProgressiveClip:
+    """
+    One sentence going onto the stream while its picture is still being made.
+
+    The sound is whole from the start; the frames arrive in batches. Each
+    batch is queued with exactly the stretch of sound that belongs under it,
+    so however the batches are timed, a frame and its samples sit at the same
+    point of the stream's timeline.
+
+    Until finish() the clip is the caller's: retire() does not hand it back
+    and a flush does not release its token. After finish() it is an ordinary
+    queued clip. If the caller gives up it calls abort(), and the token never
+    becomes the stream's at all.
+
+    With `buffer_all` nothing is queued until finish(): the frames are only
+    collected. That is for an engine that cannot keep up with playback — a
+    sentence that starts and then stalls mid-word is worse than one that
+    starts a moment later.
+    """
+
+    def __init__(
+        self,
+        stream: "AvatarStream",
+        samples: "np.ndarray",
+        expected_frames: int,
+        token: Any,
+        buffer_all: bool,
+    ) -> None:
+        self._stream = stream
+        self._samples = samples
+        self._cursor = 0
+        self._generation = stream._generation
+        self._record: Optional[_QueuedClip] = None
+        self._held: list = []
+        self.token = token
+        self.buffer_all = buffer_all
+        self.expected_frames = expected_frames
+        self.duration_ms = round(expected_frames * 1000 / stream.fps)
+        # Frames received from the engine, and whether any of this clip has
+        # actually been put on the stream (and so may have been heard).
+        self.frames_pushed = 0
+        self.appended = False
+        # Times the queue ran dry before the engine had delivered the frames
+        # this sentence needs: each one is a stall the listener heard.
+        self.underruns = 0
+        self.done = False
+
+    async def push(self, frames_bgr: "np.ndarray") -> None:
+        """
+        Queue the next batch of frames, (n, H, W, 3) uint8 BGR. Raises what
+        enqueue_clip raises: ClipDropped if the stream was flushed since the
+        clip began, RuntimeError if the stream is finished.
+        """
+        stream = self._stream
+        if self.done:
+            raise RuntimeError("clip is already finished")
+        stream._check_current(self._generation)
+        frames = await asyncio.to_thread(bgr_frames_to_stream, frames_bgr, stream.size)
+        if not frames:
+            return
+        self.frames_pushed += len(frames)
+        if self.buffer_all:
+            stream._check_current(self._generation)
+            self._held.extend(frames)
+            return
+        await stream._wait_for_room(self._generation)
+        # From here to the end of _append there is no await.
+        self._queue(frames)
+
+    def _queue(self, frames: list) -> None:
+        stream = self._stream
+        # A little more than the batch can need; _append takes exactly what
+        # fits under these frames on the timeline and says how much that was.
+        reach = math.ceil(len(frames) * stream._samples_per_frame) + 2
+        piece = self._samples[self._cursor : self._cursor + reach]
+        if self._record is None:
+            record = _QueuedClip(self.token, stream._video_in, stream._audio_in)
+            record.open = True
+            record.handle = self
+            stream._clips.append(record)
+            self._record = record
+        self._cursor += stream._append(frames, piece, clip=self._record)
+        self.appended = True
+
+    async def finish(self) -> None:
+        """
+        No more frames are coming. Queues whatever sound is left (under the
+        idle picture) and hands the clip over to the stream: from here on its
+        token is accounted for like any other clip's.
+        """
+        stream = self._stream
+        if self.done:
+            return
+        stream._check_current(self._generation)
+        if self.buffer_all and self._held:
+            await stream._wait_for_room(self._generation)
+            frames, self._held = self._held, []
+            self._queue(frames)
+        stream._check_current(self._generation)
+        left = self._samples[self._cursor :]
+        if len(left):
+            # Sound with no frame under it: the idle picture for as long as
+            # it runs, as for a clip that is sound only.
+            tail = [stream._idle] * math.ceil(len(left) / stream._samples_per_frame)
+            self._queue(tail)
+        self.done = True
+        if self._record is not None:
+            self._record.open = False
+            self._record.handle = None
+            stream._settle()
+
+    def abort(self) -> None:
+        """
+        Give up on the clip. Nothing more is queued; what already was plays
+        out (or is flushed by whoever is aborting). The token stays the
+        caller's — the stream will neither release it nor hand it back.
+        """
+        if self.done:
+            return
+        self.done = True
+        self._held = []
+        if self._record is not None:
+            self._record.open = False
+            self._record.handle = None
+            self._record.token = _NO_TOKEN
+            self._stream._settle()
+
+
+# The token of a clip the stream is not accounting for (an aborted
+# progressive clip): never released, never handed back.
+_NO_TOKEN = object()
 
 
 class AvatarStream:
@@ -816,9 +967,39 @@ class AvatarStream:
             decode = functools.partial(pcm_clip, source, sample_rate, self.fps, self._idle)
         return await self._enqueue(decode, token)
 
+    async def begin_clip(
+        self, audio_path: str, token: Any = None, *, buffer_all: bool = False
+    ) -> ProgressiveClip:
+        """
+        Start a clip whose picture will arrive in batches (ProgressiveClip).
+        The sentence's whole sound is decoded here, up front. Raises what
+        enqueue_clip raises; nothing is queued yet.
+        """
+        self._check_current(self._generation)
+        generation = self._generation
+        frames, samples = await asyncio.to_thread(
+            decode_clip, os.fspath(audio_path), self.size, self.fps, self._idle, audio_only=True
+        )
+        self._check_current(generation)
+        clip = ProgressiveClip(self, samples, len(frames), token, buffer_all)
+        clip._generation = generation
+        return clip
+
     async def _enqueue(self, decode: Callable[[], tuple], token: Any) -> int:
         """Wait for room, run `decode` in a thread, queue what it returns."""
         generation = self._generation
+        await self._wait_for_room(generation)
+
+        frames, samples = await asyncio.to_thread(decode)
+        # Re-checked here, after the thread: a flush or a failure during the
+        # decode must win. From this line to the end of _append there is no
+        # await.
+        self._check_current(generation)
+        self._append(frames, samples, token)
+        return round(len(frames) * 1000 / self.fps)
+
+    async def _wait_for_room(self, generation: int) -> None:
+        """Wait, cancellably, until less than the cap is queued."""
         while True:
             self._check_current(generation)
             excess = self.queued_seconds - self._max_queue_seconds
@@ -839,15 +1020,19 @@ class AvatarStream:
             finally:
                 timer.cancel()
 
-        frames, samples = await asyncio.to_thread(decode)
-        # Re-checked here, after the thread: a flush or a failure during the
-        # decode must win. From this line to the end of _append there is no
-        # await.
-        self._check_current(generation)
-        self._append(frames, samples, token)
-        return round(len(frames) * 1000 / self.fps)
-
-    def _append(self, frames: list, samples: "np.ndarray", token: Any = None) -> None:
+    def _append(
+        self,
+        frames: list,
+        samples: "np.ndarray",
+        token: Any = None,
+        *,
+        clip: Optional[_QueuedClip] = None,
+    ) -> int:
+        """
+        Queue `frames` with `samples` under them. With `clip`, they extend
+        that (open) clip instead of being a clip of their own. Returns how
+        many of `samples` were used.
+        """
         video, audio = self.video, self.audio
         per_frame = self._samples_per_frame
         if video.position is not None and audio.position is not None:
@@ -883,7 +1068,8 @@ class AvatarStream:
         # offset and put a still frame and a frame of silence in the middle
         # of a sentence. Fitting each clip to the cumulative position keeps
         # the remainder under one sample for ever.
-        want = round(video_end + len(frames) * per_frame) - audio_end
+        want = max(0, round(video_end + len(frames) * per_frame) - audio_end)
+        used = min(want, len(samples))
         if want < len(samples):
             samples = samples[:want]
         elif want > len(samples):
@@ -892,8 +1078,12 @@ class AvatarStream:
         self._video.extend(frames)
         self._video_in += len(frames)
         self._push_audio(samples)
-        self._clips.append(_QueuedClip(token, self._video_in, self._audio_in))
+        if clip is None:
+            self._clips.append(_QueuedClip(token, self._video_in, self._audio_in))
+        else:
+            clip.video_end, clip.audio_end = self._video_in, self._audio_in
         self._set_speaking(True)
+        return used
 
     def _push_audio(self, samples: "np.ndarray") -> None:
         if len(samples):
@@ -931,17 +1121,36 @@ class AvatarStream:
     def _after_take(self) -> None:
         if self.queued_seconds < self._max_queue_seconds:
             self._room.set()
-        if self._speaking and not self._video and not self._audio_samples:
-            self._set_speaking(False)
+        if not self._video and not self._audio_samples:
+            # Ran dry. If a clip is still being built and the engine owes it
+            # frames, the listener just heard it stall.
+            for clip in self._clips:
+                handle = clip.handle
+                if clip.open and handle is not None and handle.appended:
+                    if handle.frames_pushed < handle.expected_frames:
+                        handle.underruns += 1
+        self._settle()
+
+    def _settle(self) -> None:
+        """Release what has played, and notice when speech has run out."""
         # "Played" means handed to the sender — the last few frames are still
         # in the encoder and the browser's jitter buffer. That is as close as
-        # this side can know.
+        # this side can know. An open clip has not played, whatever has been
+        # taken: more of it is coming.
         while self._clips:
             head = self._clips[0]
+            if head.open:
+                break
             if self._video_out < head.video_end or self._audio_out < head.audio_end:
                 break
             self._clips.popleft()
-            self._fire(self.on_clip_released, head.token)
+            if head.token is not _NO_TOKEN:
+                self._fire(self.on_clip_released, head.token)
+        # A clip still being built is speech in progress even while the queue
+        # is momentarily empty between two of its batches.
+        building = any(clip.open for clip in self._clips)
+        if self._speaking and not building and not self._video and not self._audio_samples:
+            self._set_speaking(False)
         if not self._clips:
             self._notify_drained()
 
@@ -951,8 +1160,18 @@ class AvatarStream:
                 waiter.set_result(True)
 
     def _empty_queues(self) -> list:
-        """Drop everything queued. Returns the tokens of the clips dropped."""
-        tokens = [clip.token for clip in self._clips]
+        """
+        Drop everything queued. Returns the tokens of the clips dropped —
+        those the stream was accounting for. A clip still being built is its
+        builder's (who finds out at its next push), and an aborted one is
+        nobody's.
+        """
+        tokens = [
+            clip.token for clip in self._clips if not clip.open and clip.token is not _NO_TOKEN
+        ]
+        for clip in self._clips:
+            clip.open = False
+            clip.handle = None
         self._clips.clear()
         self._video.clear()
         self._audio.clear()

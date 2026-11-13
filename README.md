@@ -572,6 +572,16 @@ server decides when you have started and finished speaking — see
 [Hands-Free Mode](#-hands-free-mode). Push-to-talk and typed messages are
 unchanged.
 
+**Frames as they are generated (`LIPSYNC_PROGRESSIVE=true`, optional).** By
+default a sentence is lip-synced in full, encoded, and only then put on the
+stream. With this on, MuseTalk's frames go onto the stream batch by batch
+while the rest of the sentence is still being generated, so the avatar starts
+moving after the first batch instead of after the last. It only starts early
+when the measured generation speed is comfortably faster than playback
+(15% above the frame rate, from the previous sentence) — otherwise it would
+run dry mid-word — so on a slow GPU or a CPU it quietly keeps the default
+behaviour. `GET /health` reports `lipsync_fps`, the speed it measured.
+
 ---
 
 ## 🙌 Hands-Free Mode
@@ -873,6 +883,7 @@ pytest --cov=app --cov-report=html  # HTML coverage
 - [x] **WebRTC delivery** — one continuous audio/video stream instead of chunked MP4 (opt-in: `MEDIA_TRANSPORT=webrtc`)
 - [x] **WebRTC microphone + semantic turn detection** — hands-free audio on the same connection; Silero VAD + Smart Turn decide turns on the server
 - [x] **Streaming speech-to-text** — words appear as you speak; final transcript ~0.2 s after you stop (opt-in: `STT_STREAMING=sherpa`)
+- [x] **Progressive lip-sync** — frames reach the stream as they are generated (opt-in: `LIPSYNC_PROGRESSIVE=true`; needs a GPU faster than real time)
 - [ ] **Wav2Lip engine** — lighter lip-sync option for weaker GPUs
 - [ ] **Emotion-driven animation** — detected emotion changes facial expression
 - [ ] **Embeddable widget** — drop a talking avatar into any website with 3 lines of JS

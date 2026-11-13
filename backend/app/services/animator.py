@@ -3,12 +3,13 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import torch
 
@@ -17,6 +18,40 @@ from app.config import settings
 TMPDIR = Path(tempfile.gettempdir())
 
 logger = logging.getLogger(__name__)
+
+
+def _kill(proc: asyncio.subprocess.Process) -> None:
+    """
+    Kill the worker, if there is still one to kill. Process.kill() raises
+    ProcessLookupError for a process that has already exited — which is
+    exactly the case in the handler for "the worker exited mid-job", where
+    that error then replaced the one explaining what had happened.
+    """
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _read_frames_file(announcement: dict):
+    """
+    One batch of frames the worker announced: (n, H, W, 3) uint8, BGR. The
+    file is removed once read — it is a hand-over, not a store.
+    """
+    import numpy as np
+
+    path = announcement["path"]
+    n, h, w = int(announcement["count"]), int(announcement["height"]), int(announcement["width"])
+    try:
+        block = np.fromfile(path, dtype=np.uint8)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if block.size != n * h * w * 3:
+        raise ValueError(f"frames file {path} has {block.size} bytes, expected {n * h * w * 3}")
+    return block.reshape(n, h, w, 3)
 
 
 class AvatarAnimator:
@@ -51,6 +86,9 @@ class AvatarAnimator:
         # Set when a start fails; suppresses further attempts for a while.
         self._worker_failed_at: Optional[float] = None
         self._worker_failure: Optional[str] = None
+        # Frames per second the lip-sync worker has actually been producing,
+        # as a moving average over jobs; None until one has been measured.
+        self.lipsync_fps: Optional[float] = None
 
         if self.device == "cuda":
             gpu_name = torch.cuda.get_device_name(0)
@@ -325,14 +363,26 @@ class AvatarAnimator:
             if line.decode(errors="replace").strip() == "READY":
                 return
 
-    async def _read_result(self, proc: asyncio.subprocess.Process, job_id: str) -> dict:
+    async def _read_result(
+        self,
+        proc: asyncio.subprocess.Process,
+        job_id: str,
+        on_frames: Optional[Callable[[Any], Awaitable[None]]] = None,
+        progress: Optional[dict] = None,
+    ) -> dict:
         """
         Read lines until the result for `job_id`.
 
         Anything else is skipped: a result carrying a different id belongs to
         a job whose caller was cancelled while waiting (see _worker_infer),
         and a line that is not JSON is stray output.
+
+        A "frames" line for this job is a batch of finished frames arriving
+        ahead of the result (see musetalk_worker.py). With `on_frames` each
+        batch is read and handed over, in order; reading then carries on to
+        the result. `progress` is filled in with what was delivered.
         """
+        deliver = on_frames is not None
         while True:
             line = await proc.stdout.readline()
             if not line:
@@ -344,12 +394,39 @@ class AvatarAnimator:
             if not isinstance(result, dict) or "status" not in result:
                 continue
             if result.get("id") != job_id:
-                logger.info("Discarding result of an abandoned MuseTalk job")
+                if result.get("status") != "frames":
+                    logger.info("Discarding result of an abandoned MuseTalk job")
                 continue
-            return result
+            if result["status"] != "frames":
+                return result
+            if progress is not None:
+                progress["frames"] = progress.get("frames", 0) + int(result.get("count") or 0)
+                progress["last_frames_at"] = time.monotonic()
+            if not deliver:
+                continue
+            try:
+                batch = await asyncio.to_thread(_read_frames_file, result)
+                await on_frames(batch)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # Whoever is taking the frames cannot take any more (their
+                # stream was flushed, or went away). That is their business,
+                # not the job's: stop handing frames over, but keep reading —
+                # leaving here would abandon the result line in the pipe for
+                # the next job to trip over.
+                logger.info(f"Frame delivery stopped for a MuseTalk job: {e!r}")
+                deliver = False
+                if progress is not None:
+                    progress["delivery_failed"] = e
 
     async def _worker_infer(
-        self, image_path: str, audio_path: str, output_path: str, coord_cache: Optional[str]
+        self,
+        image_path: str,
+        audio_path: str,
+        output_path: str,
+        coord_cache: Optional[str],
+        on_frames: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str:
         """
         Send one job to the persistent worker and await its result.
@@ -370,19 +447,23 @@ class AvatarAnimator:
             # Creating this file tells the worker to drop the job — see
             # _check_cancelled in musetalk_worker.py.
             cancel_file = Path(f"{Path(output_path).resolve()}.cancel")
-            job = (
-                json.dumps(
-                    {
-                        "id": job_id,
-                        "image": str(Path(image_path).resolve()),
-                        "audio": str(Path(audio_path).resolve()),
-                        "output": str(Path(output_path).resolve()),
-                        "coord_cache": coord_cache,
-                        "cancel_file": str(cancel_file),
-                    }
-                )
-                + "\n"
-            )
+            spec = {
+                "id": job_id,
+                "image": str(Path(image_path).resolve()),
+                "audio": str(Path(audio_path).resolve()),
+                "output": str(Path(output_path).resolve()),
+                "coord_cache": coord_cache,
+                "cancel_file": str(cancel_file),
+            }
+            # Only when somebody wants the frames as they are made. Without
+            # this key the worker writes and says nothing extra.
+            frames_dir: Optional[Path] = None
+            if on_frames is not None:
+                frames_dir = Path(f"{Path(output_path).resolve()}.frames")
+                spec["frames_dir"] = str(frames_dir)
+            job = json.dumps(spec) + "\n"
+            progress: dict = {}
+            sent_at = time.monotonic()
 
             # If the worker died (OOM/segfault) its stdin is closed; writing
             # raises BrokenPipeError. Reset the handle so the NEXT job respawns
@@ -391,7 +472,7 @@ class AvatarAnimator:
                 proc.stdin.write(job.encode())
                 await proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                proc.kill()
+                _kill(proc)
                 self._worker_proc = None
                 raise RuntimeError(f"MuseTalk worker pipe is dead: {e}") from e
 
@@ -399,7 +480,7 @@ class AvatarAnimator:
             infer_timeout = 60 if self.device == "cuda" else 300
             try:
                 result = await asyncio.wait_for(
-                    self._read_result(proc, job_id), timeout=infer_timeout
+                    self._read_result(proc, job_id, on_frames, progress), timeout=infer_timeout
                 )
             except asyncio.CancelledError:
                 # Our caller is gone. Tell the worker to stop, so the next
@@ -412,22 +493,66 @@ class AvatarAnimator:
                     pass
                 raise
             except asyncio.TimeoutError:
-                proc.kill()
+                _kill(proc)
                 self._worker_proc = None
                 raise RuntimeError(f"MuseTalk inference timed out after {infer_timeout}s") from None
             except EOFError:
                 # Worker exited mid-job. Reset so the next call respawns
                 # instead of erroring on a half-dead process.
-                proc.kill()
+                _kill(proc)
                 self._worker_proc = None
                 raise RuntimeError("MuseTalk worker exited before returning a result") from None
+            finally:
+                if frames_dir is not None:
+                    # Whatever the outcome. Batches the worker announced but
+                    # nobody read (delivery stopped, cancelled, timed out)
+                    # are still in here.
+                    await asyncio.shield(asyncio.to_thread(shutil.rmtree, str(frames_dir), True))
 
             if result["status"] != "ok":
                 raise RuntimeError(result.get("msg", "Unknown worker error"))
             if not Path(output_path).is_file():
                 raise RuntimeError("MuseTalk worker reported success but wrote no video")
 
+            await self._note_throughput(audio_path, sent_at, progress)
             return output_path
+
+    # How much one job moves the average. Sentences vary a great deal in
+    # length, and a short one is dominated by fixed costs, so no single job
+    # is allowed to decide.
+    _FPS_EMA_WEIGHT = 0.5
+
+    async def _note_throughput(self, audio_path: str, sent_at: float, progress: dict) -> None:
+        """
+        Fold one finished job into `lipsync_fps`.
+
+        With frames delivered as they were made, the rate is those frames
+        over the time to the last batch — the encode that follows is not part
+        of how fast frames appear. Otherwise the worker never says how many
+        frames it made, so the count is taken from the audio's length and the
+        time runs to the result, encode included: a slight underestimate,
+        which is the safe direction for anything deciding whether the engine
+        can keep up with playback.
+        """
+        try:
+            frames = progress.get("frames", 0)
+            if frames:
+                elapsed = progress["last_frames_at"] - sent_at
+            else:
+                import soundfile as sf
+
+                duration = (await asyncio.to_thread(sf.info, audio_path)).duration
+                frames = duration * self.fps
+                elapsed = time.monotonic() - sent_at
+            if frames <= 0 or elapsed <= 0:
+                return
+            rate = frames / elapsed
+            w = self._FPS_EMA_WEIGHT
+            self.lipsync_fps = (
+                rate if self.lipsync_fps is None else (1 - w) * self.lipsync_fps + w * rate
+            )
+        except Exception as e:
+            logger.debug(f"Could not measure lip-sync throughput: {e}")
 
     async def warm(self) -> None:
         """
@@ -474,10 +599,20 @@ class AvatarAnimator:
         audio_path: str,
         output_path: str,
         cache_key: Optional[str] = None,
+        on_frames: Optional[Callable[[Any], Awaitable[None]]] = None,
+        report: Optional[dict] = None,
     ) -> str:
         """
         Animate avatar with audio. Returns path to the generated video.
-        Falls back to simple (static image + audio) on any engine failure.
+        Falls back to simple (static image + audio) on any engine failure —
+        `report["engine"]`, if a dict is passed, says which one made the file
+        that came back.
+
+        `on_frames`, if given, is awaited with each batch of finished frames
+        — an (n, H, W, 3) uint8 BGR array — as the lip-sync engine makes
+        them, before the video file exists. It is never called when the
+        still image is what gets produced, so a caller counts on the returned
+        file and treats the frames as a head start.
         """
         if not self._initialised:
             await self.initialize()
@@ -485,15 +620,21 @@ class AvatarAnimator:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         logger.info(f"Animating [{self.engine}] image={avatar_image_path} audio={audio_path}")
 
+        if report is not None:
+            report["engine"] = self.engine
         try:
             if self.engine == "musetalk":
-                return await self._animate_musetalk(avatar_image_path, audio_path, output_path)
+                return await self._animate_musetalk(
+                    avatar_image_path, audio_path, output_path, on_frames
+                )
             elif self.engine == "liveavatar":
                 return await self._animate_liveavatar(avatar_image_path, audio_path, output_path)
             else:
                 return await self._animate_simple(avatar_image_path, audio_path, output_path)
         except Exception as e:
             logger.error(f"Animation failed ({self.engine}): {e!r}. Falling back to simple.")
+            if report is not None:
+                report["engine"] = "simple"
             return await self._animate_simple(avatar_image_path, audio_path, output_path)
 
     async def still_image_only(self) -> bool:
@@ -541,6 +682,7 @@ class AvatarAnimator:
         avatar_path: str,
         audio_path: str,
         output_path: str,
+        on_frames: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str:
         """Run MuseTalk via persistent worker (models stay loaded between calls)."""
         musetalk_dir: Path = self._musetalk_dir  # type: ignore[assignment]
@@ -550,7 +692,7 @@ class AvatarAnimator:
         coord_cache = str(musetalk_dir / "results" / "coords" / f"{avatar_id}.pkl")
         os.makedirs(os.path.dirname(coord_cache), exist_ok=True)
 
-        await self._worker_infer(avatar_path, audio_path, output_path, coord_cache)
+        await self._worker_infer(avatar_path, audio_path, output_path, coord_cache, on_frames)
 
         logger.info(f"MuseTalk animation done: {output_path}")
         return output_path
