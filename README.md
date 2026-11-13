@@ -137,11 +137,11 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
 |---|---|
 | 🤖 **LLM Backends** | Claude (prompt-cached) · GPT-4o · **Ollama / vLLM / LM Studio (local, free)** |
 | 🎤 **Voice Cloning** | Record 10–60 s → Chatterbox Multilingual zero-shot cloning |
-| 🗣️ **Speech-to-Text** | Whisper (`faster-whisper`, CUDA), decodes browser WebM natively |
+| 🗣️ **Speech-to-Text** | Whisper (`faster-whisper`, CUDA) · optional streaming recognizer (sherpa-onnx) with a running transcript |
 | 🎬 **Lip-Sync Video** | MuseTalk V1.5 persistent worker (30 FPS on GPU) · optional GFPGAN restore · FFmpeg fallback (CPU) |
 | ⚡ **Streaming Pipeline** | Live LLM tokens + per-sentence video chunks over WebSocket |
 | ✋ **Barge-In** | Speak or hit stop mid-reply — in-flight turn cancels in ms |
-| 🔉 **TTS Fallback Chain** | chatterbox (optional, separate venv) → edge-tts (free neural voices) → gTTS — never silent |
+| 🔉 **TTS Engines** | chatterbox (voice cloning; optional, separate venv) · supertonic (local CPU; optional) · edge-tts (free neural voices) → gTTS — never silent |
 | 😊 **Emotion Detection** | Live emotion badges per message |
 | 🌍 **23 Languages** | Whisper multilingual STT + Chatterbox multilingual TTS |
 | 🏠 **Local-First Storage** | `USE_LOCAL_STORAGE=true` — no AWS needed for dev |
@@ -626,6 +626,35 @@ TURN_MAX_WAIT_SECS=3.0
 STT_PARTIALS=auto            # running transcript while you speak (auto = on a GPU)
 ```
 
+### Streaming speech-to-text (optional)
+
+Whisper transcribes an utterance only after it has ended, so the transcript —
+and therefore the reply — starts late, and a "running" transcript means
+re-transcribing everything said so far. A streaming recognizer consumes the
+audio as it arrives instead.
+
+```bash
+bash scripts/setup_streaming_stt.sh     # downloads the model (475 MB)
+```
+
+```env
+STT_STREAMING=sherpa
+```
+
+This runs NVIDIA's Nemotron streaming model through
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), on CPU. Measured on a
+4-core laptop: the first words appear about **0.6 s** after you start
+speaking, and the final transcript is ready about **0.2 s** after you stop
+(Whisper `small` on the same machine: 1.5 s after you stop, and no running
+transcript). It applies to hands-free on the live stream.
+
+It is used for English, Spanish, French, Italian, Portuguese, Dutch, German,
+Turkish, Russian, Arabic, Hindi, Japanese, Korean, Vietnamese and Ukrainian;
+other languages, and any utterance it cannot handle, go to Whisper
+automatically. The model takes about 630 MB of memory, and all decoding shares
+one thread, so under several simultaneous speakers some utterances fall back
+to Whisper rather than queue.
+
 ---
 
 ## 🎤 Voice Cloning
@@ -652,6 +681,17 @@ Every TTS response then uses your cloned voice.
 > neural voices, CPU-only) and then gTTS. Voice cloning is the only feature
 > that requires Chatterbox, so set `TTS_PROVIDER=chatterbox` only once it is
 > actually installed.
+
+**A local voice with no network: `TTS_PROVIDER=supertonic`.** Edge TTS is an
+unofficial Microsoft endpoint: it needs the network and could stop working.
+[Supertonic](https://huggingface.co/Supertone/supertonic-3) runs on your own
+CPU instead — about four times faster than real time on a laptop — and covers
+18 of the 23 languages (Hebrew, Malay, Norwegian, Swahili and Chinese fall
+through to Edge TTS). It does not clone voices. Two things to know before
+shipping it: its weights (about 400 MB, downloaded on first use) are licensed
+**BigScience OpenRAIL-M**, which carries use restrictions you must pass on to
+your users, and its upstream repository was archived in September 2026, so it
+will not receive fixes. That is why it is optional rather than the default.
 
 ```bash
 # REST API
@@ -832,6 +872,7 @@ pytest --cov=app --cov-report=html  # HTML coverage
 - [x] **Hands-free mode** — VAD-driven always-listening with auto end-of-turn (no tap-to-record) ✅
 - [x] **WebRTC delivery** — one continuous audio/video stream instead of chunked MP4 (opt-in: `MEDIA_TRANSPORT=webrtc`)
 - [x] **WebRTC microphone + semantic turn detection** — hands-free audio on the same connection; Silero VAD + Smart Turn decide turns on the server
+- [x] **Streaming speech-to-text** — words appear as you speak; final transcript ~0.2 s after you stop (opt-in: `STT_STREAMING=sherpa`)
 - [ ] **Wav2Lip engine** — lighter lip-sync option for weaker GPUs
 - [ ] **Emotion-driven animation** — detected emotion changes facial expression
 - [ ] **Embeddable widget** — drop a talking avatar into any website with 3 lines of JS

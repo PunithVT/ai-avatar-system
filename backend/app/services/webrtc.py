@@ -23,6 +23,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import time
 from collections import deque
 from typing import Any, Callable, Optional
@@ -243,10 +244,14 @@ def decode_clip(
     fps: int,
     idle: "np.ndarray",
     max_seconds: float = MAX_CLIP_SECONDS,
+    audio_only: bool = False,
 ) -> tuple[list, "np.ndarray"]:
     """
     Decode a clip into (video frames, mono s16 48 kHz samples) of EXACTLY
     equal duration. Blocking — run it in a thread.
+
+    With `audio_only` any picture in the file is ignored and the frames are
+    the idle image, as they are for a file that has no picture.
 
     The equal duration is the point. A muxed clip's audio and video are
     never quite the same length (AAC priming and padding, a last video frame
@@ -269,7 +274,7 @@ def decode_clip(
         # frames are already in memory.
         if container.duration is not None and container.duration > max_seconds * av.time_base:
             raise ValueError(f"clip is longer than {max_seconds:.0f}s")
-        video = next(iter(container.streams.video), None)
+        video = None if audio_only else next(iter(container.streams.video), None)
         audio = next(iter(container.streams.audio), None)
         streams = [s for s in (video, audio) if s is not None]
         if not streams:
@@ -296,20 +301,31 @@ def decode_clip(
         if audio is not None and pcm:
             take_audio(None)  # drain what the resampler is still holding
 
+    if frames and abs(src_fps - fps) > 0.01:
+        # Nearest-earlier source frame for each output tick: duplicates
+        # when the clip is slower than the stream, drops when faster.
+        # Real-time length is what is preserved, not the frame count.
+        n_out = max(1, round(len(frames) * fps / src_fps))
+        last = len(frames) - 1
+        frames = [frames[min(last, int(i * src_fps / fps))] for i in range(n_out)]
+    return _equal_length(frames, pcm, fps, idle)
+
+
+def _equal_length(
+    frames: list, pcm: list, fps: int, idle: "np.ndarray"
+) -> tuple[list, "np.ndarray"]:
+    """
+    The last step of every decode: `frames` and the 48 kHz chunks in `pcm`
+    as (frames, samples) of exactly equal duration. Sound with no picture is
+    given the idle image for as long as it runs — the same object each time,
+    so it costs a list of references, not frames.
+    """
     samples_per_frame = fractions.Fraction(AUDIO_RATE, fps)
-    if frames:
-        if abs(src_fps - fps) > 0.01:
-            # Nearest-earlier source frame for each output tick: duplicates
-            # when the clip is slower than the stream, drops when faster.
-            # Real-time length is what is preserved, not the frame count.
-            n_out = max(1, round(len(frames) * fps / src_fps))
-            last = len(frames) - 1
-            frames = [frames[min(last, int(i * src_fps / fps))] for i in range(n_out)]
-    elif pcm_samples:
-        # Audio only: the face holds still for as long as the audio runs.
+    pcm_samples = sum(len(chunk) for chunk in pcm)
+    if not frames:
+        if not pcm_samples:
+            raise ValueError("clip decoded to nothing")
         frames = [idle] * math.ceil(pcm_samples / samples_per_frame)
-    else:
-        raise ValueError("clip decoded to nothing")
 
     target = round(len(frames) * samples_per_frame)
     out = np.zeros(target, np.int16)
@@ -317,6 +333,35 @@ def decode_clip(
         joined = np.concatenate(pcm)[:target]
         out[: len(joined)] = joined
     return frames, out
+
+
+def pcm_clip(
+    pcm: "np.ndarray",
+    sample_rate: int,
+    fps: int,
+    idle: "np.ndarray",
+    max_seconds: float = MAX_CLIP_SECONDS,
+) -> tuple[list, "np.ndarray"]:
+    """
+    decode_clip for sound that is already in memory: mono samples, int16 or
+    float in [-1, 1], at `sample_rate`. Blocking only for the resample.
+    """
+    samples = np.asarray(pcm).reshape(-1)
+    if sample_rate <= 0 or len(samples) > max_seconds * sample_rate:
+        raise ValueError(f"clip is longer than {max_seconds:.0f}s")
+    if samples.dtype != np.int16:
+        samples = (np.clip(samples.astype(np.float32), -1.0, 1.0) * 32767).astype(np.int16)
+    if sample_rate == AUDIO_RATE:
+        return _equal_length([], [samples], fps, idle)
+    frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
+    frame.sample_rate = sample_rate
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=AUDIO_RATE)
+    chunks = [
+        out.to_ndarray().reshape(-1).copy()
+        for step in (frame, None)  # None drains what the resampler holds back
+        for out in resampler.resample(step)
+    ]
+    return _equal_length([], chunks, fps, idle)
 
 
 # ── tracks ──────────────────────────────────────────────────────────────────
@@ -744,6 +789,35 @@ class AvatarStream:
         whatever the decoder raised if the file cannot be read. In every one
         of those cases nothing of the clip was queued.
         """
+        return await self._enqueue(
+            functools.partial(decode_clip, path, self.size, self.fps, self._idle), token
+        )
+
+    async def enqueue_audio(
+        self, source: Any, token: Any = None, *, sample_rate: int = AUDIO_RATE
+    ) -> int:
+        """
+        Put sound on the stream with the idle picture over it: what a clip
+        from the still-image engine amounts to, without the clip. `source` is
+        an audio file's path, or mono samples in memory at `sample_rate`
+        (int16, or float in [-1, 1]).
+
+        Everything else is enqueue_clip: the same waiting, errors, return
+        value and accounting for `token`, and it shares one timeline with the
+        clips around it. Its length is rounded up to a whole video frame,
+        like any clip's, with silence — which is what keeps the next clip's
+        picture and sound starting together.
+        """
+        if isinstance(source, (str, os.PathLike)):
+            decode = functools.partial(
+                decode_clip, os.fspath(source), self.size, self.fps, self._idle, audio_only=True
+            )
+        else:
+            decode = functools.partial(pcm_clip, source, sample_rate, self.fps, self._idle)
+        return await self._enqueue(decode, token)
+
+    async def _enqueue(self, decode: Callable[[], tuple], token: Any) -> int:
+        """Wait for room, run `decode` in a thread, queue what it returns."""
         generation = self._generation
         while True:
             self._check_current(generation)
@@ -765,9 +839,7 @@ class AvatarStream:
             finally:
                 timer.cancel()
 
-        frames, samples = await asyncio.to_thread(
-            decode_clip, path, self.size, self.fps, self._idle
-        )
+        frames, samples = await asyncio.to_thread(decode)
         # Re-checked here, after the thread: a flush or a failure during the
         # decode must win. From this line to the end of _append there is no
         # await.
