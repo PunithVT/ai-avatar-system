@@ -138,7 +138,27 @@ class Settings(BaseSettings):
     # edge:       Microsoft neural voices. No GPU, no key, no cloning. Pick this
     #             when Chatterbox is not installed.
     # gtts:       Google TTS only (lowest quality; the last-resort fallback).
-    TTS_PROVIDER: str = "chatterbox"  # chatterbox, edge, gtts
+    # supertonic: Supertonic 3 — a local ONNX model on the CPU, so speech needs
+    #             no network (Edge TTS is an unofficial endpoint that can stop
+    #             working, and takes ~0.8 s to answer). Preset voices only,
+    #             no cloning. Speaks ar da de el en es fi fr hi it ja ko nl pl
+    #             pt ru sv tr; sessions in he, ms, no, sw or zh, and any
+    #             sentence with characters it does not know, use the Edge ->
+    #             gTTS chain instead.
+    #             Optional, not the default, for three reasons to accept
+    #             knowingly: its weights (~400 MB) are downloaded from Hugging
+    #             Face on first use, into ~/.cache/supertonic3 or
+    #             SUPERTONIC_CACHE_DIR; they are licensed BigScience
+    #             OpenRAIL-M — royalty-free and redistributable, but with use
+    #             restrictions you must pass on to your own users; and the
+    #             upstream repository is archived, so there will be no fixes.
+    TTS_PROVIDER: str = "chatterbox"  # chatterbox, edge, gtts, supertonic
+    # Supertonic's preset voice: F1-F5 or M1-M5.
+    SUPERTONIC_VOICE: str = "F1"
+    # Denoising steps per sentence — the quality/speed trade. 5 synthesises
+    # at roughly 0.2-0.3x real time on a laptop CPU; the package's own
+    # default of 8 sounds a little cleaner and takes about half as long again.
+    SUPERTONIC_STEPS: int = 5
 
     # Security
     # Union[..., str] lets pydantic-settings keep a non-JSON env value as a
@@ -262,6 +282,38 @@ class Settings(BaseSettings):
     STT_PARTIALS: str = "auto"  # auto | on | off
     # Shorter feels more live and costs proportionally more transcription.
     STT_PARTIAL_INTERVAL_SECS: float = 1.5
+
+    # Streaming speech-to-text for that same microphone (hands-free on the
+    # WebRTC transport, with the server taking the turns). Nothing else uses
+    # it: push-to-talk and the clips transport send recordings, to Whisper.
+    #   off    — default. Whisper transcribes each utterance when it ends.
+    #   sherpa — sherpa-onnx running NVIDIA Nemotron 3.5 ASR Streaming 0.6B.
+    #            The recognizer hears the audio as it arrives, so the user's
+    #            words appear while they speak (a few times a second, on CPU)
+    #            and the final transcript is ready ~0.2 s after the last
+    #            word instead of after a whole Whisper pass. Whisper's
+    #            speculative pass and STT_PARTIALS are not used for these
+    #            utterances.
+    # What it costs: a ~630 MB model held in RAM for the life of the process
+    # (one copy, shared by every session), and CPU for as long as someone is
+    # speaking — about a quarter of real time across STT_STREAMING_THREADS
+    # cores per speaking user. All decoding shares one thread, so a handful
+    # of simultaneous speakers keep up; beyond that, new utterances go to
+    # Whisper rather than queue.
+    # Languages: the model is only used where it is accurate (en, es, fr, it,
+    # pt, nl, de, tr, ru, ar, hi, ja, ko, vi, uk). A session in any other
+    # language keeps using Whisper, as does every utterance if the package
+    # or the model is missing, or the engine fails mid-sentence.
+    STT_STREAMING: str = "off"  # off | sherpa
+    # Downloaded by scripts/setup_streaming_stt.sh (475 MB; not in the
+    # repository or the image). Relative paths are tried as given and then
+    # against backend/, like MUSETALK_PATH.
+    STT_STREAMING_MODEL_DIR: str = (
+        "models/stt/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11"
+    )
+    # Cores one decode may use. More shortens each decode until the machine
+    # runs out of them; the animator and TTS want cores too.
+    STT_STREAMING_THREADS: int = 4
 
     # Guest accounts. "Continue as Guest" mints a real (anonymous) user row
     # so the ordinary per-user ownership checks scope a guest's data to just

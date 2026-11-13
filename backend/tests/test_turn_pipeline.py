@@ -362,6 +362,61 @@ async def test_one_failed_sentence_does_not_lose_the_rest(rig, monkeypatch):
     assert [c["chunk_index"] for c in chunks] == [0, 1, 2]
 
 
+async def test_a_piece_with_nothing_sayable_in_it_is_skipped_not_failed(rig):
+    """
+    A reply's emoji is split off behind its sentence as a piece of its own.
+    There is nothing in it for any engine to say (the local one made a
+    second of noise of it), so it is not synthesised or animated at all.
+    """
+    rig.reply = "That sounds wonderful! 🙂"
+    await rig.manager._handle_text_input_inner("s1", "question")
+
+    chunks = [m for m in rig.socket.sent if m["type"] == "video_chunk"]
+    assert [(c["chunk_index"], c["text"]) for c in chunks] == [(0, "That sounds wonderful!")]
+    assert [e for e in rig.events if e.startswith("tts-start")] == ["tts-start:That s"]
+    assert not [m for m in rig.socket.sent if m["type"] == "error"]
+    assert [m for m in rig.socket.sent if m["type"] == "video_chunk_end"][0]["sent_chunks"] == 1
+    # The text of the reply is untouched: it is only not spoken.
+    said = [m for m in rig.socket.sent if m["type"] == "message"][0]["content"]
+    assert said.strip() == rig.reply
+
+
+async def test_unsayable_pieces_leave_no_gap_in_the_chunk_numbering(rig):
+    queue: asyncio.Queue = asyncio.Queue()
+    for piece in ("One thing here.", "—", "...", "Another thing.", "🙂", "And a third.", None):
+        queue.put_nowait(piece)
+    await rig.manager._animate_from_queue("s1", queue)
+
+    chunks = [m for m in rig.socket.sent if m["type"] == "video_chunk"]
+    assert [(c["chunk_index"], c["text"]) for c in chunks] == [
+        (0, "One thing here."),
+        (1, "Another thing."),
+        (2, "And a third."),
+    ]
+    assert len([e for e in rig.events if e.startswith("tts-start")]) == 3
+    assert not [m for m in rig.socket.sent if m["type"] == "error"]
+    assert rig.socket.sent[-1] == {"type": "video_chunk_end", "sent_chunks": 3}
+
+
+async def test_a_reply_with_nothing_sayable_at_all_is_not_a_failure(rig, tmp_path, monkeypatch):
+    rig.reply = "🙂"
+    await rig.manager._handle_text_input_inner("s1", "question")
+    assert rig.events == [], "nothing was synthesised or animated"
+    assert not [m for m in rig.socket.sent if m["type"] in ("error", "video_chunk")]
+    assert [m for m in rig.socket.sent if m["type"] == "video_chunk_end"][0]["sent_chunks"] == 0
+    assert _session_files(tmp_path) == []
+
+    # Words that could not be spoken are still a failure, and still said to be.
+    async def broken(text, output_path, speaker_wav=None, language="en"):
+        raise RuntimeError("tts blew up")
+
+    monkeypatch.setattr(wsmod.tts_service, "synthesize", broken)
+    rig.reply = "Hello there. 🙂"
+    await rig.manager._handle_text_input_inner("s1", "another question")
+    errors = [m["message"] for m in rig.socket.sent if m["type"] == "error"]
+    assert errors == ["Avatar animation failed for all sentences."]
+
+
 async def test_missing_avatar_image_closes_the_turn_out(rig):
     """Returning silently left the client's spinner up indefinitely."""
     rig.manager.session_data["s1"]["avatar_image_local"] = None

@@ -241,6 +241,14 @@ class TurnDetector:
                                      start now
       on_speech_resumed()          — the speaker carried on after such a
                                      pause; same utterance
+      on_speech_audio(audio)       — the utterance's audio as it arrives,
+                                     for a listener that transcribes while
+                                     the user is still speaking: first the
+                                     pre-roll and the start window in one
+                                     piece (right after on_speech_start),
+                                     then each frame as it is added. Covers
+                                     what on_speech_end will carry, plus any
+                                     silence waited through after its end
       on_speech_progress(audio)    — every `progress_interval_secs` of an
                                      utterance while the user is speaking:
                                      everything heard so far
@@ -293,6 +301,7 @@ class TurnDetector:
         self.on_speech_start: Optional[Callable[[], Any]] = None
         self.on_speech_paused: Optional[Callable[[np.ndarray], Any]] = None
         self.on_speech_resumed: Optional[Callable[[], Any]] = None
+        self.on_speech_audio: Optional[Callable[[np.ndarray], Any]] = None
         self.on_speech_progress: Optional[Callable[[np.ndarray], Any]] = None
         self.on_speech_end: Optional[Callable[[np.ndarray], Any]] = None
 
@@ -503,6 +512,11 @@ class TurnDetector:
                 if self._turn is not None:
                     self._turn.update_vad_start_secs(VAD_START_SECS)
                 await self._emit(self.on_speech_start)
+                # What was heard before speech was confirmed — without it a
+                # live listener would miss the first word. Not if the start
+                # handler reset the detector: the utterance is gone.
+                if self.on_speech_audio is not None and generation == self._generation:
+                    await self._emit(self.on_speech_audio, self._audio())
             else:
                 self._paused = False
                 self._silence_frames = 0
@@ -512,6 +526,10 @@ class TurnDetector:
 
         if self._utterance is not None:
             self._utterance.append(frame)
+            if self.on_speech_audio is not None:
+                await self._emit(self.on_speech_audio, np.frombuffer(frame, dtype=np.int16))
+                if generation != self._generation:
+                    return
         else:
             self._ring.append(frame)
 

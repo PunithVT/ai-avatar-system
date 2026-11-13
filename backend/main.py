@@ -21,6 +21,7 @@ from app.middleware.security import RequestLoggingMiddleware, SecurityHeadersMid
 from app.models import Session as SessionModel
 from app.services.cache import cache_service
 from app.services.storage import storage_service
+from app.services.streaming_stt import streaming_mode, streaming_stt
 from app.services.turn_taking import turn_detection_mode, turn_taking_installed
 from app.services.webrtc import WEBRTC_AVAILABLE, media_descriptor, mic_enabled, webrtc_enabled
 from app.telemetry import init_telemetry
@@ -136,7 +137,8 @@ async def lifespan(app: FastAPI):
 async def _warm_models() -> None:
     """
     Load STT, TTS, the lip-sync worker and — where the microphone comes over
-    WebRTC — the turn-detection models, concurrently. Never raises.
+    WebRTC — the turn-detection models and, if enabled, the streaming
+    recognizer, concurrently. Never raises.
     """
     from app.services import turn_taking
     from app.services.animator import avatar_animator
@@ -147,6 +149,10 @@ async def _warm_models() -> None:
     warmups = [stt_service.warm(), tts_service.warm(), avatar_animator.warm()]
     if mic_enabled():
         warmups.append(turn_taking.warm())
+        # Only the stream microphone uses it; without one it would be
+        # 630 MB of model nobody ever speaks to.
+        if streaming_stt.configured:
+            warmups.append(streaming_stt.warm())
     await asyncio.gather(*warmups, return_exceptions=True)
     logger.info("Model preload finished")
 
@@ -319,7 +325,7 @@ async def health_check(response: Response):
         from app.services.tts import tts_service
 
         services["stt"] = "loaded" if stt_service.model is not None else "lazy (not yet loaded)"
-        services["tts"] = "loaded" if tts_service.model is not None else "lazy (not yet loaded)"
+        services["tts"] = "loaded" if tts_service.loaded else "lazy (not yet loaded)"
     except Exception as e:
         services["stt"] = services["tts"] = f"error: {e}"
 
@@ -343,6 +349,11 @@ async def health_check(response: Response):
     # matters on the webrtc transport; reported regardless.)
     health["voice_turn_detection"] = turn_detection_mode()
     health["voice_turn_detection_available"] = turn_taking_installed()
+    # And for streaming speech-to-text: "sherpa" configured without the
+    # model downloaded quietly leaves every utterance to Whisper. Whether
+    # the package and model files are there, without loading either.
+    health["stt_streaming"] = streaming_mode()
+    health["stt_streaming_available"] = streaming_stt.installed()
 
     # Only a hard-dependency failure takes the instance out of rotation.
     if health["status"] == "unhealthy":

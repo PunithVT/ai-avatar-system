@@ -22,6 +22,13 @@ TTS_PROVIDER picks where the chain starts:
                 the Chatterbox package, which otherwise re-attempted the import
                 and logged an error on every sentence of every reply
     gtts        gTTS only
+    supertonic  Supertonic 3, a local ONNX model on the CPU: no network once
+                its weights are cached, so speech does not depend on an
+                unofficial endpoint staying up. For the languages it does not
+                speak, and any sentence it refuses, the Edge -> gTTS chain
+                above. No voice cloning. Optional rather than the default
+                because of its weights' licence — see SUPERTONIC_VOICE in
+                config.py.
 """
 
 import asyncio
@@ -31,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 import torchaudio
 
@@ -42,7 +50,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SynthResult:
     output_path: str
-    engine: str  # "chatterbox" or "gtts"
+    engine: str  # "chatterbox", "supertonic", "edge-tts" or "gtts"
     fallback: bool  # True if the caller's preferred path was not taken
     voice_cloned: bool  # True if a speaker WAV was actually applied
 
@@ -76,6 +84,44 @@ _EDGE_VOICES = {
     "zh": "zh-CN-XiaoxiaoNeural",
 }
 
+# The app's languages Supertonic 3 speaks. The other five (he, ms, no, sw, zh)
+# go to the Edge chain: the package rejects "zh" outright and has no code for
+# the rest, and its "na" (unknown language) mode is untested guesswork.
+SUPERTONIC_LANGUAGES = frozenset(
+    {
+        "ar", "da", "de", "el", "en", "es", "fi", "fr", "hi",
+        "it", "ja", "ko", "nl", "pl", "pt", "ru", "sv", "tr",
+    }
+)  # fmt: skip
+
+# Supertonic renders at 44.1 kHz. Nothing downstream needs a particular rate
+# — MuseTalk loads its audio at 16 kHz itself, ffmpeg and the stream decoder
+# resample whatever they are given — so the file is written at the rate of
+# the one consumer where time matters: the WebRTC stream (48 kHz), which with
+# the still-image engine takes this file straight onto the audio track.
+SUPERTONIC_OUTPUT_RATE = 48000
+
+
+class NothingToSay(ValueError):
+    """The text has nothing in it that can be spoken; see `sayable`."""
+
+
+def sayable(text: str) -> bool:
+    """
+    Whether there is anything in `text` to say: a letter or a digit, in any
+    script (str.isalnum is true for all of them).
+
+    A reply's last piece is often just an emoji, a dash or "...", split off
+    behind the sentence it decorated. No engine has words for it, and what
+    each does instead is worse than nothing: Supertonic returns 1.3 s of
+    hiss or a grunt that Whisper hears as "And", the networked engines spend
+    a round trip to fail or to read the punctuation's name aloud. Asked here,
+    once, so that no engine is handed such text — and so the pipeline can
+    ask the same question before it makes work of the sentence.
+    """
+    return any(ch.isalnum() for ch in text or "")
+
+
 # Older configs may still say "coqui"/"xtts" (the engine Chatterbox replaced).
 # Treat them as chatterbox instead of breaking every synthesis call.
 _LEGACY_PROVIDER_ALIASES = {"coqui": "chatterbox", "xtts": "chatterbox", "xtts_v2": "chatterbox"}
@@ -106,6 +152,20 @@ class TTSService:
         # voice), and per reference recording for cloned voices.
         self._default_conds = None
         self._conds_cache: dict = {}
+        # Supertonic (TTS_PROVIDER=supertonic): the loaded engine and voice.
+        self._supertonic = None
+        self._supertonic_style = None
+        # Set when it cannot be loaded (package or weights missing, download
+        # failed): found out once, not per sentence, as with Chatterbox.
+        self._supertonic_unavailable = False
+        # One synthesis at a time. Each already spreads over every core, so
+        # two at once finish no sooner and both first sentences arrive late.
+        self._supertonic_lock = threading.Lock()
+
+    @property
+    def loaded(self) -> bool:
+        """Whether the configured local model is in memory (for /health)."""
+        return self.model is not None or self._supertonic is not None
 
     def _check_cuda(self) -> bool:
         try:
@@ -168,12 +228,168 @@ class TTSService:
 
     async def warm(self) -> None:
         """Load the configured model ahead of the first turn. Never raises."""
-        if self.provider != "chatterbox":
-            return
         try:
-            await self.initialize()
+            if self.provider == "supertonic":
+                await self._ensure_supertonic()
+            elif self.provider == "chatterbox":
+                await self.initialize()
         except Exception as e:
             logger.warning(f"TTS warm-up skipped: {e}")
+
+    # ── Supertonic ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_supertonic():
+        """Import and load the engine and the configured voice. Blocking."""
+        from supertonic import TTS
+
+        # Fetches the weights (~400 MB, from Hugging Face) the first time,
+        # into ~/.cache/supertonic3 or SUPERTONIC_CACHE_DIR.
+        engine = TTS(auto_download=True)
+        voice = settings.SUPERTONIC_VOICE
+        try:
+            style = engine.get_voice_style(voice)
+        except Exception as e:
+            # A typo in the voice name should cost the voice, not the engine.
+            logger.warning(f"SUPERTONIC_VOICE={voice!r} could not be loaded ({e}); using F1")
+            style = engine.get_voice_style("F1")
+        return engine, style
+
+    async def _ensure_supertonic(self):
+        """The loaded engine. Raises if it cannot be had — once; see below."""
+        if self._supertonic is not None:
+            return self._supertonic
+        async with self._init_lock:
+            if self._supertonic is not None:
+                return self._supertonic
+            if self._supertonic_unavailable:
+                raise RuntimeError("Supertonic is unavailable")
+            try:
+                logger.info("Loading Supertonic TTS (downloads its weights on first use)...")
+                engine, style = await asyncio.to_thread(self._load_supertonic)
+            except Exception as e:
+                # Not retried: a failed load is a missing package or a failed
+                # 400 MB download, and trying again for every sentence would
+                # put that wait in front of each one.
+                self._supertonic_unavailable = True
+                logger.warning(
+                    f"TTS_PROVIDER=supertonic but the engine could not be loaded ({e}) — "
+                    "using Edge TTS until the server is restarted."
+                )
+                raise
+            self._supertonic_style = style
+            self._supertonic = engine
+            logger.info(f"Supertonic loaded (sr={engine.sample_rate})")
+            return engine
+
+    def _supertonic_sync(self, engine, text: str, language: str) -> np.ndarray:
+        """
+        Synthesise one sentence: mono float32 at SUPERTONIC_OUTPUT_RATE.
+        Blocking. It writes nothing — see _synthesize_supertonic for why the
+        file is a separate step.
+        """
+        import soxr
+
+        with self._supertonic_lock:
+            wav, _ = engine.synthesize(
+                text,
+                voice_style=self._supertonic_style,
+                total_steps=max(1, int(settings.SUPERTONIC_STEPS)),
+                lang=language,
+            )
+        samples = np.asarray(wav, dtype=np.float32).reshape(-1)
+        if not len(samples):
+            raise RuntimeError("Supertonic produced no audio")
+        rate = int(engine.sample_rate)
+        if rate != SUPERTONIC_OUTPUT_RATE:
+            samples = soxr.resample(samples, rate, SUPERTONIC_OUTPUT_RATE)
+        return np.clip(samples, -1.0, 1.0)
+
+    @staticmethod
+    def _write_wav(output_path: str, samples: np.ndarray) -> None:
+        """16-bit mono WAV at SUPERTONIC_OUTPUT_RATE. Blocking."""
+        import soundfile as sf
+
+        sf.write(output_path, samples, SUPERTONIC_OUTPUT_RATE, subtype="PCM_16")
+
+    async def _save_supertonic(self, output_path: str, samples: np.ndarray) -> None:
+        """
+        Write the sentence's file, such that a caller cancelled meanwhile
+        still leaves nothing on disk.
+
+        A thread cannot be stopped: cancelled during the write, the caller
+        cleans up its temp files at once — before this one exists — and the
+        thread then creates it with nobody left to remove it. It is only a
+        few milliseconds wide, but it costs nothing to close: the write is
+        shielded so it can be waited out, and whoever was cancelled leaves
+        behind the instruction to delete what it produces.
+        """
+
+        def remove(done: asyncio.Future) -> None:
+            done.cancelled() or done.exception()  # nobody else will look
+            Path(output_path).unlink(missing_ok=True)
+
+        write = asyncio.ensure_future(asyncio.to_thread(self._write_wav, output_path, samples))
+        try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            write.add_done_callback(remove)
+            raise
+
+    async def _synthesize_supertonic(
+        self, text: str, output_path: str, language: str, wanted_clone: bool
+    ) -> SynthResult:
+        if self._supertonic_unavailable:
+            # Known since an earlier sentence, and logged then. Edge is what
+            # this install speaks with; only a lost cloned voice is news.
+            return await self._synthesize_networked(
+                text, output_path, language, configured="edge", wanted_clone=wanted_clone
+            )
+        lang = (language or "").lower()
+        if lang in SUPERTONIC_LANGUAGES:
+            try:
+                engine = await self._ensure_supertonic()
+                logger.info(f"Synthesizing (supertonic, lang={lang}): {text[:80]}...")
+                # Two steps, as with Chatterbox. Synthesis takes seconds
+                # (and may wait its turn first), and a turn cancelled in
+                # that time — every barge-in — abandons this await while the
+                # thread runs on. When the thread also wrote the file, it
+                # did so after the turn had already cleaned up, and the WAV
+                # stayed for the rest of the session. A cancelled caller
+                # never reaches the second step.
+                samples = await asyncio.to_thread(self._supertonic_sync, engine, text, lang)
+                await self._save_supertonic(output_path, samples)
+                return SynthResult(
+                    output_path=output_path,
+                    engine="supertonic",
+                    # It has no cloning: a cloned voice that was asked for is
+                    # lost, and reported the way the edge engine reports it.
+                    fallback=wanted_clone,
+                    voice_cloned=False,
+                )
+            except ValueError as e:
+                # What the package raises for characters outside its alphabet
+                # (it strips emoji itself; a CJK or Hebrew word inside an
+                # English sentence is the usual cause). This sentence only.
+                logger.warning(f"Supertonic cannot speak this sentence ({e}); using Edge TTS")
+            except Exception as e:
+                if not self._supertonic_unavailable:  # that case is logged where it is found
+                    logger.warning(f"Supertonic failed ({e}), trying Edge TTS fallback")
+        else:
+            # Not a fallback: for this language Edge is where this provider
+            # is configured to go, on every sentence of every reply, and
+            # nothing has failed. Reported as one, the user was told "voice
+            # engine fell back" once per reply for the whole session. As
+            # with an install that has no Chatterbox, it is news only if a
+            # cloned voice was lost or Edge itself fell through to gTTS.
+            logger.info(f"Supertonic does not speak {language!r}; using Edge TTS")
+            return await self._synthesize_networked(
+                text, output_path, language, configured="edge", wanted_clone=wanted_clone
+            )
+        # A sentence it refused or failed on: a real fallback, and said so.
+        return await self._synthesize_networked(
+            text, output_path, language, configured=None, wanted_clone=wanted_clone
+        )
 
     def _generate_sync(self, text: str, language: str, speaker_wav: Optional[str]):
         """
@@ -240,9 +456,18 @@ class TTSService:
             SynthResult describing the WAV path and which engine was used.
             `fallback=True` indicates the preferred Chatterbox path failed
             and gTTS was used instead — voice cloning is lost in that case.
+
+        Raises NothingToSay, before any engine is touched or any file made,
+        for text with no letter or digit in it (see `sayable`).
         """
+        if not sayable(text):
+            raise NothingToSay(f"nothing to say in {text[:40]!r}")
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
+        if self.provider == "supertonic":
+            return await self._synthesize_supertonic(
+                text, output_path, language, wanted_clone=bool(speaker_wav)
+            )
         if self.provider in ("edge", "edge-tts", "gtts"):
             return await self._synthesize_networked(
                 text,
@@ -432,7 +657,7 @@ class TTSService:
 
 
 # Suppress unused-name warning — re-exported for type hints elsewhere
-__all__ = ["TTSService", "SynthResult", "tts_service"]
+__all__ = ["TTSService", "SynthResult", "NothingToSay", "sayable", "tts_service"]
 
 
 # Global instance

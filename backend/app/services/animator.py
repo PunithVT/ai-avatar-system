@@ -496,6 +496,44 @@ class AvatarAnimator:
             logger.error(f"Animation failed ({self.engine}): {e!r}. Falling back to simple.")
             return await self._animate_simple(avatar_image_path, audio_path, output_path)
 
+    async def still_image_only(self) -> bool:
+        """
+        True when animate() is certain to produce the still image with the
+        audio under it — so a caller that can show the still some other way
+        (the WebRTC stream's idle picture) may skip the clip altogether.
+
+        Answered from what is already known, without starting a worker or
+        asking one: the simple engine (configured, or settled on because the
+        lip-sync engine is not installed), or MuseTalk inside the cool-off
+        after a failed start, when _ensure_worker refuses without trying.
+        False whenever lip-sync might still happen, including a worker that
+        has not been started yet or is loading — and a running worker whose
+        job then fails still falls back to the still, through animate().
+        """
+        if not self._initialised:
+            await self.initialize()
+        if self.engine == "simple":
+            return True
+        if self.engine != "musetalk":
+            return False
+        if self._worker_proc is not None and self._worker_proc.returncode is None:
+            return False
+        if self._worker_start is not None and not self._worker_start.done():
+            return False
+        return (
+            self._worker_failed_at is not None
+            and time.monotonic() - self._worker_failed_at < self._WORKER_RETRY_COOLDOWN_SECS
+        )
+
+    async def animate_still(self, avatar_image_path: str, audio_path: str, output_path: str) -> str:
+        """
+        The still-image clip, whatever the configured engine. For audio that
+        was already played (or promised) as a still: rendering it later must
+        not go and wait for a lip-sync worker.
+        """
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        return await self._animate_simple(avatar_image_path, audio_path, output_path)
+
     # ── MuseTalk ──────────────────────────────────────────────────────────────
 
     async def _animate_musetalk(

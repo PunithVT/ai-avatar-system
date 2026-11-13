@@ -92,6 +92,10 @@ scipy==1.12.0
 
 # STT
 faster-whisper>=1.0.0
+# Streaming speech-to-text runtime (STT_STREAMING=sherpa; off by default).
+# Ships its own private onnxruntime, so it does not touch the one above. The
+# model is a separate download: scripts/setup_streaming_stt.sh.
+sherpa-onnx==2.0.1
 
 # TTS
 # NOTE: chatterbox-tts is intentionally NOT pinned here — install it from
@@ -108,6 +112,10 @@ faster-whisper>=1.0.0
 # Edge TTS — free Microsoft neural voices; the default path when Chatterbox is
 # not installed (no API key, no GPU). gTTS remains the last resort.
 edge-tts>=6.1.0
+# Local CPU text-to-speech (TTS_PROVIDER=supertonic; optional, not the
+# default). ONNX only. Weights are fetched on first use and are licensed
+# BigScience OpenRAIL-M — read docs before shipping it in a product.
+supertonic==1.3.1
 gtts==2.5.1
 pydub==0.25.1
 

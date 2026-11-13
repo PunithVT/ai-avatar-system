@@ -21,6 +21,26 @@ from main import app
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
+@pytest.fixture(autouse=True)
+def _lip_sync_engine_by_default(monkeypatch):
+    """
+    Pin what the pipeline is told about the shared animator's engine.
+
+    On a live WebRTC stream the pipeline asks the animator whether its clip
+    would only be the still image, and if so skips the clip. The real answer
+    depends on the machine (is MuseTalk installed?), and the pipeline tests
+    stub animate() on that same object to stand for a lip-sync engine — so
+    they get that engine's answer everywhere. Tests of the still-image path
+    override this.
+    """
+    from app.services.animator import avatar_animator
+
+    async def lip_sync() -> bool:
+        return False
+
+    monkeypatch.setattr(avatar_animator, "still_image_only", lip_sync)
+
+
 @pytest.fixture
 async def test_engine():
     """Fresh in-memory engine + schema for every test (full isolation)."""

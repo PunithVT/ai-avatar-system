@@ -28,8 +28,9 @@ from app.services.llm import (
     llm_service,
 )
 from app.services.storage import storage_service
+from app.services.streaming_stt import streaming_stt
 from app.services.stt import stt_service
-from app.services.tts import tts_service
+from app.services.tts import sayable, tts_service
 from app.services.turn_taking import MAX_UTTERANCE_SECS, SAMPLE_RATE, MicReader, TurnDetector
 from app.services.webrtc import AvatarStream, ClipDropped, mic_enabled, webrtc_enabled
 from app.telemetry import span
@@ -174,11 +175,18 @@ class _StreamClip:
     Kept — file and all — until the stream reports it played, because a clip
     that is queued is not yet a clip that was heard: if the peer connection
     dies first, this is what gets uploaded and sent the ordinary way.
+
+    With the still-image engine there is no clip: the sentence's audio went
+    onto the stream by itself (AvatarStream.enqueue_audio) and `path` is that
+    audio. The MP4 a URL needs is rendered from it, over `image`, only if it
+    ever has to be re-sent.
     """
 
     chunk_index: int
     sentence: str
     path: Path
+    # Set for an audio-only clip: the avatar image to render it over.
+    image: Optional[str] = None
 
 
 @dataclass(eq=False)
@@ -234,7 +242,31 @@ class _Mic:
     # on before its transcript had been sent. Prepended to the utterance now
     # in progress, so the two are transcribed and answered as one.
     carry: Any = None
+    # STT_STREAMING: the streaming recognizer's session for the utterance in
+    # progress, hearing it as it arrives. None when Whisper will transcribe
+    # this utterance (the default). Handed to the turn when the utterance
+    # ends.
+    stream_stt: Any = None
+    # The newest running transcript not yet sent (held back by the rate
+    # limit), and when the last one went out.
+    stream_partial: Optional[str] = None
+    # When the last running transcript went out, on the monotonic clock.
+    # -inf, not 0: that clock counts from boot, so on a machine up for less
+    # than the throttle interval "0" read as "just sent" and held back the
+    # first words of the first utterance.
+    stream_partial_at: float = float("-inf")
 
+
+# Running transcripts from the streaming recognizer (STT_STREAMING) are sent
+# at most this often. The model produces new text about twice a second in
+# real time, but a session catching up (after a stall, or replaying audio it
+# carried over) can produce it many times faster, and each one is a frame on
+# the socket and a re-render in the browser.
+STREAM_PARTIAL_MIN_INTERVAL_SECS = 0.25
+# How long the end of an utterance waits for the streaming recognizer's final
+# text before Whisper is asked instead. Normally it takes a fraction of a
+# second; this is for a decoder that has fallen far behind or stopped.
+STREAM_FINAL_TIMEOUT_SECS = 10.0
 
 _INTERRUPTED = {"type": "interrupted", "message": "Previous response interrupted"}
 _SPEECH_IGNORED = {"type": "user_speech", "state": "stopped", "reason": "ignored"}
@@ -952,14 +984,26 @@ class ConnectionManager:
             # installs a new dict, and its client never saw these announced.
             if data is None or self.session_data.get(session_id) is not data:
                 return
+            rendered: Optional[Path] = None
             try:
-                video_url = await self._upload_clip(session_id, clip.chunk_index, clip.path)
+                video = clip.path
+                if clip.image is not None:
+                    # Audio that was on the stream with no clip behind it.
+                    # animate_still, not animate: it was promised as a still,
+                    # and a lip-sync worker that has become startable since
+                    # must not be waited for here.
+                    video = rendered = clip.path.with_name(f"{clip.path.stem}_resend.mp4")
+                    await avatar_animator.animate_still(clip.image, str(clip.path), str(video))
+                video_url = await self._upload_clip(session_id, clip.chunk_index, video)
             except Exception as e:
                 # One clip lost, not the ones after it.
                 logger.error(
                     f"Could not re-send chunk {clip.chunk_index} as a clip [{session_id}]: {e}"
                 )
                 continue
+            finally:
+                if rendered is not None:
+                    rendered.unlink(missing_ok=True)
             # The same chunk_index it was announced under on the stream, and
             # `resend` so the client plays it without counting or showing a
             # sentence it already has. Whole, even if the stream was part-way
@@ -1377,6 +1421,10 @@ class ConnectionManager:
             session_id, mic, audio
         )
         detector.on_speech_end = lambda audio: self._mic_speech_end(session_id, mic, audio)
+        if streaming_stt.configured:
+            # Only then: the detector reports every frame to this, and with
+            # streaming off there is nobody to hear them.
+            detector.on_speech_audio = lambda audio: self._mic_speech_audio(session_id, mic, audio)
         # The avatar may be mid-sentence already.
         detector.set_avatar_speaking(bool(mic.stream.speaking))
         mic.detector = detector
@@ -1404,6 +1452,9 @@ class ConnectionManager:
         if mic.reader is not None:
             mic.reader.stop_listening()
         self._mic_discard_speculative(mic)
+        # Before anything else of the utterance's: from here not one more
+        # sample is decoded. (One already handed to a turn goes with it.)
+        self._mic_stream_discard(mic)
         turn, mic.turn, mic.turn_audio = mic.turn, None, None
         if turn is not None and not turn.done():
             if self._active_turns.get(session_id) is turn:
@@ -1509,6 +1560,101 @@ class ConnectionManager:
         # the cap together; this is the same cap, to the sample.
         return np.concatenate([mic.carry, audio])[: int(MAX_UTTERANCE_SECS * SAMPLE_RATE)]
 
+    # Streaming speech-to-text (STT_STREAMING=sherpa). Where it applies, an
+    # utterance is heard by a recognizer session while it is being spoken
+    # and Whisper is not called for it at all: no speculative pass, no
+    # re-transcribed partials, and the final text comes from finish().
+
+    def _mic_stream_discard(self, mic: _Mic) -> None:
+        session, mic.stream_stt = mic.stream_stt, None
+        mic.stream_partial = None
+        if session is not None:
+            session.discard()
+
+    def _mic_stream_begin(self, session_id: str, mic: _Mic) -> None:
+        """A recognizer session for the utterance that just started, if it gets one."""
+        self._mic_stream_discard(mic)
+        mic.stream_partial_at = float("-inf")
+        if not streaming_stt.configured:
+            return
+        # Not for a turn that is about to be refused anyway. (A continuation
+        # is the turn already counted.)
+        if mic.carry is None and not self._allow_turn(session_id, consume=False):
+            return
+        language = self.session_data.get(session_id, {}).get("language", "en")
+        # None when the language is not one the model is good at, the engine
+        # is unavailable, or it is already behind: Whisper, as before.
+        session = streaming_stt.open(language)
+        if session is None:
+            return
+        if mic.carry is not None:
+            # A continuation. The session that heard the first part was
+            # closed when its turn began, and a closed stream cannot take
+            # more audio — so this one hears that part again first, from the
+            # audio that was kept. It decodes several times faster than it
+            # was spoken and has caught up long before the speaker finishes.
+            # As a replay, not as live audio: up to half a minute handed
+            # over in one piece is not half a minute of people talking, and
+            # must not be what turns other sessions' new utterances away.
+            session.replay(mic.carry)
+        mic.stream_stt = session
+
+    async def _mic_speech_audio(self, session_id: str, mic: _Mic, audio) -> None:
+        """The next piece of the utterance in progress, as the detector hears it."""
+        session = mic.stream_stt
+        if session is None or not mic.open or not self._mic_live(session_id, mic):
+            return
+        if session.failed:
+            # The rest of this utterance is Whisper's, from the audio the
+            # detector is holding: letting go of the session here puts the
+            # speculative pass and the end of the turn back on that path.
+            logger.warning(f"Streaming transcription failed [{session_id}]; using Whisper")
+            self._mic_stream_discard(mic)
+            return
+        text = session.feed(audio)
+        if text:
+            mic.stream_partial = text
+        if mic.stream_partial is None:
+            return
+        now = time.monotonic()
+        if now - mic.stream_partial_at < STREAM_PARTIAL_MIN_INTERVAL_SECS:
+            # Kept, not dropped: it goes out with a later frame, unless
+            # newer words have replaced it by then.
+            return
+        text, mic.stream_partial = mic.stream_partial, None
+        mic.stream_partial_at = now
+        # Awaited here, on the detector's own task, so it is on the wire
+        # before the detector can report the utterance over: a running
+        # transcript never follows the final one.
+        await self.send_message(session_id, {"type": "transcription", "text": text, "final": False})
+
+    async def _mic_stream_final(self, session_id: str, session) -> Optional[str]:
+        """
+        The streaming recognizer's final transcript, or None when Whisper
+        has to produce it after all (the engine failed, fell behind, or did
+        not answer in time). An empty transcript is returned as it is; what
+        that means is the caller's to say.
+        """
+        # asyncio.wait rather than wait_for, for the reason MicReader.run
+        # gives: wait_for can swallow a cancellation of this task.
+        job = asyncio.ensure_future(session.finish())
+        try:
+            done, _ = await asyncio.wait({job}, timeout=STREAM_FINAL_TIMEOUT_SECS)
+            if not done:
+                raise TimeoutError(f"no final transcript in {STREAM_FINAL_TIMEOUT_SECS:.0f}s")
+            return job.result()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                f"Streaming transcription failed [{session_id}]; using Whisper for this "
+                f"utterance: {type(e).__name__}: {e}"
+            )
+            return None
+        finally:
+            job.cancel()
+            session.discard()
+
     def _mic_turn_over(self, mic: _Mic, task: asyncio.Task) -> None:
         """`task` no longer holds an utterance the microphone could take back."""
         if mic.turn is task:
@@ -1544,6 +1690,9 @@ class ConnectionManager:
                 # The cap is on what will be transcribed, which is both.
                 kept = len(mic.carry) / SAMPLE_RATE
                 mic.detector.set_max_utterance_secs(max(0.0, MAX_UTTERANCE_SECS - kept))
+        # With no await since the detector reported the start: the session
+        # exists before the pre-roll, which the detector reports next.
+        self._mic_stream_begin(session_id, mic)
         await self.send_message(session_id, {"type": "user_speech", "state": "started"})
         # Barge-in is decided here in this mode: the client does not send
         # `interrupt` for speech the server can hear for itself. Same path,
@@ -1561,6 +1710,8 @@ class ConnectionManager:
         if not self._mic_live(session_id, mic):
             return
         self._mic_discard_speculative(mic)
+        if mic.stream_stt is not None:
+            return  # the streaming recognizer has heard it all already
         # Not for a turn that is about to be refused anyway. (A continuation
         # is not charged again, so it is not refused either.)
         if mic.carry is None and not self._allow_turn(session_id, consume=False):
@@ -1583,6 +1734,8 @@ class ConnectionManager:
     async def _mic_speech_progress(self, session_id: str, mic: _Mic, audio) -> None:
         if not self._mic_live(session_id, mic) or not mic.open:
             return
+        if mic.stream_stt is not None:
+            return  # running transcripts come from the streaming recognizer
         # A partial is the lowest priority there is. It never queues — not
         # behind this session's own transcription, and not for one of the
         # shared slots, where it could sit ahead of somebody's final.
@@ -1616,6 +1769,35 @@ class ConnectionManager:
             return
         mic.open = False
         speculative, mic.speculative = mic.speculative, None
+        # The turn's from here; discarded on every path that starts none.
+        stream_stt, mic.stream_stt, mic.stream_partial = mic.stream_stt, None, None
+        # From this line until a turn's task holds it, the session is in
+        # this frame and nowhere else: _mic_stop looks in mic.stream_stt and
+        # finds nothing. Every await on the way can end this handler from
+        # outside — it runs on the reader task, which _mic_drop cancels when
+        # the stream goes down — and a session left behind then would decode
+        # everything queued on it (seconds of it, after a continuation) for
+        # nobody. So leaving any way but with a turn discards it.
+        task: Optional[asyncio.Task] = None
+        try:
+            task = await self._mic_answer(session_id, mic, audio, speculative, stream_stt)
+        finally:
+            if task is None and stream_stt is not None:
+                stream_stt.discard()
+
+    async def _mic_answer(
+        self,
+        session_id: str,
+        mic: _Mic,
+        audio,
+        speculative: Optional[asyncio.Task],
+        stream_stt,
+    ) -> Optional[asyncio.Task]:
+        """
+        Start the turn for the utterance that just closed; None if it gets
+        none. `stream_stt` stays the caller's to discard unless a task comes
+        back.
+        """
         continued = mic.carry is not None
         if continued:
             audio, mic.carry = self._mic_whole(mic, audio), None
@@ -1625,9 +1807,13 @@ class ConnectionManager:
         if not continued and not self._allow_turn(session_id):
             if speculative is not None:
                 speculative.cancel()
+            if stream_stt is not None:
+                # Here, not when the caller gets control back: it would go
+                # on decoding through the two sends below.
+                stream_stt.discard()
             await self._reject_rate_limited(session_id)
             await self.send_message(session_id, _SPEECH_IGNORED)
-            return
+            return None
         # Normally a no-op — speech starting already interrupted. But a typed
         # message can have started a turn while the user was talking. Before
         # "stopped" rather than after it: to the client an `interrupted` ends
@@ -1644,17 +1830,31 @@ class ConnectionManager:
         if not self._mic_live(session_id, mic):
             if speculative is not None:
                 speculative.cancel()
+            if stream_stt is not None:
+                stream_stt.discard()
             # "stopped, turn" has gone out; take it back.
             await self.send_message(session_id, _SPEECH_IGNORED)
-            return
-        task = self._spawn_turn(session_id, self._mic_turn(session_id, mic, audio, speculative))
+            return None
+        task = self._spawn_turn(
+            session_id, self._mic_turn(session_id, mic, audio, speculative, stream_stt)
+        )
         mic.turn, mic.turn_audio = task, audio
         # Also when it is cancelled before it ever runs, which no `finally`
         # inside it would see.
         task.add_done_callback(lambda t: self._mic_turn_over(mic, t))
+        if stream_stt is not None:
+            # Likewise: a turn withdrawn or continued must stop its decoding.
+            # (A no-op once the final text has been produced.)
+            task.add_done_callback(lambda t: stream_stt.discard())
+        return task
 
     async def _mic_turn(
-        self, session_id: str, mic: _Mic, audio, speculative: Optional[asyncio.Task]
+        self,
+        session_id: str,
+        mic: _Mic,
+        audio,
+        speculative: Optional[asyncio.Task],
+        stream_stt=None,
     ) -> None:
         """
         One utterance from the stream microphone, as a turn: transcribe it
@@ -1666,7 +1866,21 @@ class ConnectionManager:
                 {"type": "status", "message": "Transcribing audio…", "stage": "transcription"},
             )
             text: Optional[str] = None
-            if speculative is not None:
+            if stream_stt is not None:
+                # None if the engine let this utterance down; `audio` is the
+                # whole of it, and Whisper takes it below.
+                text = await self._mic_stream_final(session_id, stream_stt)
+                if text is not None and not text.strip():
+                    # No words from this engine is not no words: the model
+                    # regularly returns nothing at all for a single short
+                    # word ("okay", "no") that Whisper reads off the same
+                    # audio, and those are the commonest answers there are.
+                    # So it counts as no answer, and Whisper decides below
+                    # whether this was a word or a cough. (There is no
+                    # speculative pass to use: none is started while a
+                    # streaming session is hearing the utterance.)
+                    text = None
+            if text is None and speculative is not None:
                 try:
                     text = await speculative
                 except asyncio.CancelledError:
@@ -1684,8 +1898,9 @@ class ConnectionManager:
             self._mic_turn_over(mic, asyncio.current_task())
 
             if not text:
-                # The VAD heard a voice and Whisper found no words in it.
-                # Not an error worth showing: in hands-free that is a cough.
+                # The VAD heard a voice and Whisper found no words in it
+                # (with streaming on, neither engine did). Not an error
+                # worth showing: in hands-free that is a cough.
                 await self.send_message(session_id, _SPEECH_IGNORED)
                 return
 
@@ -2197,10 +2412,14 @@ class ConnectionManager:
         # (including between the two stages) leaves nothing behind.
         created: set[Path] = set()
         sent_chunks = 0
+        # Sentences given to the synthesiser, and sentences that had nothing
+        # in them to give it.
+        attempted = unsayable = 0
         # A new turn starts with the choice of transport open again.
         self._url_turns.discard(session_id)
 
         async def synthesize_stage() -> None:
+            nonlocal attempted, unsayable
             try:
                 while True:
                     sentence = await queue.get()
@@ -2208,6 +2427,17 @@ class ConnectionManager:
                         break
                     if session_id not in self.active_connections:
                         continue  # client gone: keep draining, do no work
+                    if not sayable(sentence):
+                        # An emoji, a dash, "..." — usually the tail the
+                        # splitter cut off a finished sentence. There is
+                        # nothing to say, whichever engine is asked (each
+                        # makes a noise or a failure of it), so it is not
+                        # asked: no file, no chunk, no gap in the numbering
+                        # (chunks are numbered as they are sent), and not a
+                        # failure — the user's reply is all there.
+                        unsayable += 1
+                        continue
+                    attempted += 1
                     tmp_audio = session_dir / f"{uuid.uuid4().hex[:12]}_audio.wav"
                     created.add(tmp_audio)
                     try:
@@ -2248,7 +2478,8 @@ class ConnectionManager:
                 sentence, tmp_audio, synth = item
                 tmp_video = session_dir / f"{tmp_audio.stem.split('_')[0]}_video.mp4"
                 created.add(tmp_video)
-                on_stream = False
+                # The file the stream has taken over, if any.
+                held: Optional[Path] = None
                 try:
                     if session_id not in self.active_connections:
                         continue
@@ -2276,12 +2507,43 @@ class ConnectionManager:
                             },
                         )
 
-                    with span("avatar.animate", **{"chunk": sent_chunks}):
-                        await avatar_animator.animate(
-                            avatar_image_path=avatar_image,
-                            audio_path=str(tmp_audio),
-                            output_path=str(tmp_video),
-                        )
+                    duration_ms: Optional[int] = None
+                    may_stream = True
+                    stream = (
+                        None if session_id in self._url_turns else self._live_stream(session_id)
+                    )
+                    if stream is not None and await avatar_animator.still_image_only():
+                        # The clip would be the avatar's still with this audio
+                        # under it — which is what the stream shows anyway.
+                        # Encoding that and decoding it again is delay before
+                        # the first sound and nothing else, so the audio goes
+                        # on by itself. The same rules as for a clip below.
+                        clip = _StreamClip(sent_chunks, sentence, tmp_audio, image=avatar_image)
+                        try:
+                            with span("webrtc.enqueue", **{"chunk": sent_chunks, "audio": True}):
+                                duration_ms = await stream.enqueue_audio(str(tmp_audio), clip)
+                        except ClipDropped:
+                            continue
+                        except Exception as e:
+                            logger.warning(
+                                f"WebRTC enqueue failed, sending chunk {sent_chunks} "
+                                f"as a clip [{session_id}]: {e}"
+                            )
+                            # By URL from here, as when a clip is refused.
+                            may_stream = False
+                            if not stream.connected:
+                                await self._stream_down(session_id, stream)
+                        if duration_ms is not None:
+                            held = tmp_audio
+                            created.discard(tmp_audio)
+
+                    if duration_ms is None:
+                        with span("avatar.animate", **{"chunk": sent_chunks}):
+                            await avatar_animator.animate(
+                                avatar_image_path=avatar_image,
+                                audio_path=str(tmp_audio),
+                                output_path=str(tmp_video),
+                            )
 
                     # Decided per clip, at the moment it is ready — but only
                     # in one direction within a turn. A stream that drops
@@ -2295,9 +2557,10 @@ class ConnectionManager:
                     # instant it is fed, so a streamed sentence after a URL
                     # one would play underneath the clips still queued ahead
                     # of it — silenced, and never heard.
-                    duration_ms: Optional[int] = None
                     stream = (
-                        None if session_id in self._url_turns else self._live_stream(session_id)
+                        None
+                        if held is not None or not may_stream or session_id in self._url_turns
+                        else self._live_stream(session_id)
                     )
                     if stream is not None:
                         clip = _StreamClip(sent_chunks, sentence, tmp_video)
@@ -2324,13 +2587,15 @@ class ConnectionManager:
                                 # way back by the time this one is sent
                                 # behind them. (No-op if that has happened.)
                                 await self._stream_down(session_id, stream)
+                        if duration_ms is not None:
+                            held = tmp_video
+                            created.discard(tmp_video)
 
-                    if duration_ms is not None:
+                    if held is not None:
                         # The stream holds the file now, until it has played
-                        # the clip or given it back (see _StreamClip). No
-                        # await between enqueue_clip returning and here.
-                        created.discard(tmp_video)
-                        on_stream = True
+                        # the clip or given it back (see _StreamClip). There
+                        # was no await between the enqueue returning and
+                        # `created` forgetting it.
                         await self.send_message(
                             session_id,
                             {
@@ -2363,9 +2628,10 @@ class ConnectionManager:
                     logger.error(f"Chunk {sent_chunks} failed [{session_id}]: {e}")
 
                 finally:
-                    for f in (tmp_audio,) if on_stream else (tmp_audio, tmp_video):
-                        f.unlink(missing_ok=True)
-                        created.discard(f)
+                    for f in (tmp_audio, tmp_video):
+                        if f != held:
+                            f.unlink(missing_ok=True)
+                            created.discard(f)
 
         try:
             await asyncio.gather(synthesize_stage(), animate_stage())
@@ -2381,7 +2647,9 @@ class ConnectionManager:
             },
         )
 
-        if sent_chunks == 0:
+        # A reply that was nothing but unsayable pieces (the model answered
+        # with an emoji) has not failed: there was nothing to animate.
+        if sent_chunks == 0 and not (unsayable and not attempted):
             await self.send_message(
                 session_id,
                 {"type": "error", "message": "Avatar animation failed for all sentences."},
