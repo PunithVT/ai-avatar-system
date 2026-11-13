@@ -337,6 +337,11 @@ async def health_check(response: Response):
         from app.services.animator import avatar_animator
 
         health["avatar_engine_state"] = avatar_animator.worker_state()
+        # Whether sentences may start before they are fully rendered, and the
+        # rate that decides it (frames/second, null until a job has run).
+        health["lipsync_progressive"] = settings.LIPSYNC_PROGRESSIVE
+        fps = avatar_animator.lipsync_fps
+        health["lipsync_fps"] = None if fps is None else round(fps, 1)
     except Exception as e:
         health["avatar_engine_state"] = f"error: {e}"
     health["active_ws_sessions"] = len(websocket_manager.active_connections)

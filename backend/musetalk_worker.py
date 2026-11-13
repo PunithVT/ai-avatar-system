@@ -13,9 +13,19 @@ Lifecycle:
   3. Loop: reads one JSON job line {
            "id": ..., "image": ..., "audio": ...,
            "output": ..., "coord_cache": ...,
-           "cancel_file": ...}   <- if this path appears, drop the job
+           "cancel_file": ...,   <- if this path appears, drop the job
+           "frames_dir": ...}    <- optional; see "Frames as they are made"
            runs inference, writes {"id":...,"status":"ok","output":...}\\n
            or {"id":...,"status":"error","msg":...}\\n
+
+Frames as they are made
+A job that names a "frames_dir" also gets its composited frames one UNet
+batch at a time, before the video file exists: each batch is written there as
+<seq:06d>.bgr (raw uint8, BGR, shape (count, height, width, 3)) and announced
+with {"id":...,"status":"frames","seq":k,"count":n,"height":H,"width":W,
+"path":...}\\n. The file is complete when the line is sent (it is written
+under another name and renamed). The MP4 and the final "ok" follow exactly as
+without it. A job with no "frames_dir" writes and says nothing extra.
 
 All paths may be absolute or relative to cwd (the MuseTalk repo root).
 
@@ -308,7 +318,7 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
     coord_list_cycle: List[Any] = coord_list + list(reversed(coord_list))  # type: ignore[operator]
     latent_list_cycle: List[Any] = input_latent_list + list(reversed(input_latent_list))
 
-    # ── UNet inference ───────────────────────────────────────────────────────
+    # ── UNet inference, blended batch by batch ───────────────────────────────
     gen = datagen(
         whisper_chunks=whisper_chunks,
         vae_encode_latents=latent_list_cycle,
@@ -316,36 +326,74 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
         delay_frame=0,
         device=device,
     )
-    res_frame_list = []
+    frames_dir = job.get("frames_dir")
+    if frames_dir:
+        os.makedirs(frames_dir, exist_ok=True)
+
+    # Each batch is composited as soon as it is generated, not after the
+    # whole sentence has been: the frames are the same and in the same order,
+    # but the first of them exist after one batch instead of after all of
+    # them — which is what lets a caller start showing the sentence early.
+    out_frames = []
+    generated = 0  # index into the avatar cycle; counts skipped frames too
+    seq = 0
     for whisper_batch, latent_batch in gen:
         _check_cancelled(job)
         audio_feat = pe(whisper_batch)
         latent_batch = latent_batch.to(dtype=weight_dtype)
         pred = unet.model(latent_batch, timesteps, encoder_hidden_states=audio_feat).sample
-        for f in vae.decode_latents(pred):
-            res_frame_list.append(f)
-
-    # ── blend back ───────────────────────────────────────────────────────────
-    out_frames = []
-    for i, res_frame in enumerate(res_frame_list):
-        if i % 8 == 0:
-            _check_cancelled(job)
-        bbox = coord_list_cycle[i % len(coord_list_cycle)]
-        # .copy(), not deepcopy: an ndarray copy is all that is needed and the
-        # cached source frame must not be drawn on.
-        ori = frame_list_cycle[i % len(frame_list_cycle)].copy()
-        x1, y1, x2, y2 = bbox
-        y2 = min(y2 + EXTRA_MARGIN, ori.shape[0])
-        try:
-            res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
-        except Exception:
-            continue
-        combined = get_image(ori, res_frame, [x1, y1, x2, y2], mode="jaw", fp=fp)
-        out_frames.append(_restore(restorer, combined))
+        batch_frames = []
+        for res_frame in vae.decode_latents(pred):
+            i = generated
+            generated += 1
+            bbox = coord_list_cycle[i % len(coord_list_cycle)]
+            # .copy(), not deepcopy: an ndarray copy is all that is needed and
+            # the cached source frame must not be drawn on.
+            ori = frame_list_cycle[i % len(frame_list_cycle)].copy()
+            x1, y1, x2, y2 = bbox
+            y2 = min(y2 + EXTRA_MARGIN, ori.shape[0])
+            try:
+                res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
+            except Exception:
+                continue
+            combined = get_image(ori, res_frame, [x1, y1, x2, y2], mode="jaw", fp=fp)
+            batch_frames.append(_restore(restorer, combined))
+        out_frames.extend(batch_frames)
+        if frames_dir and batch_frames:
+            _emit_frames(job.get("id"), frames_dir, seq, batch_frames)
+            seq += 1
 
     # ── assemble video ───────────────────────────────────────────────────────
     _check_cancelled(job)
     _encode_video(out_frames, audio_path, output_path)
+
+
+def _emit_frames(job_id, frames_dir: str, seq: int, frames) -> None:
+    """
+    Hand one batch of finished frames to the parent, ahead of the video file.
+
+    Written under a temporary name and renamed, so the file is whole by the
+    time its line is on the protocol channel: the parent reads it the moment
+    it sees the line, and a half-written file would be a torn picture.
+    """
+    h, w = frames[0].shape[:2]
+    same_size = [f if f.shape[:2] == (h, w) else cv2.resize(f, (w, h)) for f in frames]
+    block = np.ascontiguousarray(np.stack(same_size), dtype=np.uint8)
+    path = os.path.join(frames_dir, f"{seq:06d}.bgr")
+    with open(path + ".tmp", "wb") as f:
+        f.write(block.tobytes())
+    os.replace(path + ".tmp", path)
+    _reply(
+        {
+            "id": job_id,
+            "status": "frames",
+            "seq": seq,
+            "count": int(block.shape[0]),
+            "height": int(h),
+            "width": int(w),
+            "path": path,
+        }
+    )
 
 
 def main():

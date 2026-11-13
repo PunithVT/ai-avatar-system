@@ -189,6 +189,22 @@ class _StreamClip:
     image: Optional[str] = None
 
 
+# What _animate_onto_stream reports back.
+_NOT_BEGUN = object()
+_ON_STREAM = object()
+_FALL_BACK = object()
+_PART_HEARD = object()
+_DROPPED = object()
+
+# A sentence is started before its frames are all there only if the lip-sync
+# engine has been producing them this much faster than they are played. The
+# rate is an average over past sentences and the next one may be slower (a
+# busy GPU, a longer sentence), and running out mid-word is audible in a way
+# that starting a moment later is not — hence a margin rather than "at least
+# as fast".
+PROGRESSIVE_FPS_MARGIN = 1.15
+
+
 @dataclass(eq=False)
 class _Mic:
     """
@@ -1020,6 +1036,109 @@ class ConnectionManager:
                 },
             )
             clip.path.unlink(missing_ok=True)
+
+    async def _animate_onto_stream(
+        self,
+        session_id: str,
+        stream: AvatarStream,
+        clip: _StreamClip,
+        avatar_image: str,
+        audio: Path,
+    ) -> object:
+        """
+        Animate one sentence with its frames going onto `stream` as the
+        lip-sync engine produces them. Returns what became of it:
+
+          _NOT_BEGUN   the stream would not take it; nothing was announced
+                       and nothing animated — the caller carries on as if
+                       this had not been tried.
+          _ON_STREAM   on the stream, complete. The clip's file (the MP4 the
+                       engine also wrote) is the stream's now, for recovery,
+                       exactly as after enqueue_clip.
+          _FALL_BACK   announced, but none of it reached the stream (the
+                       engine produced the still image instead, or the stream
+                       went away). The MP4 exists; the caller delivers it.
+          _PART_HEARD  some of it played, then the engine failed.
+          _DROPPED     the user interrupted; it is to be played nowhere.
+
+        Whether frames go on as they arrive or are held until the sentence is
+        complete depends on whether the engine has been keeping up with
+        playback — see PROGRESSIVE_FPS_MARGIN.
+        """
+        rate = avatar_animator.lipsync_fps
+        buffer_all = rate is None or rate < settings.AVATAR_FPS * PROGRESSIVE_FPS_MARGIN
+        try:
+            handle = await stream.begin_clip(str(audio), clip, buffer_all=buffer_all)
+        except ClipDropped:
+            return _DROPPED
+        except Exception as e:
+            logger.warning(f"WebRTC stream would not begin chunk {clip.chunk_index}: {e}")
+            if not stream.connected:
+                await self._stream_down(session_id, stream)
+            return _NOT_BEGUN
+
+        await self.send_message(
+            session_id,
+            {
+                "type": "video_chunk",
+                "chunk_index": clip.chunk_index,
+                "total_chunks": -1,
+                "transport": "webrtc",
+                "text": clip.sentence,
+                "duration_ms": handle.duration_ms,
+            },
+        )
+        report: dict = {}
+        try:
+            with span("avatar.animate", **{"chunk": clip.chunk_index, "progressive": True}):
+                await avatar_animator.animate(
+                    avatar_image_path=avatar_image,
+                    audio_path=str(audio),
+                    output_path=str(clip.path),
+                    on_frames=handle.push,
+                    report=report,
+                )
+        except BaseException:
+            handle.abort()
+            raise
+
+        lip_synced = report.get("engine") == "musetalk"
+        if not handle.frames_pushed or (not lip_synced and not handle.appended):
+            # Nothing of it has been heard: the engine made the still image
+            # after all, or made frames that were only being held.
+            handle.abort()
+            return _FALL_BACK
+        if not lip_synced:
+            handle.abort()
+            logger.warning(
+                f"Lip-sync failed part-way through chunk {clip.chunk_index} "
+                f"[{session_id}]; the rest of the sentence is lost"
+            )
+            return _PART_HEARD
+        try:
+            await handle.finish()
+        except ClipDropped:
+            handle.abort()
+            return _DROPPED
+        except Exception as e:
+            # The stream went down under a sentence that was still being
+            # built. retire() does not hand such a clip back — it was not the
+            # stream's yet — so it is this caller's to deliver, by URL. Whole,
+            # even if part of it was heard: a repeated sentence beats a
+            # missing one, as for any clip recovered from a stream.
+            handle.abort()
+            logger.warning(
+                f"WebRTC stream ended during chunk {clip.chunk_index} [{session_id}]: {e}"
+            )
+            if not stream.connected:
+                await self._stream_down(session_id, stream)
+            return _FALL_BACK
+        if handle.underruns:
+            logger.warning(
+                f"Chunk {clip.chunk_index} stalled {handle.underruns} time(s) on the stream "
+                f"[{session_id}]: frames arrived slower than they were played"
+            )
+        return _ON_STREAM
 
     async def _upload_clip(self, session_id: str, chunk_index: int, path: Path) -> str:
         """Store a clip and return a URL the client can fetch it from."""
@@ -2509,10 +2628,17 @@ class ConnectionManager:
 
                     duration_ms: Optional[int] = None
                     may_stream = True
+                    # Told to the client as a stream clip already (a sentence
+                    # begun before its frames existed). Whatever happens to
+                    # it after that, it is not announced a second time.
+                    announced = False
+                    # The clip was animated already (the progressive path).
+                    animated = False
                     stream = (
                         None if session_id in self._url_turns else self._live_stream(session_id)
                     )
-                    if stream is not None and await avatar_animator.still_image_only():
+                    still = stream is not None and await avatar_animator.still_image_only()
+                    if stream is not None and still:
                         # The clip would be the avatar's still with this audio
                         # under it — which is what the stream shows anyway.
                         # Encoding that and decoding it again is delay before
@@ -2537,7 +2663,34 @@ class ConnectionManager:
                             held = tmp_audio
                             created.discard(tmp_audio)
 
-                    if duration_ms is None:
+                    if settings.LIPSYNC_PROGRESSIVE and stream is not None and not still:
+                        # Frames onto the stream as the engine makes them.
+                        # The sentence is announced when it begins, and every
+                        # exit below leaves it delivered exactly once — or,
+                        # if the user interrupted, not at all.
+                        outcome = await self._animate_onto_stream(
+                            session_id,
+                            stream,
+                            _StreamClip(sent_chunks, sentence, tmp_video),
+                            avatar_image,
+                            tmp_audio,
+                        )
+                        if outcome is _DROPPED:
+                            continue
+                        announced = outcome is not _NOT_BEGUN
+                        animated = announced
+                        if outcome is _ON_STREAM:
+                            duration_ms = 0  # announced with the real figure
+                            held = tmp_video
+                            created.discard(tmp_video)
+                        elif outcome is _PART_HEARD:
+                            # Some of it played and the engine then failed.
+                            # Sending the rest another way would say the
+                            # opening words twice; it counts as delivered.
+                            sent_chunks += 1
+                            continue
+
+                    if duration_ms is None and not animated:
                         with span("avatar.animate", **{"chunk": sent_chunks}):
                             await avatar_animator.animate(
                                 avatar_image_path=avatar_image,
@@ -2596,31 +2749,36 @@ class ConnectionManager:
                         # the clip or given it back (see _StreamClip). There
                         # was no await between the enqueue returning and
                         # `created` forgetting it.
-                        await self.send_message(
-                            session_id,
-                            {
-                                "type": "video_chunk",
-                                "chunk_index": sent_chunks,
-                                "total_chunks": -1,
-                                "transport": "webrtc",
-                                "text": sentence,
-                                "duration_ms": duration_ms,
-                            },
-                        )
+                        if not announced:
+                            await self.send_message(
+                                session_id,
+                                {
+                                    "type": "video_chunk",
+                                    "chunk_index": sent_chunks,
+                                    "total_chunks": -1,
+                                    "transport": "webrtc",
+                                    "text": sentence,
+                                    "duration_ms": duration_ms,
+                                },
+                            )
                     else:
                         self._url_turns.add(session_id)
                         video_url = await self._upload_clip(session_id, sent_chunks, tmp_video)
                         await self._url_clip_may_follow(session_id)
-                        await self.send_message(
-                            session_id,
-                            {
-                                "type": "video_chunk",
-                                "chunk_index": sent_chunks,
-                                "total_chunks": -1,
-                                "video_url": video_url,
-                                "text": sentence,
-                            },
-                        )
+                        by_url = {
+                            "type": "video_chunk",
+                            "chunk_index": sent_chunks,
+                            "total_chunks": -1,
+                            "video_url": video_url,
+                            "text": sentence,
+                        }
+                        if announced:
+                            # Already announced on the stream under this
+                            # index: the client must play it without taking
+                            # it for a new sentence, as with any clip that
+                            # comes back from a stream.
+                            by_url["resend"] = True
+                        await self.send_message(session_id, by_url)
                     sent_chunks += 1
                     logger.info(f"Chunk {sent_chunks} ready [{session_id}]")
 
